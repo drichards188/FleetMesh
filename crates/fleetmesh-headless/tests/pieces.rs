@@ -1,0 +1,147 @@
+//! The simulator's own pieces (the episode as a whole is tested from Python,
+//! eval/headless/tests/test_episode.py): the baked terrain grid, and the SATCOM look cache that
+//! must answer the same whether it held a look or not.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use fleetmesh_headless::sim::space_cache::{CachedSpace, QUANT_DEG};
+use fleetmesh_headless::sim::terrain::Grid;
+use fleetmesh_linkemu::geo::GeoPoint;
+use fleetmesh_linkemu::sat::{BestSat, Outlook, SatObs, SpaceSource};
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A tool result reads as the live session reads it (agents/scripted_agent.py `content`).
+#[test]
+fn a_tool_result_reads_as_the_live_session_reads_it() {
+    use fleetmesh_headless::sim::tool_result_json;
+    use serde_json::json;
+    let structured = json!({"structuredContent": {"a": 1}, "content": [{"type": "text", "text": "{\"b\": 2}"}]});
+    assert_eq!(tool_result_json(&structured), json!({"a": 1}));
+    let text_json = json!({"content": [{"type": "text", "text": "{\"b\": 2}"}]});
+    assert_eq!(tool_result_json(&text_json), json!({"b": 2}));
+    let text = json!({"content": [{"type": "image", "data": ""}, {"type": "text", "text": "not json"}]});
+    assert_eq!(tool_result_json(&text), json!({"text": "not json"}));
+    assert_eq!(tool_result_json(&json!({"content": []})), json!({}));
+}
+
+#[test]
+fn the_grid_has_the_presidio_and_the_strait() {
+    if !repo().join("sim/headless/terrain/golden-gate.grid.gz").exists() {
+        eprintln!("skipped: sim/headless/terrain is not built (MANIFEST: rebuilt after the engine)");
+        return;
+    }
+    let g = Grid::load(&repo().join("sim/headless/terrain/golden-gate.grid.gz")).expect("grid");
+    // tidewater answered 53.8 m at (37.80, -122.47) and the water level (0.44 m) mid-strait (on
+    // the terrain fixed by murmur-cbjn; the squeezed grid before it gave 81.1 m there)
+    let land = g.height(37.80, -122.47).expect("land");
+    assert!((land - 53.8).abs() < 8.0, "{land}");
+    let sea = g.height(37.82, -122.48).expect("sea");
+    assert!((sea - 0.44).abs() < 0.2, "{sea}");
+    assert_eq!(g.height(37.0, -122.47), None, "outside the grid");
+}
+
+/// World v3: the Golden Gate's land/water grid and current field as the water reads them. In
+/// the strait at 10:00Z the ebb runs west at a knot or more (tidewater answered -1.79 east,
+/// 0.46 north at the bridge); Crissy Field is land; nothing outside the field; a current step
+/// is the current while it lasts.
+#[test]
+fn the_world_water_reads_the_baked_grids() {
+    if !repo().join("sim/headless/terrain/golden-gate.grid.gz").exists() {
+        eprintln!("skipped: sim/headless/terrain is not built (MANIFEST: rebuilt after the engine)");
+        return;
+    }
+    use fleetmesh_headless::sim::spec::WaterSpec;
+    use fleetmesh_headless::sim::water::{CurrentField, Water};
+    let t = 1_781_431_200.0; // 2026-06-14T10:00:00Z
+    let f = CurrentField::load(&repo().join("sim/headless/terrain/golden-gate.currents.gz")).expect("field");
+    let (e, n) = f.at(37.8199, -122.4783, t).expect("the bridge");
+    assert!(e < -1.0 && e > -2.6 && n.abs() < 1.0, "{e} {n}");
+    // between two hourly steps the current is between them
+    let (a, b) = (f.at(37.8199, -122.4783, t).expect("a").0, f.at(37.8199, -122.4783, t + 3600.0).expect("b").0);
+    let mid = f.at(37.8199, -122.4783, t + 1800.0).expect("mid").0;
+    assert!((mid - (a + b) / 2.0).abs() < 1e-9, "{a} {mid} {b}");
+    assert_eq!(f.at(37.0, -122.48, t), None, "outside the field");
+    let surface = Arc::new(Grid::load(&repo().join("sim/headless/terrain/golden-gate.grid.gz")).expect("grid"));
+    let spec = WaterSpec {
+        currents: Some(repo().join("sim/headless/terrain/golden-gate.currents.gz")),
+        land_water: Some(repo().join("sim/headless/terrain/golden-gate.water.grid.gz")),
+        wind_en: Some([1.0, -2.0]),
+    };
+    let w = Water::load(&spec, Some(surface)).expect("water");
+    let sea = w.sample(37.8199, -122.4783, t);
+    let depth = sea.water_depth_m.expect("depth");
+    assert!(depth > 50.0, "the channel under the bridge: {depth}");
+    assert!((sea.water_level_m.expect("level") - sea.elevation_m.expect("bed") - depth).abs() < 1e-9);
+    assert!(sea.navigable(5.0) && sea.current_east.is_some_and(|c| c < -1.0));
+    assert_eq!((sea.wind_east, sea.wind_north), (Some(1.0), Some(-2.0)));
+    let land = w.sample(37.8060, -122.4480, t);
+    assert!(!land.navigable(0.1) && land.surface_m().is_some_and(|s| s > 1.0), "{land:?}");
+    assert_eq!((land.current_east, land.current_north), (Some(0.0), Some(0.0)));
+    assert_eq!(w.sample(37.0, -122.48, t).elevation_m, None, "out of the area");
+    // a current step in place of the field, while it lasts
+    w.set_uniform(1.5, 0.5, t + 10.0, Some(60.0));
+    assert_eq!(w.current(37.8199, -122.4783, t + 20.0), Some((1.5, 0.5)));
+    assert_eq!(w.current(37.8199, -122.4783, t + 75.0), f.at(37.8199, -122.4783, t + 75.0));
+    assert_eq!(w.current(37.0, -122.48, t + 20.0), Some((1.5, 0.5)), "uniform everywhere");
+    assert_eq!(Water::still().current(37.8199, -122.4783, t), None, "still water: none, as before world v3");
+}
+
+/// A source whose answer is a function of where and when it is asked, and that counts asks.
+struct Fake(AtomicU64);
+
+impl SpaceSource for Fake {
+    fn check(&self, _: &str, _: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn sample(&self, _: &str, pos: &GeoPoint, unix_s: f64) -> Result<SatObs, String> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(SatObs {
+            visible: 3,
+            best: Some(BestSat {
+                norad_id: 7,
+                name: "S".into(),
+                elevation_deg: pos.lat * 1000.0 + pos.lon,
+                range_km: unix_s,
+            }),
+            latency_ms: Some(pos.alt_m),
+        })
+    }
+    fn outlook(&self, _: &str, _: &GeoPoint, _: f64, _: f64) -> Result<Outlook, String> {
+        Ok(Outlook::default())
+    }
+}
+
+#[test]
+fn a_cached_look_is_the_look_it_would_have_computed() {
+    let dir = std::env::temp_dir().join(format!("fleetmesh-headless-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = dir.join("c.jsonl");
+    let p = GeoPoint { lat: 37.82013, lon: -122.47044, alt_m: 3.0 };
+    let near = GeoPoint { lat: 37.82021, lon: -122.47049, alt_m: 12.0 };
+    let fresh = Arc::new(Fake(AtomicU64::new(0)));
+    let a = CachedSpace::new(fresh.clone(), Some(file.clone()));
+    let x = a.sample("starlink", &p, 1000.0).expect("look");
+    let y = a.sample("starlink", &near, 1000.0).expect("look");
+    assert_eq!(x, y, "both round to the same point");
+    assert_eq!(fresh.0.load(Ordering::Relaxed), 1);
+    // computed at the rounded point, not the exact one
+    let e = x.best.as_ref().expect("best").elevation_deg;
+    let want = (37.82013f64 / QUANT_DEG).round() * QUANT_DEG * 1000.0 + (-122.47044f64 / QUANT_DEG).round() * QUANT_DEG;
+    assert!((e - want).abs() < 1e-9, "{e} {want}");
+    a.save();
+    // a later episode: from the file, the same answer, nothing computed
+    let later = Arc::new(Fake(AtomicU64::new(0)));
+    let b = CachedSpace::new(later.clone(), Some(file));
+    assert_eq!(b.sample("starlink", &p, 1000.0).expect("look"), x);
+    assert_eq!(later.0.load(Ordering::Relaxed), 0);
+    // another instant is another look
+    let z = b.sample("starlink", &p, 1005.0).expect("look");
+    assert_ne!(z, x);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

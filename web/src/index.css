@@ -1,0 +1,325 @@
+:root {
+  --bg: #0b0f14;
+  --panel: #10161d;
+  --panel-2: #151d26;
+  --line: #233040;
+  --text: #d7dde4;
+  --muted: #7d8b9a;
+  --accent: #ffb347;
+  --air: #7fb8ff;
+  --sea: #6fe0c4;
+  --ok: #5fd38d;
+  --warn: #f2c14e;
+  --bad: #ff5d5d;
+  --violet: #c49bff;
+  /* Type (bd murmur-iobd, 2026-11-24): two families by role and four sizes by role, used only
+     through these. The UI face sets every word (labels, headings, sentences, buttons, banners); the
+     data face only data: ids, callsigns shown as data, times and clocks, coordinates, numbers that
+     must align. Sizes are rem, so they follow the browser's own text size. */
+  --font-ui: 'IBM Plex Sans Condensed', 'Arial Narrow', system-ui, sans-serif;
+  --font-data: 'IBM Plex Mono', ui-monospace, monospace;
+  --text-label: 0.75rem;   /* 12 px: labels, captions, tags, the small-caps section label */
+  --text-body: 0.875rem;   /* 14 px: rows, card text, form fields, buttons */
+  --text-title: 1rem;      /* 16 px: card and panel titles, the key line of a card */
+  --text-heading: 1.25rem; /* 20 px: the few real headings */
+  --leading-label: 1.3;
+  --leading-body: 1.4;
+  --leading-title: 1.25;
+  --leading-heading: 1.2;
+  /* the one small-caps style: uppercase, --text-label, weight 600 and this tracking; tracking is
+     only ever on uppercase */
+  --caps-tracking: 0.06em;
+  /* the main menu's names for the two families (menu.css and its backdrop read them) */
+  --mono: var(--font-data);
+  --sans: var(--font-ui);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: var(--text-body)/var(--leading-body) var(--font-ui); -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; cursor: pointer; }
+/* form fields take the type of where they sit, never the browser's own */
+input, select, textarea { font: inherit; }
+/* three weights: regular, medium, semibold (bold is semibold) */
+b, strong, th, h1, h2, h3, h4, h5, h6 { font-weight: 600; }
+button:disabled { cursor: not-allowed; }
+code { font-family: var(--font-data); font-size: var(--text-label); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+
+.app {
+  display: grid;
+  grid-template-columns: 340px 1fr 340px;
+  grid-template-rows: 44px 1fr;
+  grid-template-areas: 'top top top' 'fleet map task';
+  height: 100vh;
+}
+
+/* top bar */
+.topbar { grid-area: top; display: flex; align-items: center; gap: 18px; padding: 0 16px; border-bottom: 1px solid var(--line); background: #0d1218; }
+.brand { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.spacer { flex: 1; }
+/* the glance line (topbar.ts): quiet; colour only for ours in trouble */
+.glance { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--text-body); white-space: nowrap; }
+.glance b { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); margin-right: 3px; }
+.glance .bad { color: var(--bad); }
+.glance .warn { color: var(--warn); }
+.trouble { border: 1px solid currentColor; background: none; border-radius: 3px; padding: 1px 7px; font: 600 var(--text-body)/var(--leading-title) var(--font-ui); font-variant-numeric: tabular-nums; color: var(--muted); }
+.trouble.bad { color: var(--bad); }
+.trouble.warn { color: var(--warn); }
+.trouble:hover { background: #1a222c; }
+.pill { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; padding: 4px 8px; border-radius: 3px; border: 1px solid currentColor; }
+.pill.down { color: var(--bad); }
+.pill.connecting { color: var(--warn); }
+.clock { font: 500 var(--text-body)/var(--leading-body) var(--font-data); font-variant-numeric: tabular-nums; color: var(--text); min-width: 76px; text-align: right; white-space: nowrap; }
+
+/* panels */
+.panel { background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.fleet { grid-area: fleet; border-right: 1px solid var(--line); }
+/* right column: the task panel, which keeps at least TASK_MIN */
+.rail { grid-area: task; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); position: relative; }
+.rail > .tasking { flex: 1 1 0; min-height: 300px; }
+.tasking { grid-area: task; border-left: 1px solid var(--line); }
+.rail > .tasking { grid-area: auto; border-left: 0; }
+
+/* a row revealed from outside its list (map click, inbox): marked for a moment, on top of .sel */
+@keyframes reveal-flash {
+  0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 10px 1px rgba(240, 180, 60, .55); background-color: #3a3118; }
+  100% { box-shadow: inset 0 0 0 2px transparent, 0 0 0 0 transparent; }
+}
+.vrow.flash { animation: reveal-flash 1.2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .vrow.flash { animation: none; box-shadow: inset 0 0 0 2px var(--accent); }
+}
+.panel-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
+.panel-head.sub { border-top: 1px solid var(--line); }
+.panel-head h2 { margin: 0; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.panel-head .muted { margin-left: auto; text-align: right; font-size: var(--text-label); }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); padding: 8px 16px; font-size: var(--text-body); }
+
+.seg { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button { background: none; border: 0; padding: 4px 10px; font-size: var(--text-body); color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { color: var(--text); background: var(--panel-2); }
+.seg button.on { color: var(--bg); background: var(--accent); }
+.seg.wide { margin: 0; }
+.seg.wide button { flex: 1; padding: 8px 0; font-size: var(--text-body); font-weight: 600; }
+
+/* fleet list */
+.vlist { overflow-y: auto; padding: 0 8px 12px; flex: 1; min-height: 0; }
+/* windowed (FleetPanel.tsx): fixed heights, ROW_H and HEAD_H there */
+.vlist-inner { position: relative; }
+.vlist-item { position: absolute; left: 0; right: 0; height: 56px; }
+.vlist-item > .vrow { height: 100%; overflow: hidden; }
+.vlist h3 { position: absolute; left: 0; right: 0; height: 32px; box-sizing: border-box; margin: 0; padding: 10px 6px 6px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.vlist h3 span { font-family: var(--font-data); color: var(--text); margin-left: 6px; }
+.vrow { display: flex; align-items: stretch; border: 1px solid transparent; border-radius: 4px; }
+.vrow-select {
+  flex: 0 0 30px; display: flex; align-items: center; justify-content: center; padding: 0;
+  background: none; border: none; border-right: 1px solid var(--line); border-radius: 4px 0 0 4px; cursor: pointer;
+}
+.vrow-select:hover { background: #1d2a38; }
+/* its tick is a glyph of the 15 px box: its size is the box's, not the type scale's */
+.vrow-box {
+  width: 15px; height: 15px; border: 1.5px solid var(--muted); border-radius: 3px;
+  display: flex; align-items: center; justify-content: center; font: 600 11px var(--font-ui); color: #10161d;
+}
+.vrow-select:hover .vrow-box { border-color: var(--accent); }
+.vrow.sel .vrow-select { background: #2a2414; }
+.vrow.sel .vrow-box { background: var(--accent); border-color: var(--accent); }
+.vrow-body {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: 26px 1fr; column-gap: 8px;
+  align-items: center; text-align: left; background: none; border: none; border-radius: 0 4px 4px 0; padding: 7px 8px; cursor: pointer;
+}
+.vrow-body:hover { background: var(--panel-2); }
+.vrow.open { border-color: #5b7088; }
+.vrow.open .vrow-body { background: var(--panel-2); }
+.vrow.sel { background: #1a2532; border-color: #33475d; }
+.vrow-sym { display: flex; justify-content: center; }
+.vrow-sym svg { width: 26px; height: auto; }
+/* two lines, each clipped to the row: the callsign (never shrinks) and its exception slot, then
+   what it is doing */
+.vrow-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; overflow: hidden; }
+.vrow-name { font: 600 var(--text-body)/var(--leading-title) var(--font-data); display: flex; align-items: baseline; gap: 6px; white-space: nowrap; min-width: 0; overflow: hidden; }
+.vrow-call { flex-shrink: 0; }
+.vrow-name > :not(.vrow-call) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.vrow-short { font: 500 var(--text-label)/var(--leading-label) var(--font-ui); color: var(--accent); border: 1px solid #4a3a1f; border-radius: 3px; padding: 0 4px; }
+.vrow-mode { min-width: 0; font-size: var(--text-body); line-height: var(--leading-title); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the one exception slot (vehicleException.ts): the only colour on the row */
+.vrow-exc { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; font-variant-numeric: tabular-nums; border-radius: 3px; padding: 1px 5px; }
+.vrow-exc.bad { color: #1a0808; background: var(--bad); }
+.vrow-exc.warn { color: #1d1405; background: var(--warn); }
+.vrow-exc.settled { color: var(--text); background: #3a4350; }
+.vrow.stale .vrow-call, .vrow.stale .vrow-mode { opacity: 0.55; }
+
+/* map */
+.mapwrap { grid-area: map; position: relative; min-width: 0; }
+.mapwrap > .map { position: absolute; inset: 0; }
+/* over the floating panels (floating.css): a panel never hides that the console is not live */
+.banner { position: absolute; z-index: 8; top: 12px; left: 50%; transform: translateX(-50%); background: #2a1416; border: 1px solid var(--bad); color: #ffd6d6; padding: 8px 14px; border-radius: 4px; font-size: var(--text-body); }
+/* bottom right, clear of the weather legend (bottom left, always shown) and the zoom buttons */
+.perf {
+  position: absolute; right: 52px; bottom: 34px; z-index: 13; pointer-events: none;
+  font: var(--text-label)/var(--leading-label) var(--font-data); color: var(--text); background: rgba(16,22,29,.88); border: 1px solid var(--line);
+  padding: 6px 9px; border-radius: 4px;
+}
+.map.gl-lost { pointer-events: none; }
+/* clear of the details card on the map's left */
+.banner.gl-banner { left: auto; right: 16px; transform: none; max-width: 420px; }
+.vtip {
+  position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none;
+  font: 600 var(--text-label)/1 var(--font-data); color: var(--text); background: rgba(16,22,29,.92); border: 1px solid var(--line);
+  padding: 3px 6px; border-radius: 3px; white-space: nowrap;
+}
+.vtip[hidden] { display: none; }
+/* a part of the console that crashed (ErrorBoundary): compact, with a retry */
+.crash {
+  display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 12px;
+  background: #2a1416; border: 1px solid var(--bad); color: #ffd6d6; border-radius: 4px; font-size: var(--text-body);
+}
+.crash-what { font-weight: 600; white-space: nowrap; }
+.crash-msg { font: var(--text-label)/var(--leading-label) var(--font-data); color: #f3b3b3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.crash.floating { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 8; max-width: 70%; }
+.crash.slot { margin: 10px; align-self: start; }
+.maplibregl-ctrl-group { background: var(--panel) !important; }
+.maplibregl-ctrl-group button + button { border-top-color: var(--line) !important; }
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter: invert(0.85); }
+.maplibregl-ctrl-scale { background: rgba(16,22,29,.8); color: var(--text); border-color: var(--muted); }
+
+/* task form */
+.taskform { display: flex; flex-direction: column; gap: 10px; padding: 0 14px 14px; }
+.hint { margin: 0; font-size: var(--text-body); color: var(--muted); }
+.slider { display: grid; grid-template-columns: 54px 1fr 64px; align-items: center; gap: 8px; font-size: var(--text-body); color: var(--muted); }
+.slider input { accent-color: var(--accent); }
+.slider output { font: var(--text-body)/var(--leading-body) var(--font-data); color: var(--text); text-align: right; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row .muted { flex: 1; font-size: var(--text-body); }
+.ghost { background: none; border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; font-size: var(--text-body); }
+.ghost:disabled { opacity: 0.4; }
+.primary { background: var(--accent); color: #1a1205; border: 0; border-radius: 4px; padding: 10px; font-weight: 600; }
+.primary:disabled { background: var(--panel-2); color: var(--muted); }
+.error { margin: 0; color: var(--bad); font-size: var(--text-body); }
+
+/* command log */
+.log { overflow-y: auto; padding: 0 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.tcard { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
+.tcard-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; font: var(--text-title)/var(--leading-title) var(--font-ui); }
+/* beside the card's title: its vehicles counted, at the label size */
+.tcard-head .muted { font-size: var(--text-label); }
+.op { display: grid; grid-template-columns: 96px 1fr; column-gap: 8px; row-gap: 2px; padding: 4px 0; border-top: 1px solid #1c2733; }
+.op-name { font: 600 var(--text-body)/var(--leading-body) var(--font-data); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.op-detail { grid-column: 2; font-size: var(--text-body); color: var(--muted); }
+/* an op's state in one word (orderWords.ts opWord), colour only on a failure */
+.op-word { font: 600 var(--text-body)/var(--leading-body) var(--font-ui); color: #b4bfcb; }
+.op-word.bad { color: var(--bad); }
+/* an order to many vehicles, summarised (TaskPanel.tsx, R6): its vehicles counted by state, every
+   exception listed by reason with the vehicles named, then "show all" */
+.tcard-sum { margin: 0 0 4px; display: flex; flex-wrap: wrap; gap: 2px 10px; font: var(--text-body)/var(--leading-body) var(--font-ui); font-variant-numeric: tabular-nums; color: var(--muted); }
+.tcard-sum .bad { color: var(--bad); font-weight: 600; }
+.tcard-exc { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; border-top: 1px solid #1c2733; font-size: var(--text-body); }
+.tcard-exc-head b { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--bad); }
+.tcard-exc.superseded .tcard-exc-head b, .tcard-exc.stuck .tcard-exc-head b { color: var(--warn); }
+/* every vehicle named, in a box of its own past six lines (6 x the label leading; scrolls; none left out) */
+.tcard-names { font: var(--text-label)/var(--leading-label) var(--font-data); color: #aab6c3; overflow-wrap: anywhere; max-height: 7.8em; overflow-y: auto; }
+.tcard-all { margin-top: 4px; }
+.tcard-fold { margin-left: 4px; }
+
+/* map camera and drawing controls: top view, smoothing */
+.viewtoggle { position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 8px; z-index: 2; }
+.viewtoggle button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 6px 12px; font: 500 var(--text-label)/var(--leading-label) var(--font-ui); text-transform: lowercase; }
+.viewtoggle button.on { background: var(--panel-2); color: var(--text); border-color: #3a4a5c; }
+
+/* platforms catalog */
+.platforms-btn { margin-right: 4px; }
+/* a floating panel (FloatingPanel.tsx): wide enough for the table, narrower only with the map; as
+   tall as it is placed for (App.tsx `reserve`), its table scrolling inside */
+.platforms { width: 1040px; height: 600px; display: flex; flex-direction: column; background: rgba(13,18,24,.97); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+.platforms-head { flex: none; display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.platforms-head h2 { margin: 0; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.platforms-head .muted { font-size: var(--text-label); }
+.platforms-head .close { margin-left: auto; }
+.platforms-body { overflow: auto; padding: 0 8px 12px; }
+.platforms table { width: 100%; border-collapse: collapse; font-size: var(--text-body); }
+.platforms th { position: sticky; top: 0; background: #0d1218; text-align: left; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); padding: 10px 8px 6px; z-index: 1; }
+.platforms td { padding: 7px 8px; border-top: 1px solid #1c2733; vertical-align: top; }
+.platforms td.sym { width: 34px; }
+.platforms td.sym svg { width: 28px; height: auto; display: block; }
+.platforms td.tasks { min-width: 210px; }
+.platforms td:nth-child(2) { min-width: 260px; }
+.platforms td:nth-child(6) { min-width: 130px; }
+.platforms td.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.platforms td .muted { font-size: var(--text-label); }
+.platforms tr.domain td { border-top: 0; padding-top: 16px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.platforms tr.domain td span { color: var(--text); margin-left: 6px; }
+.platforms tr.absent { opacity: .55; }
+.pname { font-weight: 600; }
+.taskchip { display: inline-block; font: 500 var(--text-label)/var(--leading-label) var(--font-ui); padding: 1px 6px; margin: 0 4px 3px 0; border-radius: 10px; background: #1c2733; color: #aab6c3; }
+.cschip { font: 600 var(--text-label)/var(--leading-label) var(--font-data); padding: 2px 7px; margin: 0 4px 3px 0; border: 1px solid #4a3a1f; border-radius: 3px; background: none; color: var(--accent); }
+.cschip:hover { background: #2a2214; }
+
+/* label declutter: crowded vehicles show the bare symbol, callsign on hover */
+
+/* space: top-bar toggles, timeline drawer, globe inset */
+.platforms-btn.on { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.banner.info { background: #14202a; border-color: var(--air); color: var(--text); top: 52px; }
+.space { position: absolute; left: 0; right: 0; bottom: 0; height: 46%; z-index: 3; display: flex; flex-direction: column; background: var(--panel); border-top: 1px solid var(--line); box-shadow: 0 -8px 24px rgba(0,0,0,.35); }
+.timeline { overflow: auto; padding: 6px 12px 8px; min-width: 0; }
+.pad { padding: 10px 12px; }
+.small { font-size: var(--text-label); }
+.detail dl { display: grid; grid-template-columns: 82px 1fr; gap: 4px 10px; margin: 0; font-size: var(--text-body); }
+.detail dt { color: var(--muted); font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; padding-top: 2px; }
+.detail dd { margin: 0; }
+.hint.pad { padding: 14px 12px; }
+.ghost.mini { padding: 1px 7px; font-size: var(--text-label); }
+.ghost.mini.on { color: var(--accent); border-color: #4a3a1f; }
+.options { display: flex; flex-direction: column; gap: 8px; }
+
+/* vehicle details card: opened from a fleet row, a floating panel (FloatingPanel.tsx) that opens
+   over the map's left edge; its header is the drag bar, the rest scrolls under it */
+.vdetails {
+  width: 330px; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  font-size: var(--text-body);
+}
+.vd-head { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px 0; }
+.vd-head:last-child { padding-bottom: 12px; }
+.vd-body { min-height: 0; overflow-y: auto; padding: 0 12px 12px; }
+.vd-sym svg { width: 34px; height: auto; }
+.vd-title { flex: 1; min-width: 0; }
+.vd-name { font: 600 var(--text-title)/var(--leading-title) var(--font-data); display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.vd-select {
+  width: 100%; margin: 10px 0 4px; padding: 6px; border-radius: 4px; border: 1px solid var(--accent);
+  background: none; color: var(--accent); font: 600 var(--text-body)/var(--leading-body) var(--font-ui); cursor: pointer;
+}
+.vd-select.on { background: var(--accent); color: #10161d; }
+.vdetails section { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.vdetails h4 { margin: 0 0 6px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.vdetails dl { display: grid; grid-template-columns: 96px 1fr; gap: 3px 10px; margin: 0; }
+.vdetails dt { color: var(--muted); }
+.vdetails dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.vdetails p { margin: 6px 0 0; }
+.vdetails .bad { color: var(--bad); }
+.vdetails .warn { color: var(--warn); }
+.vd-follow.on { color: var(--accent); border-color: #4a3a1f; }
+/* its one exception, as on its fleet row */
+.vd-title .vrow-exc { display: inline-block; margin-top: 4px; }
+/* the evidence behind a section's line, one click away */
+.vd-fold { margin-top: 6px; }
+.vd-fold > summary { cursor: pointer; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); color: var(--muted); }
+.vd-fold > summary:hover { color: var(--text); }
+.vd-fold[open] > summary { margin-bottom: 4px; }
+
+/* rules 34: a group order's options in the task form (TaskPanel.tsx): how its members share it */
+.grp { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; }
+.grp legend { padding: 0 4px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--text); }
+
+.grp .seg { margin: 0; }
+.grp .seg button { flex: 1; }
+.grp .hint { font-size: var(--text-label); }
+.grp-row { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.grp-row label { display: flex; align-items: center; gap: 6px; font-size: var(--text-body); color: var(--muted); }
+.grp-row input { width: 76px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: var(--text-body)/var(--leading-body) var(--font-data); }
+.grp-check { display: flex; align-items: baseline; gap: 6px; font-size: var(--text-body); color: var(--muted); }
+.grp-check input { accent-color: var(--accent); }
+.grp-more > summary { cursor: pointer; font: var(--text-label)/var(--leading-label) var(--font-ui); color: var(--muted); }
+.grp-more[open] > summary { margin-bottom: 6px; }

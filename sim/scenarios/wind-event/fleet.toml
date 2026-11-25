@@ -1,0 +1,8 @@
+title = "Wind event (40 drones)"
+
+[[unit]]
+platform = "delivery_drone"
+count = 40
+sim = "standin"
+spacing_m = 4
+spawn = [37.8068, -122.4462, 3, 0]

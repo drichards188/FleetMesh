@@ -1,0 +1,44 @@
+[package]
+name = "fleetmesh-bridge"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fleetmesh-weather = { path = "../fleetmesh-weather" }
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+fleetmesh-space = { path = "../fleetmesh-space" }
+fleetmesh-decide = { path = "../fleetmesh-decide" }
+# Operator and agent credentials (rules 8): password hashes, sessions, keys.
+fleetmesh-auth = { path = "../fleetmesh-auth" }
+# Predicted link coverage (bd murmur-hei): the link emulator's own predictor and geometry.
+fleetmesh-linkemu = { path = "../fleetmesh-linkemu" }
+mavlink = { version = "0.18", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-extensions"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+tokio = { version = "1.53.1", features = ["full"] }
+toml = { version = "1.1.6", features = ["preserve_order"] }
+quick-xml = "0.42.0"
+socket2 = { version = "0.6.5", features = ["all"] }
+# The MCP server for AI agents (Phase F): the official Rust SDK, streamable HTTP at /mcp.
+rmcp = { version = "3.5", features = ["transport-streamable-http-server"] }
+schemars = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1.5"
+# Baked grids, gzip (the format of sim/headless/terrain): the physical sensing model's terrain,
+# and the domain rule's land/water grid without tidewater (decision/terrain.rs).
+flate2 = "1"
+# The physical sensing step's own pool of threads (tracks/physical/par.rs, bd murmur-9730).
+rayon = "1.12"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util", "macros", "rt-multi-thread"] }
+# Rules 10: the software authenticator the passkey tests register and sign with.
+fleetmesh-decide = { path = "../fleetmesh-decide", features = ["soft-authenticator"] }
+# Rules 30: the stand-ins' own autopilots, whose lost-link failsafe the bridge reads
+# (decision/tests/lost_link.rs).
+fleetmesh-standins = { path = "../fleetmesh-standins" }

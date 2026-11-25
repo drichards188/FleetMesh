@@ -1,0 +1,808 @@
+//! The MCP server (Phase F): AI agents read the world model and propose intents over the
+//! Model Context Protocol, served by the bridge at `/mcp` (streamable HTTP, through the
+//! official Rust SDK, `rmcp`). Agents decide, they don't drive (docs/DECISIONS.md):
+//!
+//! - **No approve tool exists.** The tools are reads (fleet, platforms, areas, policy,
+//!   intents, inbox, recent vehicle events, parcels, hubs, drop zones, weather and link
+//!   coverage) and four
+//!   about intents: `preview_intent`, `propose_intent`, `explain_intent` and
+//!   `withdraw_intent` (own intents only). Every write goes through the engine's
+//!   `AgentPort` (`crates/fleetmesh-decide`, [`crate::decision::agent`]), which has no approve
+//!   method; this module never holds an operator session and never builds a vehicle order.
+//!   `tests::no_tool_implies_approval_or_control` enumerates the tool list and fails on any
+//!   name or description that implies approval or direct control.
+//! - **Staleness on every fact.** Every value an agent reads carries `as_of` (wall-clock
+//!   seconds when it was observed) and `age_s`; vehicle facts also say whether they are
+//!   past the freshness limit the rules apply (`stale`). The server instructions and the
+//!   tool descriptions tell the model to treat stale facts as uncertain.
+//! - **Agent identity** (rules 8) is the agent's own key, `Authorization: Bearer <key>` on
+//!   every request, from the credential file (`fleetmesh-auth agent-add`; `crate::auth` checks it
+//!   before any MCP session exists). In a dev run (`FLEETMESH_AUTH=dev`) it is the
+//!   `X-FleetMesh-Agent` header (or, within an MCP session, the `clientInfo.name` sent with
+//!   `initialize`), checked against `FLEETMESH_AGENTS` (comma-separated; default
+//!   `agent-planner,agent-watch`): anyone who can reach the port can claim a listed id, and
+//!   the run is logged as dev. Each id gets its own `AgentPort`: its proposals carry it as their
+//!   `source`, the console's inbox shows it with the rationale, and the audit log records
+//!   `agent.action` events for `session.connected`, `intent.preview`, `intent.propose` and
+//!   `intent.withdraw`.
+//! - **Through the decision engine.** A proposal is an agent-sourced intent: auto tiers
+//!   dispatch at once, human tiers wait in the inbox for an operator (never
+//!   `approval.at_submission`, which replay checks).
+//!
+//! Satellite reads go through the bridge's own `/api/space/*` handlers in process (the
+//! answers the console gets), all of them read-only. `get_changes` ([`changes`]) answers
+//! what changed since a cursor, for agents that poll, from the same read-only views.
+//!
+//! On a bridge whose runner asks for them ([`TASKING_TOOLS_ENV`]: `scripts/up.sh` sets it for the
+//! open world and the situations) agents also get the tasking tools ([`tools::operator_tools`]), on
+//! the operator's own stores ([`OperatorStores`], groups and the watch officer's tasking): the
+//! operator's groups to read, a group to make for one of the operator's tasking items, and an
+//! answer to one. They write to those stores only, never to the engine: no decision reads them,
+//! nothing is logged, and none of them approves, orders or decides anything. An evaluation stack
+//! (eval/stack.py, which passes no `FLEETMESH_*` variable it does not set itself) and the headless
+//! simulator (which keeps no such stores) offer none, so their agents' tool lists are as before.
+
+mod changes;
+mod operator;
+pub(crate) mod tools;
+mod world;
+#[cfg(test)]
+mod tests;
+
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, RwLock};
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Method, Request, header};
+use fleetmesh_decide::AgentId;
+use rmcp::ErrorData;
+use rmcp::handler::server::ServerHandler;
+use rmcp::model::{
+    CacheScope, CallToolRequestParams, CallToolResponse, Implementation, InitializeRequestParams,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig, Tool,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use crate::decision::{Decision, DecisionError};
+use crate::world::World;
+
+pub const AGENT_HEADER: &str = "x-fleetmesh-agent";
+const JSON: &str = "application/json";
+/// How long a client may treat a tool, resource or template list as fresh. Protocol
+/// 2026-07-28 (SEP-2549) requires `ttlMs` and `cacheScope` on list results, and clients
+/// that speak it refuse a list without them (Claude Code 2.1.294 saw no tools at all).
+/// The lists never change while the bridge runs; private: per client, as a precaution.
+const LIST_TTL_MS: u64 = 300_000;
+/// The most an in-process API answer may be (a satellite pass list with scenes).
+const API_BODY_LIMIT: usize = 16 << 20;
+
+/// What the model is told at `initialize`.
+pub const INSTRUCTIONS: &str = "FleetMesh's decision layer, for AI agents helping one operator supervise a \
+fleet of autonomous delivery vehicles (drones, cars, boats and planes). You can read the \
+world and propose intents. You cannot approve, reject, dispatch or control anything: no \
+such tool exists, and the engine's agent interface has no such method. Every proposal goes \
+through fail-closed checks (capability, readiness, platform limits, land or water, \
+keep-out areas, battery reserve, payload, weather, separation, drop zone, link and \
+navigation) and a risk-tier policy: routine orders run on their own; deliveries to a drop \
+zone nobody has confirmed, orders leaving the approved area and orders whose reserves \
+cannot be verified wait in the operator's inbox, where the operator sees your agent id and \
+your rationale. Every fact you read carries as_of (wall-clock seconds when it was observed) \
+and age_s; vehicle facts also carry stale, true when the fact is older than the freshness \
+limit the rules apply. A stale fact cannot support a decision: treat it as uncertain, say \
+so in your rationale, and prefer a hold or a return to a hub to a new order. Use \
+preview_intent before propose_intent to see the checks and the policy tier without \
+creating an intent; use explain_intent to follow what you proposed. Everything you do is \
+written to the audit log under your agent id. get_parcels, get_hubs and get_places show \
+the parcels, the hubs (with the battery packs each holds) and the drop zones with the \
+latest look at each; get_weather gives the weather the rules read at a point. Consequential \
+decisions, such as confirming a drop zone is clear or confirming a vehicle lost, are only \
+ever an operator's (one with consequential authority for the second kind): you cannot \
+make them, and no tool does. get_changes answers what changed since a cursor (lost links, \
+navigation and GPS glitch flags, alerts, intents' states): read the full picture with the \
+other tools before you act on it.";
+
+/// What [`INSTRUCTIONS`] adds about the loss of one of ours.
+pub const NODE_LOSS_INSTRUCTIONS: &str = " One of ours that falls silent counts in every \
+keep-out where it could be. The engine presumes it lost on evidence (its own damage \
+report, or silence past the limit): get_inbox lists those, and silent vehicles an operator \
+flagged, under review.node_losses, and the confirmed losses under review.nodes_lost; \
+get_fleet and get_vehicle carry a vehicle's standing (silent, presumed_lost, lost, with the \
+region every keep-out counts it in) while it is not reporting. Only an operator with \
+consequential authority confirms one of ours lost, and only an operator revokes a loss or \
+flags a silent vehicle: no tool does any of it.";
+
+/// What the model is told at `initialize` under `rules`: [`INSTRUCTIONS`], and from rules 30
+/// [`NODE_LOSS_INSTRUCTIONS`] (an older run's are as they always were).
+pub fn instructions(_rules: &fleetmesh_decide::RulesConfig) -> String {
+    format!("{INSTRUCTIONS}{NODE_LOSS_INSTRUCTIONS}")
+}
+
+/// Who may connect (see `main.rs`): a credentials run checks each agent's key (`keys`); a
+/// dev run believes the ids `FLEETMESH_AGENTS` lists.
+pub struct Settings {
+    /// Dev run: the ids an `X-FleetMesh-Agent` header (or `clientInfo.name`) may claim.
+    pub agents: Vec<AgentId>,
+    /// Credentials run: the credential file's agent keys (`Authorization: Bearer <key>`).
+    pub keys: Option<Arc<crate::auth::Auth>>,
+    /// How long an MCP session may be idle before it is dropped ([`IDLE_LIMIT`];
+    /// `FLEETMESH_MCP_IDLE_S`). Only clients on a protocol version before 2026-07-28 hold a
+    /// session: from that version requests are served statelessly.
+    pub idle: std::time::Duration,
+    /// The operator's own stores, shared with the API (the live bridge, `main.rs`): with them
+    /// agents get the tasking tools; without (the headless simulator) the tool list is as before.
+    pub operator: Option<OperatorStores>,
+}
+
+/// The variable a stack's runner sets to offer agents the tasking tools: `1` (or `on`, `true`,
+/// `yes`). Unset, as on an evaluation stack, the bridge offers none.
+pub const TASKING_TOOLS_ENV: &str = "FLEETMESH_TASKING_TOOLS";
+
+/// Whether `value` (of [`TASKING_TOOLS_ENV`]) asks for the tasking tools.
+pub fn tasking_tools_on(value: Option<&str>) -> bool {
+    matches!(value.map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "on" | "true" | "yes"))
+}
+
+/// The operator's own stores (`crate::groups`, `crate::tasking`), the same the API serves: never
+/// a decision input and never logged.
+#[derive(Clone, Default)]
+pub struct OperatorStores {
+    pub groups: Arc<RwLock<crate::groups::GroupStore>>,
+    pub tasking: Arc<RwLock<crate::tasking::TaskingStore>>,
+}
+
+/// An MCP session idle this long is dropped (a client whose connection vanished leaves no
+/// session behind). Fifteen minutes: only clients on a protocol before 2026-07-28 hold a
+/// session (Claude Code 2.1.294 holds none); the watch officer's own reads come every 2 s and
+/// the situation storyline connects once per proposal, so no known client is quiet longer
+/// than the watch's heartbeat ceiling (5 minutes) between calls. Three times that leaves
+/// room, where rmcp's own five minutes dropped an agent that connected once and waited, and
+/// a leaked session lives a quarter of an hour, not an hour.
+pub const IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// The sessions one agent id may hold, counted from each one's initialize; past this the one
+/// it used least recently with no request in flight is closed (all busy: the cap waits).
+/// Eight: the watch officer holds one (its reads) plus one per Codex turn in flight, the
+/// situation storyline one per proposal, closed after; eight leaves room for a few clients
+/// sharing an id while a client that opens sessions and never closes them holds eight at
+/// most, not one per retry for the idle limit.
+pub const SESSIONS_PER_AGENT: usize = 8;
+
+impl Settings {
+    pub fn from_env() -> Settings {
+        let idle = std::env::var("FLEETMESH_MCP_IDLE_S")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .map_or(IDLE_LIMIT, std::time::Duration::from_secs);
+        Settings {
+            agents: crate::auth::agents_from_env(),
+            keys: None,
+            idle,
+            operator: None,
+        }
+    }
+}
+
+/// What every MCP session shares.
+pub struct Mcp {
+    pub(crate) world: Arc<World>,
+    pub(crate) decision: Arc<Decision>,
+    /// The bridge's HTTP API without `/mcp`, for in-process read-only calls (satellite
+    /// passes and tasking options come from the same handlers the console uses).
+    api: Router,
+    agents: Vec<AgentId>,
+    /// Credentials run: agents' keys (the dev list `agents` is then unused).
+    keys: Option<Arc<crate::auth::Auth>>,
+    /// Agents that have connected this run (`agent.action session.connected`, once each).
+    seen: Mutex<BTreeSet<AgentId>>,
+    /// `get_changes`: what changed between reads, numbered for a cursor (read-only).
+    pub(crate) changes: changes::Feed,
+    /// Each agent's MCP sessions: when each was last used and its requests in flight
+    /// ([`SESSIONS_PER_AGENT`]).
+    sessions: Mutex<std::collections::BTreeMap<AgentId, Vec<Sess>>>,
+    /// The session manager, to close a session past the cap (set by [`service`]).
+    manager: std::sync::OnceLock<Arc<LocalSessionManager>>,
+    /// The operator's own stores, where this bridge keeps them ([`Settings::operator`]).
+    pub(crate) operator: Option<OperatorStores>,
+}
+
+/// One MCP session of an agent, for the cap.
+struct Sess {
+    id: String,
+    /// When a request on it last began or ended.
+    used: tokio::time::Instant,
+    /// Its requests in flight: the cap never closes a session while one runs (a proposal
+    /// whose answer is lost would be made again by a client that retries).
+    busy: usize,
+}
+
+/// A request in flight on a session (see [`Sess::busy`]); ends when dropped.
+pub(crate) struct Busy {
+    mcp: Arc<Mcp>,
+    agent: AgentId,
+    id: String,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let mut all = self.mcp.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = all
+            .get_mut(&self.agent)
+            .and_then(|v| v.iter_mut().find(|s| s.id == self.id))
+        {
+            s.busy = s.busy.saturating_sub(1);
+            s.used = tokio::time::Instant::now();
+        }
+    }
+}
+
+/// The session a request names (`Mcp-Session-Id`; none from a client on protocol 2026-07-28
+/// or later: it holds no session).
+fn session_of(ctx: &RequestContext<RoleServer>) -> Option<String> {
+    ctx.extensions
+        .get::<axum::http::request::Parts>()
+        .and_then(|p| p.headers.get("mcp-session-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+impl Mcp {
+    pub fn new(
+        settings: Settings,
+        world: Arc<World>,
+        decision: Arc<Decision>,
+        api: Router,
+    ) -> Arc<Mcp> {
+        Arc::new(Mcp {
+            world,
+            decision,
+            api,
+            agents: settings.agents,
+            keys: settings.keys,
+            seen: Mutex::new(BTreeSet::new()),
+            changes: changes::Feed::default(),
+            sessions: Mutex::new(std::collections::BTreeMap::new()),
+            manager: std::sync::OnceLock::new(),
+            operator: settings.operator,
+        })
+    }
+
+    /// The tools this server offers: [`tools::tools`], and the tasking tools
+    /// ([`tools::operator_tools`]) where it keeps the operator's stores.
+    pub fn tool_list(&self) -> Vec<Tool> {
+        let mut all = tools::tools();
+        if self.operator.is_some() {
+            all.extend(tools::operator_tools());
+        }
+        all
+    }
+
+    /// The agent a request acts for. Credentials run: the agent whose key the request's
+    /// `Authorization: Bearer` header carries (an `X-FleetMesh-Agent` header naming another is
+    /// refused). Dev run: the `X-FleetMesh-Agent` header, else the session's `clientInfo.name`,
+    /// listed in `FLEETMESH_AGENTS`. Logged once per agent and run as `agent.action
+    /// session.connected` (with the key's id, never the key).
+    pub(crate) fn agent(&self, ctx: &RequestContext<RoleServer>) -> Result<AgentId, ErrorData> {
+        let parts = ctx.extensions.get::<axum::http::request::Parts>();
+        if let Some(keys) = &self.keys {
+            let (agent, key_id) = parts
+                .and_then(|p| crate::auth::bearer(&p.headers))
+                .and_then(|k| keys.agent_for_key(k))
+                .ok_or_else(|| {
+                    ErrorData::invalid_request(
+                        "an agent connects with its own key: Authorization: Bearer <key> (fleetmesh-auth agent-add)",
+                        None,
+                    )
+                })?;
+            let named = parts
+                .and_then(|p| p.headers.get(AGENT_HEADER))
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(n) = named
+                && n != agent.as_str()
+            {
+                return Err(ErrorData::invalid_request(
+                    format!("the key is {agent}'s, the request names {n}"),
+                    None,
+                ));
+            }
+            let via = format!("API key {key_id}");
+            self.connected(&agent, &via, ctx.peer.peer_info().as_deref());
+            self.note_session(&agent, parts);
+            return Ok(agent);
+        }
+        let header = parts
+            .and_then(|p| p.headers.get(AGENT_HEADER))
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| (s.to_string(), "X-FleetMesh-Agent header"));
+        let client = ctx.peer.peer_info();
+        let claimed = header.or_else(|| {
+            client
+                .as_ref()
+                .map(|c| (c.client_info.name.clone(), "MCP clientInfo.name"))
+        });
+        let (id, via) = claimed.ok_or_else(|| {
+            ErrorData::invalid_request(
+                "set the X-FleetMesh-Agent header (or initialize with clientInfo.name) to an \
+                 agent id listed in FLEETMESH_AGENTS (a dev run: the id is asserted, not authenticated)",
+                None,
+            )
+        })?;
+        let agent = self.resolve(&id)?;
+        self.connected(&agent, via, client.as_deref());
+        self.note_session(&agent, parts);
+        Ok(agent)
+    }
+
+    /// Record that `agent` used the session the request names (`Mcp-Session-Id`; a client on
+    /// protocol 2026-07-28 or later names none: it holds no session).
+    fn note_session(&self, agent: &AgentId, parts: Option<&axum::http::request::Parts>) {
+        if let Some(id) = parts
+            .and_then(|p| p.headers.get("mcp-session-id"))
+            .and_then(|v| v.to_str().ok())
+        {
+            self.note_session_id(agent, id);
+        }
+    }
+
+    /// Record that `agent` holds or used session `id` (at its initialize, and at each call).
+    /// Past [`SESSIONS_PER_AGENT`], the agent's session used least recently with no request
+    /// in flight is closed (none idle: the cap waits for one).
+    fn note_session_id(&self, agent: &AgentId, id: &str) {
+        let id = id.to_string();
+        let now = tokio::time::Instant::now();
+        let evict = {
+            let mut all = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = all.entry(agent.clone()).or_default();
+            // a session the manager no longer holds (closed by its client, which DELETE does
+            // without reaching this handler, or idle past the limit) does not count
+            if let Some(manager) = self.manager.get()
+                && let Ok(live) = manager.sessions.try_read()
+            {
+                mine.retain(|s| s.id == id || s.busy > 0 || live.contains_key(s.id.as_str()));
+            }
+            match mine.iter_mut().find(|s| s.id == id) {
+                Some(s) => s.used = now,
+                None => mine.push(Sess {
+                    id: id.clone(),
+                    used: now,
+                    busy: 0,
+                }),
+            }
+            let mut out = Vec::new();
+            while mine.len() > SESSIONS_PER_AGENT {
+                let oldest = mine
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.id != id && s.busy == 0)
+                    .min_by_key(|(_, s)| s.used)
+                    .map(|(i, _)| i);
+                match oldest {
+                    Some(i) => out.push(mine.remove(i).id),
+                    None => break,
+                }
+            }
+            out
+        };
+        if evict.is_empty() {
+            return;
+        }
+        if let Some(manager) = self.manager.get().cloned() {
+            tokio::spawn(async move {
+                for id in evict {
+                    let id: rmcp::transport::common::server_side_http::SessionId = id.into();
+                    let _ = rmcp::transport::streamable_http_server::session::SessionManager::close_session(
+                        manager.as_ref(),
+                        &id,
+                    )
+                    .await;
+                }
+            });
+        }
+    }
+
+    /// A request in flight on `agent`'s session `id` (the guard ends it); none without one.
+    pub(crate) fn busy(self: &Arc<Self>, agent: &AgentId, id: Option<String>) -> Option<Busy> {
+        let id = id?;
+        let mut all = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let s = all.get_mut(agent)?.iter_mut().find(|s| s.id == id)?;
+        s.busy += 1;
+        Some(Busy {
+            mcp: self.clone(),
+            agent: agent.clone(),
+            id,
+        })
+    }
+
+    /// Each session `agent` holds, oldest use first, with its requests in flight (tests).
+    #[cfg(test)]
+    pub(crate) fn sessions_of(&self, agent: &AgentId) -> Vec<(String, usize)> {
+        let all = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<&Sess> = all.get(agent).map(|v| v.iter().collect()).unwrap_or_default();
+        v.sort_by_key(|s| s.used);
+        v.into_iter().map(|s| (s.id.clone(), s.busy)).collect()
+    }
+
+    /// The agent a session's opening request names, resolved as [`Mcp::agent`] resolves it:
+    /// the key's agent in a credentials run; else the header, or the initialize request's
+    /// `clientInfo.name`, listed in `FLEETMESH_AGENTS`.
+    fn claimant(&self, headers: &axum::http::HeaderMap, body: &[u8]) -> Option<AgentId> {
+        if let Some(keys) = &self.keys {
+            return crate::auth::bearer(headers)
+                .and_then(|k| keys.agent_for_key(k))
+                .map(|(a, _)| a);
+        }
+        let named = headers
+            .get(AGENT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                serde_json::from_slice::<Value>(body)
+                    .ok()
+                    .and_then(|v| v["params"]["clientInfo"]["name"].as_str().map(str::to_string))
+            })?;
+        self.resolve(&named).ok()
+    }
+
+    /// A claimed id against the configured list.
+    pub(crate) fn resolve(&self, id: &str) -> Result<AgentId, ErrorData> {
+        self.agents
+            .iter()
+            .find(|a| a.as_str() == id)
+            .cloned()
+            .ok_or_else(|| {
+                ErrorData::invalid_request(
+                    format!("agent {id:?} is not in FLEETMESH_AGENTS (a dev run: ids are asserted, not authenticated)"),
+                    None,
+                )
+            })
+    }
+
+    fn connected(&self, agent: &AgentId, via: &str, client: Option<&InitializeRequestParams>) {
+        let first = self
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent.clone());
+        if !first {
+            return;
+        }
+        let detail = match client {
+            Some(c) => format!(
+                "via {via}; client {} {}",
+                c.client_info.name, c.client_info.version
+            ),
+            None => format!("via {via}; client unknown"),
+        };
+        if let Err(e) = self
+            .decision
+            .agent_action(agent, "session.connected", &detail)
+        {
+            eprintln!("mcp: agent.action: {}", e.detail);
+        }
+    }
+
+    /// A read-only call to the bridge's own HTTP API, in process (no socket): the same
+    /// handler and JSON the console gets. Non-2xx answers become a [`DecisionError`].
+    pub(crate) async fn api(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, DecisionError> {
+        let fail = |status: u16, detail: String| DecisionError {
+            status,
+            detail,
+            intent: None,
+        };
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, JSON)
+            .body(match body {
+                Some(v) => Body::from(v.to_string()),
+                None => Body::empty(),
+            })
+            .map_err(|e| fail(500, e.to_string()))?;
+        let resp = match self.api.clone().oneshot(req).await {
+            Ok(r) => r,
+            Err(never) => match never {},
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), API_BODY_LIMIT)
+            .await
+            .map_err(|e| fail(500, e.to_string()))?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "detail": String::from_utf8_lossy(&bytes) }));
+        if status.is_success() {
+            Ok(value)
+        } else {
+            Err(fail(
+                status.as_u16(),
+                value["detail"]
+                    .as_str()
+                    .unwrap_or("the bridge refused the request")
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+/// One MCP session's handler (the SDK makes one per session; all share [`Mcp`]).
+#[derive(Clone)]
+pub struct Handler(pub(crate) Arc<Mcp>);
+
+type Inner = StreamableHttpService<Handler, LocalSessionManager>;
+type InnerResponse = <Inner as tower::Service<Request<Body>>>::Response;
+
+/// The MCP service at `/mcp`: rmcp's, with each new session recorded for its agent as it is
+/// made (a session that initializes and never calls a tool counts against the cap too). The
+/// handler cannot do it: rmcp makes the session id after the handler is built, and the
+/// initialize request names none.
+#[derive(Clone)]
+pub struct McpService {
+    inner: Inner,
+    shared: Arc<Mcp>,
+}
+
+impl tower::Service<Request<Body>> for McpService {
+    type Response = InnerResponse;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<InnerResponse, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let mut inner = self.inner.clone();
+        let shared = self.shared.clone();
+        Box::pin(async move {
+            // a POST that names no session opens one (initialize); any other request passes
+            if req.method() != Method::POST || req.headers().contains_key("mcp-session-id") {
+                return inner.call(req).await;
+            }
+            let (parts, body) = req.into_parts();
+            let bytes = match axum::body::to_bytes(body, OPENING_BODY_LIMIT).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let too_large = e
+                        .into_inner()
+                        .downcast_ref::<http_body_util::LengthLimitError>()
+                        .is_some();
+                    return Ok(if too_large {
+                        plain(
+                            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                            "an opening MCP request is at most 1 MB",
+                        )
+                    } else {
+                        plain(axum::http::StatusCode::BAD_REQUEST, "the request body could not be read")
+                    });
+                }
+            };
+            // an unnamed or unlisted claimant's sessions share one bucket under the cap (its
+            // calls are refused anyway; its sessions must not pile up uncounted)
+            let agent = shared
+                .claimant(&parts.headers, &bytes)
+                .unwrap_or_else(|| AgentId::new(UNLISTED));
+            let resp = inner.call(Request::from_parts(parts, Body::from(bytes))).await?;
+            if let Some(id) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+                shared.note_session_id(&agent, id);
+            }
+            Ok(resp)
+        })
+    }
+}
+
+/// The largest opening request read whole (an initialize is a few hundred bytes).
+const OPENING_BODY_LIMIT: usize = 1 << 20;
+
+/// The cap's bucket for sessions opened by a claimant that names no listed agent (or, in a
+/// credentials run, no valid key): not an agent id anyone can be given.
+const UNLISTED: &str = "(unnamed or unlisted)";
+
+/// A plain-text answer of the inner service's type.
+fn plain(status: axum::http::StatusCode, text: &'static str) -> InnerResponse {
+    use http_body_util::BodyExt;
+    let mut resp = axum::http::Response::new(http_body_util::Full::new(axum::body::Bytes::from(text)).boxed());
+    *resp.status_mut() = status;
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain"));
+    resp
+}
+
+/// The service to mount at `/mcp`. `api` is the bridge's router without `/mcp`.
+pub fn service(settings: Settings, world: Arc<World>, decision: Arc<Decision>, api: Router) -> McpService {
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(settings.idle);
+    let sessions = Arc::new(sessions);
+    let shared = Mcp::new(settings, world, decision, api);
+    let _ = shared.manager.set(sessions.clone());
+    let handler = shared.clone();
+    McpService {
+        inner: StreamableHttpService::new(
+            move || Ok(Handler(handler.clone())),
+            sessions,
+            StreamableHttpServerConfig::default(),
+        ),
+        shared,
+    }
+}
+
+impl ServerHandler for Handler {
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        );
+        info.server_info = Implementation::new("fleetmesh-bridge", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(instructions(self.0.decision.rules()));
+        info
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult::with_all_items(self.0.tool_list())
+            .with_ttl_ms(LIST_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let agent = self.0.agent(&ctx)?;
+        let _busy = self.0.busy(&agent, session_of(&ctx));
+        let args = request.arguments.unwrap_or_default();
+        tools::call(&self.0, &agent, &request.name, args)
+            .await
+            .map(Into::into)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(resources())
+            .with_ttl_ms(LIST_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::with_all_items(templates())
+            .with_ttl_ms(LIST_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let agent = self.0.agent(&ctx)?;
+        let _busy = self.0.busy(&agent, session_of(&ctx));
+        let value = read(&self.0, &agent, &request.uri).await?;
+        Ok(ReadResourceResult::new(vec![
+            ResourceContents::text(value.to_string(), request.uri).with_mime_type(JSON),
+        ])
+        .into())
+    }
+}
+
+/// The world as resources: the same JSON as the read tools, for clients that prefer
+/// resources (a client can subscribe to what it reads here; the data is a snapshot).
+pub fn resources() -> Vec<Resource> {
+    let r = |uri: &str, name: &str, description: &str| {
+        let mut r = Resource::new(uri, name).with_description(description);
+        r.mime_type = Some(JSON.into());
+        r
+    };
+    vec![
+        r(
+            "fleetmesh://fleet",
+            "fleet",
+            "Every vehicle: identity, platform limits and capabilities, position, navigation, battery, home and link health, each fact with as_of, age_s and stale; the current task per vehicle.",
+        ),
+        r(
+            "fleetmesh://platforms",
+            "platforms",
+            "The platform catalog (sim/platforms.toml): limits, endurance, minimum turn radius, link class, armed flag, the tasks each kind can do, and which fleet vehicles are of each type.",
+        ),
+        r(
+            "fleetmesh://areas",
+            "areas",
+            "The operator's areas in force: approved operating areas (leaving one needs a human) and no-go areas (no route may enter), as polygons of [lon, lat].",
+        ),
+        r(
+            "fleetmesh://policy",
+            "policy",
+            "The risk-tier policy and rules configuration in force, as logged at the start of the run. Agent proposals in human tiers always wait for an operator.",
+        ),
+        r(
+            "fleetmesh://intents",
+            "intents",
+            "Every intent of this run, newest first, with state, checks, policy decision, approval and history, plus the audit log's head hash.",
+        ),
+        r(
+            "fleetmesh://inbox",
+            "inbox",
+            "What waits for the operator: pending approvals (with why each needs a human and when it expires) and current alerts (lost links, vehicles not moving, failed tasks).",
+        ),
+        r(
+            "fleetmesh://events",
+            "events",
+            "Recent vehicle events the audit log recorded (mode changes, failsafes, status text), newest first, with age.",
+        ),
+    ]
+}
+
+pub fn templates() -> Vec<ResourceTemplate> {
+    let t = |uri: &str, name: &str, description: &str| {
+        let mut t = ResourceTemplate::new(uri, name);
+        t.description = Some(description.into());
+        t.mime_type = Some(JSON.into());
+        t
+    };
+    vec![
+        t(
+            "fleetmesh://fleet/{uid}",
+            "vehicle",
+            "One vehicle by fleet uid, with every fact's age and staleness.",
+        ),
+        t(
+            "fleetmesh://intents/{id}",
+            "intent",
+            "One intent by id: its checks, policy tier, approval, history and why it needs a human.",
+        ),
+    ]
+}
+
+/// A resource read, by URI.
+async fn read(mcp: &Mcp, agent: &AgentId, uri: &str) -> Result<Value, ErrorData> {
+    let not_found = || ErrorData::resource_not_found(format!("no resource {uri:?}"), None);
+    let api_err = |e: DecisionError| ErrorData::internal_error(e.detail, None);
+    let path = uri.strip_prefix("fleetmesh://").ok_or_else(not_found)?;
+    Ok(match path {
+        "fleet" => world::fleet(mcp, None, false),
+        "platforms" => world::platforms(mcp).await.map_err(api_err)?,
+        "areas" => world::areas(mcp),
+        "policy" => world::policy(mcp),
+        "intents" => world::intents(mcp, agent, None, false, usize::MAX),
+        "inbox" => world::inbox(mcp),
+        "events" => world::events(mcp, None, 100),
+        _ => {
+            if let Some(uid) = path.strip_prefix("fleet/") {
+                let uid: u64 = uid.parse().map_err(|_| not_found())?;
+                world::vehicle(mcp, uid).ok_or_else(not_found)?
+            } else if let Some(id) = path.strip_prefix("intents/") {
+                let id: u64 = id.parse().map_err(|_| not_found())?;
+                mcp.decision.explain_json(id).ok_or_else(not_found)?
+            } else {
+                return Err(not_found());
+            }
+        }
+    })
+}

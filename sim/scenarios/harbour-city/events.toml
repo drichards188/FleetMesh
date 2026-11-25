@@ -1,0 +1,39 @@
+# harbour-city events. [[event]] tables are the link emulator's and the stand-ins' (GNSS); the other
+# tables are read by the bridge (sim/scenarios, docs/design/scenarios.md section 3).
+
+[weather]
+# the baseline when the archive does not cover a point: a light westerly (m/s)
+wind_east_mps = 3.0
+wind_north_mps = 0.5
+visibility_m = 12000
+archive = "tidewater/data/cache/golden-gate-2026-06/weather.json"
+
+[[dropzone_event]]
+zone = "dz-fort-mason-3"
+at_s = 900
+duration_s = 240
+count = 6
+
+[[event]]
+name = "cellular congestion at Pier 39"
+at_s = 1200
+duration_s = 600
+class = "cellular"
+circle = { lat = 37.8090, lon = -122.4100, radius_m = 1200 }
+loss = 0.05
+extra_latency_ms = 40
+
+[[event]]
+name = "Fort Mason tower out"
+at_s = 1500
+duration_s = 300
+class = "cellular"
+circle = { lat = 37.8060, lon = -122.4290, radius_m = 700 }
+cut = true
+
+[[event]]
+name = "urban canyon near Fisherman's Wharf (GNSS degrade)"
+at_s = 2000
+duration_s = 240
+circle = { lat = 37.8085, lon = -122.4150, radius_m = 500 }
+gnss = { effect = "degrade", severity = 0.55 }

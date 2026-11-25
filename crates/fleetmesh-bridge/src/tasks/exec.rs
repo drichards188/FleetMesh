@@ -1,0 +1,1740 @@
+//! Running one op: the MAVLink exchanges (commands with retries, mission upload, arming, mode
+//! changes) and the telemetry judgements (active, done, left the task, not moving).
+//!
+//! Every wait is the link's (`crate::link::LinkTiming`, read afresh for each exchange): the
+//! floors on a fast radio, the measured round trip on a slow one (GEO SATCOM, Iridium, an AUV's
+//! modem). The formula and its sources are on `LinkTiming`.
+//!
+//! **Exactly once** (rules 5, murmur-5p4). An order reaches the vehicle once and is started
+//! once, across retries, a link that drops mid-exchange, and a bridge restart:
+//!
+//! - A mission is delivered as a transaction: COUNT, the items, the final ACK; then started
+//!   (current item, arm, the mission mode). A lost final ACK is settled by asking the vehicle
+//!   what it holds (`confirm_mission`), never by uploading again.
+//! - A command is retried with its confirmation field counting the retries, and only when
+//!   neither its ACK nor telemetry showing it took effect (a heartbeat in the commanded mode,
+//!   armed; the mission's current item) came back within the link's timeout: an ACK lost on
+//!   the way back does not make the vehicle execute it twice. After MAV_RESULT_IN_PROGRESS it
+//!   is never sent again: the op waits for the final answer, or fails.
+//! - A link that goes silent before the start went out (nothing heard for its lost-link
+//!   time) ends the op `requeued` when the order came through the queue's policy
+//!   (`requeue`): the decision layer puts the order back in the queue, where it is re-checked
+//!   on the world when the link is back, like any queued order, and then delivered with
+//!   `Resume::Verify`. Once the start went out (the op `starting`: the mission mode, the hold
+//!   or rtl mode, or a new mission to a vehicle already flying one) a lost link ends it
+//!   `unconfirmed`: the vehicle may run it. The order goes back to the queue too, and its next
+//!   delivery there is `Resume::Confirm`: followed if the vehicle runs it, never started
+//!   again on its own if it doesn't (the op ends `unconfirmed` again and a human decides).
+//!   Otherwise (rules before 5, a kind the policy never queues) the op fails.
+//! - An op told the vehicle may hold its order already (`Resume::Verify`: it was sent before a
+//!   lost link or a bridge restart, not started) asks the vehicle what it holds and runs (a
+//!   full mission download, compared item by item: command, frame, position, altitude,
+//!   parameters): running our mission, the op follows it; holding it, only the start is sent;
+//!   neither, the whole order is delivered.
+//! - After a bridge restart, a vehicle that had started the order (`Resume::Adopt`) is followed
+//!   while it still runs it and never sent it again; its link is waited for at most the op's
+//!   `patience` (the kind's queue wait, capped at 120 s).
+//! - A reboot (the vehicle's time since boot went back) ends the op: the vehicle lost the mode
+//!   and armed state the order set, and the order is not re-sent behind anyone's back.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::time::{Instant, sleep, timeout_at};
+
+use super::caps::{Caps, OrbitStyle, caps, mission_alt, takeoff_alt};
+use super::op::{OpCell, OpState};
+use super::{TaskKind, TaskParams};
+use crate::clock::{self, round_int};
+use crate::geo;
+use crate::link::LinkTiming;
+use crate::mav::{self, Kind, MavMessage, apm};
+use crate::vehicle::{Vehicle, VehicleCell};
+
+const ACK_RETRIES: u8 = 4;
+/// Modes ArduPilot does not arm in (`allows_arming` false): the return and landing modes a
+/// failsafe picks, and Copter's BRAKE.
+const NOT_ARMABLE: &[&str] = &["RTL", "SMART_RTL", "QRTL", "LAND", "QLAND", "BRAKE", "AUTO_RTL"];
+/// Item timeouts in a row (nothing heard from the vehicle) before a mission upload fails.
+const MISSION_RETRIES: u32 = 5;
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const ARM_PATIENCE: Duration = Duration::from_secs(30);
+const MODE_PATIENCE: Duration = Duration::from_secs(20);
+const RETRY_PAUSE: Duration = Duration::from_secs(2);
+const POLL: Duration = Duration::from_millis(500);
+/// A vehicle may be out of its task's mode this long (a transient) before the op fails.
+const LEFT_MODE_GRACE_S: f64 = 3.0;
+const STALL_MIN_SPEED: f64 = 0.3;
+/// The height a multirotor goes down to over a drop zone to let a parcel go, m above home.
+const DROP_ALT_M: f64 = 10.0;
+
+/// How an op delivers its order: fresh, or (after a bridge restart) knowing the vehicle may
+/// hold it already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Resume {
+    /// A new order: deliver it and start it.
+    #[default]
+    Fresh,
+    /// It may have been delivered before a bridge restart, not started: if the vehicle runs
+    /// exactly it, follow it; if it holds it, only start it; else deliver it.
+    Verify,
+    /// The vehicle had started it before a bridge restart: follow it while it still runs it;
+    /// otherwise the op ends (it is never sent again).
+    Adopt,
+    /// Its start went out before the link was lost (or the bridge stopped) and nothing
+    /// confirmed it: the vehicle may run it. Follow it if it does; otherwise the op ends
+    /// `unconfirmed`, nothing sent, and a human decides whether to start it again.
+    Confirm,
+    /// Another vehicle of the order had started it before a bridge restart, this one had not
+    /// been sent it: it is not sent now (the op ends, failed, saying so).
+    Undelivered,
+    /// This vehicle's op had ended (failed or replaced) before a bridge restart: it stays
+    /// ended (failed, saying so), never sent again.
+    Ended,
+}
+
+/// Why an op stopped short.
+enum Stop {
+    Failed(String),
+    /// The link went silent mid-exchange (nothing heard for its lost-link time): `what` was
+    /// in progress. Before the vehicle started the order, an op with `requeue` ends
+    /// `requeued` (back to the queue); otherwise it failed.
+    LinkLost(String),
+    /// The vehicle answered MAV_RESULT_IN_PROGRESS and never finished: the op fails, and no
+    /// retry loop (mode change, arming) asks it again.
+    Unfinished(String),
+    /// `Resume::Confirm`: the vehicle does not run the order that may have started: nothing
+    /// is sent, a human decides.
+    NotRunning(String),
+}
+
+type Result<T = ()> = std::result::Result<T, Stop>;
+
+fn fail<T>(s: impl Into<String>) -> Result<T> {
+    Err(Stop::Failed(s.into()))
+}
+
+pub struct OpCtx {
+    pub op: Arc<OpCell>,
+    pub v: Arc<VehicleCell>,
+    pub kind: TaskKind,
+    pub params: TaskParams,
+    /// how many vehicles of this one's kind the tasking has (orbit phase spreading)
+    pub same_kind: usize,
+    /// how the order is delivered (after a bridge restart the vehicle may hold it already)
+    pub resume: Resume,
+    /// how long an adopted order's lost link is waited for before the op fails (zero: not at
+    /// all)
+    pub patience: Duration,
+    /// a link lost before the vehicle started the order sends it back to the queue (the op
+    /// ends `requeued`) instead of failing it
+    pub requeue: bool,
+    /// rules 7: the start is logged ahead of sending it through this
+    pub ahead: Option<super::WriteAhead>,
+}
+
+/// Start the op. A panic inside it fails the op instead of leaving it hanging.
+pub fn spawn(ctx: OpCtx) {
+    let op = ctx.op.clone();
+    let handle = tokio::spawn(run(ctx));
+    *op.abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.abort_handle());
+    tokio::spawn(async move {
+        if let Err(e) = handle.await
+            && e.is_panic()
+        {
+            op.set(OpState::Failed, format!("internal error: {e}"));
+        }
+    });
+}
+
+async fn run(ctx: OpCtx) {
+    match run_inner(&ctx).await {
+        Ok(()) => {}
+        Err(Stop::Failed(why)) => {
+            ctx.op.set(OpState::Failed, why);
+        }
+        Err(Stop::NotRunning(why)) => {
+            ctx.op.set(OpState::Unconfirmed, why);
+        }
+        Err(Stop::Unfinished(why)) => {
+            // in progress once its start had gone out: it may be running
+            if ctx.requeue && ctx.op.state() == OpState::Starting {
+                ctx.op.set(
+                    OpState::Unconfirmed,
+                    format!("{why}: it may be running; back to the queue, and its next delivery only follows it if the vehicle runs it"),
+                );
+            } else {
+                ctx.op.set(OpState::Failed, why);
+            }
+        }
+        Err(Stop::LinkLost(what)) => {
+            // before the start went out: the order goes back to the queue, re-checked there
+            // before it is sent again; after it, it may be running: back to the queue too,
+            // followed next time only if the vehicle runs it; once confirmed (or adopted), or
+            // with no queue, the op failed
+            let st = ctx.op.state();
+            let queue = ctx.requeue && ctx.resume != Resume::Adopt;
+            if queue && matches!(st, OpState::Queued | OpState::Sent) {
+                ctx.op.set(
+                    OpState::Requeued,
+                    format!(
+                        "link lost {what}: back to the queue, re-checked before it is sent again"
+                    ),
+                );
+            } else if queue && st == OpState::Starting {
+                ctx.op.set(
+                    OpState::Unconfirmed,
+                    format!(
+                        "link lost {what}, after its start went out: it may be running; back to the queue, and its next delivery only follows it if the vehicle runs it"
+                    ),
+                );
+            } else {
+                ctx.op.set(OpState::Failed, format!("link lost {what}"));
+            }
+        }
+    }
+}
+
+async fn run_inner(ctx: &OpCtx) -> Result {
+    match ctx.resume {
+        Resume::Undelivered => {
+            return fail(
+                "not sent before the bridge restarted (another vehicle of the order had started it): not sent now; re-issue it for this vehicle",
+            );
+        }
+        Resume::Ended => {
+            return fail("its op had ended before the bridge restarted: not sent again");
+        }
+        _ => {}
+    }
+    if !ctx.v.read(|s| s.has_position(clock::mono())) {
+        let deadline = Instant::now() + READY_TIMEOUT;
+        while !ctx.v.read(|s| s.has_position(clock::mono())) {
+            if Instant::now() > deadline {
+                // silent all along: a lost link (back to the queue), not a vehicle without a fix
+                if link_silent(&ctx.v) {
+                    return Err(Stop::LinkLost("waiting for a position fix".into()));
+                }
+                return fail("vehicle never got a position fix");
+            }
+            sleep(POLL).await;
+        }
+    }
+    let kind = ctx.v.read(|s| s.kind).unwrap_or(Kind::Unknown);
+    let Some(caps) = caps(kind) else {
+        return fail(format!("a {} can't {}", kind.name(), ctx.kind.name()));
+    };
+    let t = Task { ctx, caps, kind };
+    match ctx.kind {
+        TaskKind::Orbit => t.orbit().await,
+        TaskKind::Patrol => t.patrol().await,
+        TaskKind::Rtl => t.rtl().await,
+        TaskKind::Hold => t.hold().await,
+        TaskKind::Transit => t.transit().await,
+        TaskKind::Land => t.land().await,
+        TaskKind::Swap => t.swap().await,
+    }
+}
+
+/// Nothing heard from the vehicle for its link's lost-link time (3 of its expected report
+/// intervals).
+pub(crate) fn link_silent(v: &VehicleCell) -> bool {
+    let heard = v.read(|s| s.heard_mono);
+    let stale = v.link_snapshot(clock::mono()).stale_after_s();
+    heard.is_none_or(|t| clock::mono() - t > stale)
+}
+
+/// Next message from the vehicle matching `pred`, or None on timeout.
+async fn recv_until(
+    rx: &mut broadcast::Receiver<Arc<MavMessage>>,
+    timeout: Duration,
+    pred: impl Fn(&MavMessage) -> bool,
+) -> Option<Arc<MavMessage>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match timeout_at(deadline, rx.recv()).await {
+            Err(_) | Ok(Err(RecvError::Closed)) => return None,
+            Ok(Err(RecvError::Lagged(_))) => {}
+            Ok(Ok(m)) if pred(&m) => return Some(m),
+            Ok(Ok(_)) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Item {
+    command: apm::MavCmd,
+    frame: apm::MavFrame,
+    lat: f64,
+    lon: f64,
+    alt: f64,
+    p: [f32; 4],
+}
+
+impl Item {
+    // the _INT frame is what ArduPilot (and the Python bridge) use in MISSION_ITEM_INT
+    #[allow(deprecated)]
+    fn nav(command: apm::MavCmd, lat: f64, lon: f64, alt: f64) -> Item {
+        Item {
+            command,
+            frame: apm::MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            lat,
+            lon,
+            alt,
+            p: [0.0; 4],
+        }
+    }
+
+    /// A DO_ command item (no position): the gripper, a servo.
+    #[allow(deprecated)]
+    fn command(command: apm::MavCmd, p: [f32; 4]) -> Item {
+        Item {
+            command,
+            frame: apm::MavFrame::MAV_FRAME_MISSION,
+            lat: 0.0,
+            lon: 0.0,
+            alt: 0.0,
+            p,
+        }
+    }
+
+    fn waypoint(lat: f64, lon: f64, alt: f64) -> Item {
+        Item::nav(apm::MavCmd::MAV_CMD_NAV_WAYPOINT, lat, lon, alt)
+    }
+
+    /// Whether a vehicle's copy is this item: the command; for a navigation command its frame
+    /// (ArduPilot answers in the non-INT twin of an _INT frame); the position to the 1e-7
+    /// degree; the altitude to 0.1 m (ArduPilot stores centimetres); and the four parameters
+    /// to within 1 or 5 % (it stores some compactly: a loiter radius in whole metres). A
+    /// mission at another altitude, radius or loop target is not ours.
+    fn same_as(&self, it: &apm::MISSION_ITEM_INT_DATA) -> bool {
+        let close = |a: i32, b: f64| (i64::from(a) - (b * 1e7) as i64).abs() <= 2;
+        let param = |got: f32, want: f32| (got - want).abs() <= 1.0f32.max(want.abs() * 0.05);
+        let got = [it.param1, it.param2, it.param3, it.param4];
+        it.command == self.command
+            && (!is_nav(self.command) || plain_frame(it.frame) == plain_frame(self.frame))
+            && close(it.x, self.lat)
+            && close(it.y, self.lon)
+            && (f64::from(it.z) - f64::from(self.alt as f32)).abs() <= 0.1
+            && got.iter().zip(&self.p).all(|(g, w)| param(*g, *w))
+    }
+
+    fn encode(&self, seq: u16, target: u8) -> MavMessage {
+        MavMessage::MISSION_ITEM_INT(apm::MISSION_ITEM_INT_DATA {
+            param1: self.p[0],
+            param2: self.p[1],
+            param3: self.p[2],
+            param4: self.p[3],
+            x: (self.lat * 1e7) as i32,
+            y: (self.lon * 1e7) as i32,
+            z: self.alt as f32,
+            seq,
+            command: self.command,
+            target_system: target,
+            target_component: mav::AUTOPILOT_COMPID,
+            frame: self.frame,
+            current: 0,
+            autocontinue: 1,
+            ..Default::default()
+        })
+    }
+}
+
+/// A navigation command (it has a position, in a frame): MAV_CMD_NAV_* (below
+/// MAV_CMD_NAV_LAST, 95).
+fn is_nav(c: apm::MavCmd) -> bool {
+    (c as u32) < 95
+}
+
+/// A frame as ArduPilot answers it: the _INT frames are their non-INT twins.
+#[allow(deprecated)]
+fn plain_frame(f: apm::MavFrame) -> apm::MavFrame {
+    use apm::MavFrame as F;
+    match f {
+        F::MAV_FRAME_GLOBAL_INT => F::MAV_FRAME_GLOBAL,
+        F::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT => F::MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        F::MAV_FRAME_GLOBAL_TERRAIN_ALT_INT => F::MAV_FRAME_GLOBAL_TERRAIN_ALT,
+        other => other,
+    }
+}
+
+/// Whether a mission the vehicle holds is ours: as many items, and every one past the home
+/// slot (item 0, which ArduPilot overwrites with home) the same.
+fn same_mission(ours: &[Item], held: &[apm::MISSION_ITEM_INT_DATA]) -> bool {
+    ours.len() == held.len() && ours.iter().zip(held).skip(1).all(|(a, b)| a.same_as(b))
+}
+
+/// Add the jump back to `loop_from` that makes a mission loop.
+fn with_jump(mut items: Vec<Item>, loop_from: Option<usize>) -> Vec<Item> {
+    if let Some(from) = loop_from {
+        let mut jump = Item::nav(apm::MavCmd::MAV_CMD_DO_JUMP, 0.0, 0.0, 0.0);
+        jump.frame = apm::MavFrame::MAV_FRAME_MISSION;
+        jump.p[0] = from as f32;
+        jump.p[1] = -1.0;
+        items.push(jump);
+    }
+    items
+}
+
+/// What a vehicle holds and runs, against our mission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnVehicle {
+    /// In its mission mode, armed, holding exactly our mission: it runs it.
+    Running,
+    /// It holds our mission but does not run it.
+    Stored,
+    /// It holds something else (or is still receiving).
+    Other,
+}
+
+/// "NOT MOVING" detection: if a vehicle that should be moving shows no ground speed for a
+/// while, say so. The autopilot can be in AUTO and still not going anywhere (aground, fouled,
+/// stuck): that's what the operator needs to see. "A while" is 10 s on a streaming link and
+/// longer where speed is reported less often (`LinkTiming::stall_after_s`): a vehicle on
+/// HIGH_LATENCY2 every 5 s, or 20 s under water, must not read as stuck between reports.
+struct StallWatch {
+    moving_at: f64,
+}
+
+impl StallWatch {
+    fn new() -> StallWatch {
+        StallWatch {
+            moving_at: clock::mono(),
+        }
+    }
+
+    fn detail(&mut self, v: &Vehicle, timing: &LinkTiming, base: String) -> String {
+        let now = clock::mono();
+        if v.groundspeed.unwrap_or(0.0) >= STALL_MIN_SPEED {
+            self.moving_at = now;
+        }
+        let stalled = now - self.moving_at;
+        if stalled >= timing.stall_after_s() {
+            format!("NOT MOVING for {stalled:.0}s (aground or stuck?) · {base}")
+        } else {
+            base
+        }
+    }
+}
+
+/// The circle an orbit task flies: its radius (the one asked, 200 m by default, widened to
+/// what the airframe can turn) and the tolerance it counts as on station within.
+pub(crate) fn orbit_geometry(
+    radius: Option<f64>,
+    min_turn: Option<f64>,
+    style: Option<OrbitStyle>,
+) -> (f64, bool, f64) {
+    let mut radius = radius.unwrap_or(200.0);
+    let mut widened = false;
+    if let Some(min_r) = min_turn.filter(|r| *r != 0.0)
+        && radius < min_r * 1.1
+    {
+        widened = true;
+        radius = round_int(min_r * 1.1) as f64; // a 160 m/s HALE can't fly a 250 m circle
+    }
+    let tol = if style == Some(OrbitStyle::Loiter) {
+        (radius * 0.4).max(60.0)
+    } else {
+        (radius * 0.3).max(25.0)
+    };
+    (radius, widened, tol)
+}
+
+/// "Left the task" detection: fail if the vehicle leaves `mode` (failsafe, pilot, another GCS)
+/// for longer than a grace period, quoting what the autopilot last said.
+struct ModeGuard {
+    mode: u32,
+    left_at: Option<f64>,
+}
+
+impl ModeGuard {
+    fn check(&mut self, v: &Vehicle) -> Option<String> {
+        if v.custom_mode == Some(self.mode) {
+            self.left_at = None;
+            return None;
+        }
+        let now = clock::mono();
+        let left_at = *self.left_at.get_or_insert(now);
+        if now - left_at < LEFT_MODE_GRACE_S {
+            return None;
+        }
+        let said = v
+            .last_statustext()
+            .map(|t| format!(": {t}"))
+            .unwrap_or_default();
+        Some(format!(
+            "vehicle left the task, now in {}{said}",
+            v.mode.as_deref().unwrap_or("None")
+        ))
+    }
+}
+
+struct Task<'a> {
+    ctx: &'a OpCtx,
+    caps: &'static Caps,
+    kind: Kind,
+}
+
+impl Task<'_> {
+    fn v(&self) -> &VehicleCell {
+        &self.ctx.v
+    }
+
+    fn op(&self) -> &OpCell {
+        &self.ctx.op
+    }
+
+    // ---- MAVLink building blocks ----------------------------------------------------------
+
+    fn timing(&self) -> LinkTiming {
+        self.v().link_timing()
+    }
+
+    /// The vehicle rebooted since the op started: it lost the mode and armed state (a
+    /// stand-in, the mission too) its order set, so the op is over (never re-sent quietly).
+    fn check_reboot(&self) -> Result {
+        if self.v().read(|s| s.boot_epoch) != self.op().boot_epoch {
+            return fail(
+                "the vehicle rebooted (its time since boot went back): its mode and armed state are gone; the order is not sent again",
+            );
+        }
+        Ok(())
+    }
+
+    /// Nothing heard from the vehicle for its link's lost-link time (3 of its expected
+    /// report intervals).
+    fn link_silent(&self) -> bool {
+        link_silent(self.v())
+    }
+
+    /// The exchange in progress could not finish: a lost link if the vehicle is silent, else
+    /// a failure saying `failed`.
+    fn stopped<T>(&self, what: &str, failed: String) -> Result<T> {
+        if self.link_silent() {
+            Err(Stop::LinkLost(what.to_string()))
+        } else {
+            Err(Stop::Failed(failed))
+        }
+    }
+
+    /// The link went silent `what`: wait until the vehicle is heard again, at most until
+    /// `deadline` (from the op's patience; with none, the op fails at once, as it always did).
+    async fn wait_link(&self, deadline: Instant, what: &str) -> Result {
+        if self.ctx.patience.is_zero() {
+            return Err(Stop::LinkLost(what.to_string()));
+        }
+        loop {
+            self.check_reboot()?;
+            if !self.link_silent() {
+                self.op().narrate(format!("link back {what}: checking what the vehicle holds"));
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Stop::LinkLost(format!(
+                    "{what}: not back within {:.0} s",
+                    self.ctx.patience.as_secs_f64()
+                )));
+            }
+            self.op().narrate(format!(
+                "link lost {what}: waiting for the vehicle ({:.0} s left)",
+                left.as_secs_f64()
+            ));
+            sleep(POLL).await;
+        }
+    }
+
+    /// COMMAND_LONG with retries. The `confirmation` field increments on each retry so the
+    /// autopilot can tell a retransmission from a new command. Each try waits the link's ACK
+    /// timeout, a little longer each time; a late ACK to an earlier try still counts, and so
+    /// does telemetry showing the command took effect (`took`): the retry is sent only when
+    /// neither came back. After MAV_RESULT_IN_PROGRESS it is never sent again: each remaining
+    /// try only waits for the final answer (or the telemetry), and without one the op fails.
+    async fn command_long(
+        &self,
+        command: apm::MavCmd,
+        params: &[f32],
+        took: impl Fn(&MavMessage) -> bool,
+    ) -> Result {
+        let mut p = [0.0f32; 7];
+        p[..params.len()].copy_from_slice(params);
+        let mut rx = self.v().subscribe();
+        let is_ack = |m: &MavMessage| matches!(m, MavMessage::COMMAND_ACK(a) if a.command == command);
+        let mut in_progress = false;
+        for confirmation in 0..=ACK_RETRIES {
+            self.check_reboot()?;
+            // in progress: the vehicle is on it; it is not sent a second time
+            if !in_progress {
+                self.v()
+                    .send(&mav::command_long(self.v().sysid, command, confirmation, p));
+            }
+            let wait = self.timing().ack_timeout(u32::from(confirmation));
+            let mut answer = recv_until(&mut rx, wait, |m| is_ack(m) || took(m)).await;
+            while let Some(MavMessage::COMMAND_ACK(a)) = answer.as_deref()
+                && a.result == apm::MavResult::MAV_RESULT_IN_PROGRESS
+            {
+                in_progress = true;
+                answer = recv_until(&mut rx, wait, |m| is_ack(m) || took(m)).await;
+            }
+            match answer.as_deref() {
+                None => {}
+                Some(MavMessage::COMMAND_ACK(a)) => match a.result {
+                    apm::MavResult::MAV_RESULT_ACCEPTED => return Ok(()),
+                    r => return fail(format!("{} rejected: {r:?}", mav::cmd_name(command))),
+                },
+                // the vehicle's own telemetry says it took effect: its ACK was lost
+                Some(_) => return Ok(()),
+            }
+        }
+        let name = mav::cmd_name(command);
+        if in_progress {
+            if self.link_silent() {
+                return Err(Stop::LinkLost(format!("waiting for the {name} result")));
+            }
+            return Err(Stop::Unfinished(format!("{name} in progress, never finished")));
+        }
+        self.stopped(
+            &format!("waiting for the {name} ACK"),
+            format!("no ACK for {name} after {} tries", ACK_RETRIES + 1),
+        )
+    }
+
+    /// MAVLink mission protocol: COUNT -> (REQUEST_INT seq -> ITEM_INT seq)* -> ACK. The
+    /// vehicle drives the transfer and re-requests a missing item every second (ArduPilot's
+    /// MissionItemProtocol), so on a link whose round trip is longer than that, requests come
+    /// twice. Tolerating that, and loss, the way the protocol intends:
+    /// - a request for an item still in flight (sent less than `LinkTiming::in_flight` ago) or
+    ///   for one the vehicle already moved past is not answered again;
+    /// - MAV_MISSION_INVALID_SEQUENCE is the vehicle ignoring a duplicate we sent anyway; it
+    ///   keeps waiting for the item it asked for, so the upload goes on;
+    /// - silence for the link's item timeout: resend whatever went last (the vehicle may also
+    ///   have lost the COUNT);
+    /// - after the last item, silence or MAV_MISSION_ERROR (no longer receiving: its ACCEPTED
+    ///   was lost) is settled by asking the vehicle what it holds (`confirm_mission`), never
+    ///   by uploading again;
+    /// - silence because the link went down (nothing heard at all): a lost link, which the
+    ///   caller waits out and then checks what the vehicle holds.
+    ///
+    /// Older firmware asks with the deprecated MISSION_REQUEST.
+    #[allow(deprecated)]
+    async fn upload_mission(&self, items: &[Item]) -> Result {
+        let sysid = self.v().sysid;
+        let count = items.len() as u16;
+        let mut rx = self.v().subscribe();
+        let mut last = MavMessage::MISSION_COUNT(apm::MISSION_COUNT_DATA {
+            count,
+            target_system: sysid,
+            target_component: mav::AUTOPILOT_COMPID,
+            ..Default::default()
+        });
+        self.v().send(&last);
+        let mut sent: Option<(u16, Instant)> = None;
+        let mut asked: Option<u16> = None;
+        let mut timeouts = 0;
+        loop {
+            self.check_reboot()?;
+            let timing = self.timing();
+            let msg = recv_until(&mut rx, timing.item_timeout(), |m| {
+                matches!(
+                    m,
+                    MavMessage::MISSION_REQUEST_INT(_)
+                        | MavMessage::MISSION_REQUEST(_)
+                        | MavMessage::MISSION_ACK(_)
+                )
+            })
+            .await;
+            let final_sent = sent.is_some_and(|(seq, _)| seq + 1 == count);
+            let Some(msg) = msg else {
+                timeouts += 1;
+                if timeouts > MISSION_RETRIES {
+                    return self.stopped("mid-upload", "mission upload timed out".into());
+                }
+                if final_sent && self.confirm_mission(items, &mut rx).await? {
+                    return Ok(());
+                }
+                self.v().send(&last);
+                continue;
+            };
+            let seq = match &*msg {
+                MavMessage::MISSION_ACK(a) => match a.mavtype {
+                    apm::MavMissionResult::MAV_MISSION_ACCEPTED => return Ok(()),
+                    apm::MavMissionResult::MAV_MISSION_INVALID_SEQUENCE => continue,
+                    apm::MavMissionResult::MAV_MISSION_ERROR if final_sent => {
+                        if self.confirm_mission(items, &mut rx).await? {
+                            return Ok(());
+                        }
+                        return fail("mission upload lost: the vehicle stopped receiving");
+                    }
+                    // ArduPilot gave up on the transfer (8 s without an item) while the link
+                    // was down: start over once it is back
+                    apm::MavMissionResult::MAV_MISSION_OPERATION_CANCELLED if self.link_silent() => {
+                        return Err(Stop::LinkLost("mid-upload".into()));
+                    }
+                    r => return fail(format!("mission rejected: {r:?}")),
+                },
+                MavMessage::MISSION_REQUEST_INT(r) => r.seq,
+                MavMessage::MISSION_REQUEST(r) => r.seq,
+                _ => continue,
+            };
+            timeouts = 0;
+            if seq >= count {
+                return fail(format!("vehicle requested item {seq} of {count}"));
+            }
+            if asked.is_some_and(|a| seq < a) {
+                continue; // a stale re-request: the vehicle already has that one
+            }
+            if sent.is_some_and(|(s, at)| s == seq && at.elapsed() < timing.in_flight()) {
+                continue; // it crossed our copy, which is still on its way
+            }
+            asked = Some(seq);
+            self.op()
+                .set_progress(Some(format!("upload {}/{count}", seq + 1)));
+            last = items[usize::from(seq)].encode(seq, sysid);
+            self.v().send(&last);
+            sent = Some((seq, Instant::now()));
+        }
+    }
+
+    /// Whether the vehicle holds the mission just uploaded, when its final ACK never came:
+    /// MISSION_REQUEST_LIST for the count, then the last item. The vehicle stores items only
+    /// in order, so it asked for the last item only after taking every other one; if it also
+    /// holds our last item, the whole mission is ours. Ok(false): it is still receiving (it
+    /// answers DENIED) or holds something else; the upload goes on or fails.
+    #[allow(deprecated)]
+    async fn confirm_mission(
+        &self,
+        items: &[Item],
+        rx: &mut broadcast::Receiver<Arc<MavMessage>>,
+    ) -> Result<bool> {
+        let sysid = self.v().sysid;
+        let count = items.len() as u16;
+        let target = (sysid, mav::AUTOPILOT_COMPID);
+        let denied = |m: &MavMessage| {
+            matches!(m, MavMessage::MISSION_ACK(a)
+                if a.mavtype == apm::MavMissionResult::MAV_MISSION_DENIED)
+        };
+        self.op().narrate("confirming the mission upload");
+        let mut held = None;
+        for attempt in 0..=u32::from(ACK_RETRIES) {
+            self.v().send(&MavMessage::MISSION_REQUEST_LIST(
+                apm::MISSION_REQUEST_LIST_DATA {
+                    target_system: target.0,
+                    target_component: target.1,
+                    ..Default::default()
+                },
+            ));
+            let wait = self.timing().ack_timeout(attempt);
+            let m = recv_until(rx, wait, |m| {
+                matches!(m, MavMessage::MISSION_COUNT(_)) || denied(m)
+            })
+            .await;
+            match m.as_deref() {
+                Some(MavMessage::MISSION_COUNT(c)) => {
+                    held = Some(c.count);
+                    break;
+                }
+                Some(_) => return Ok(false), // still receiving
+                None => {}
+            }
+        }
+        let Some(held) = held else {
+            return self.stopped(
+                "confirming the mission upload",
+                "mission upload unconfirmed: no answer to MISSION_REQUEST_LIST".into(),
+            );
+        };
+        if held != count {
+            return Ok(false);
+        }
+        let seq = count - 1;
+        for attempt in 0..=u32::from(ACK_RETRIES) {
+            self.v().send(&MavMessage::MISSION_REQUEST_INT(
+                apm::MISSION_REQUEST_INT_DATA {
+                    seq,
+                    target_system: target.0,
+                    target_component: target.1,
+                    ..Default::default()
+                },
+            ));
+            let wait = self.timing().ack_timeout(attempt);
+            let m = recv_until(rx, wait, |m| {
+                matches!(m, MavMessage::MISSION_ITEM_INT(it) if it.seq == seq) || denied(m)
+            })
+            .await;
+            match m.as_deref() {
+                Some(MavMessage::MISSION_ITEM_INT(it)) => {
+                    return Ok(items[usize::from(seq)].same_as(it));
+                }
+                Some(_) => return Ok(false),
+                None => {}
+            }
+        }
+        self.stopped(
+            "confirming the mission upload",
+            "mission upload unconfirmed: the vehicle did not send its last item".into(),
+        )
+    }
+
+    /// The whole mission the vehicle holds (MISSION_REQUEST_LIST, then every item), to
+    /// compare with ours item by item after a lost link or a bridge restart. None: it is
+    /// still receiving an upload (it answers DENIED).
+    #[allow(deprecated)]
+    async fn download_mission(&self) -> Result<Option<Vec<apm::MISSION_ITEM_INT_DATA>>> {
+        let sysid = self.v().sysid;
+        let target = (sysid, mav::AUTOPILOT_COMPID);
+        let mut rx = self.v().subscribe();
+        let denied = |m: &MavMessage| {
+            matches!(m, MavMessage::MISSION_ACK(a)
+                if a.mavtype == apm::MavMissionResult::MAV_MISSION_DENIED)
+        };
+        self.op().narrate("asking the vehicle what mission it holds");
+        let mut count = None;
+        for attempt in 0..=u32::from(ACK_RETRIES) {
+            self.check_reboot()?;
+            self.v().send(&MavMessage::MISSION_REQUEST_LIST(
+                apm::MISSION_REQUEST_LIST_DATA {
+                    target_system: target.0,
+                    target_component: target.1,
+                    ..Default::default()
+                },
+            ));
+            let wait = self.timing().ack_timeout(attempt);
+            match recv_until(&mut rx, wait, |m| {
+                matches!(m, MavMessage::MISSION_COUNT(_)) || denied(m)
+            })
+            .await
+            .as_deref()
+            {
+                Some(MavMessage::MISSION_COUNT(c)) => {
+                    count = Some(c.count);
+                    break;
+                }
+                Some(_) => return Ok(None),
+                None => {}
+            }
+        }
+        let Some(count) = count else {
+            return self.stopped(
+                "asking what mission it holds",
+                "no answer to MISSION_REQUEST_LIST".into(),
+            );
+        };
+        let mut held = Vec::with_capacity(usize::from(count));
+        for seq in 0..count {
+            let mut got = None;
+            for attempt in 0..=u32::from(ACK_RETRIES) {
+                self.check_reboot()?;
+                self.v().send(&MavMessage::MISSION_REQUEST_INT(
+                    apm::MISSION_REQUEST_INT_DATA {
+                        seq,
+                        target_system: target.0,
+                        target_component: target.1,
+                        ..Default::default()
+                    },
+                ));
+                let wait = self.timing().ack_timeout(attempt);
+                match recv_until(&mut rx, wait, |m| {
+                    matches!(m, MavMessage::MISSION_ITEM_INT(it) if it.seq == seq) || denied(m)
+                })
+                .await
+                .as_deref()
+                {
+                    Some(MavMessage::MISSION_ITEM_INT(it)) => {
+                        got = Some(it.clone());
+                        break;
+                    }
+                    Some(_) => return Ok(None),
+                    None => {}
+                }
+            }
+            match got {
+                Some(it) => held.push(it),
+                None => {
+                    return self.stopped(
+                        "asking what mission it holds",
+                        format!("the vehicle did not send mission item {seq}"),
+                    );
+                }
+            }
+            self.op()
+                .set_progress(Some(format!("checking {}/{count}", seq + 1)));
+        }
+        self.op().set_progress(None);
+        Ok(Some(held))
+    }
+
+    /// The mission mode's number, if the vehicle has one.
+    fn auto_mode(&self) -> Option<u32> {
+        let t = self.v().read(|s| s.mav_type)?;
+        mav::mode_number(t, self.caps.auto)
+    }
+
+    /// What the vehicle holds and runs, against any of our mission's forms (`candidates`:
+    /// with and without a takeoff, which depends on whether it was airborne when it was
+    /// built).
+    async fn mission_held(&self, candidates: &[Vec<Item>]) -> Result<OnVehicle> {
+        let Some(held) = self.download_mission().await? else {
+            return Ok(OnVehicle::Other);
+        };
+        if !candidates.iter().any(|c| same_mission(c, &held)) {
+            return Ok(OnVehicle::Other);
+        }
+        let auto = self.auto_mode();
+        let running = self
+            .v()
+            .read(|s| s.armed && auto.is_some() && s.custom_mode == auto);
+        Ok(if running { OnVehicle::Running } else { OnVehicle::Stored })
+    }
+
+    async fn ensure_armed(&self) -> Result {
+        if self.v().read(|s| s.armed) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + ARM_PATIENCE;
+        let armed = |m: &MavMessage| {
+            matches!(m, MavMessage::HEARTBEAT(h)
+                if h.autopilot != apm::MavAutopilot::MAV_AUTOPILOT_INVALID
+                    && h.base_mode.contains(apm::MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED))
+        };
+        let mut left_return_mode = false;
+        loop {
+            match self
+                .command_long(apm::MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, &[1.0], armed)
+                .await
+            {
+                Ok(()) => break,
+                Err(Stop::Failed(e)) => {
+                    // a vehicle its lost-link failsafe sent home while the order waited (an
+                    // outage), or that an earlier hold left in BRAKE, is in a mode its
+                    // autopilot does not arm in: switch to one it does (`Caps::arm`), then
+                    // arm (the order's own mode follows)
+                    let mode = self.v().read(|s| s.mode.clone()).unwrap_or_default();
+                    if !left_return_mode
+                        && mode != self.caps.arm
+                        && NOT_ARMABLE.contains(&mode.as_str())
+                    {
+                        left_return_mode = true;
+                        self.op().narrate(format!(
+                            "arming refused in {mode}: switching to {} to arm",
+                            self.caps.arm
+                        ));
+                        self.set_mode(self.caps.arm).await?;
+                        continue;
+                    }
+                    // pre-arm checks can fail for a while after boot (EKF settling); for good,
+                    // the op fails with the autopilot's last word on it (a landed Puma: "Arm:
+                    // landed, no crew for a hand launch")
+                    let said = self.v().read(|s| s.last_statustext().map(str::to_string));
+                    if Instant::now() > deadline {
+                        return fail(match said {
+                            Some(reason) => format!("{e} ({reason})"),
+                            None => e,
+                        });
+                    }
+                    let reason = said.unwrap_or(e);
+                    self.op().narrate(format!("arming: {reason}"));
+                    sleep(RETRY_PAUSE).await;
+                }
+                Err(lost) => return Err(lost),
+            }
+        }
+        // the next heartbeat says so: a second away when streaming, 20 s from an AUV under water
+        let deadline = Instant::now() + self.timing().confirm_wait();
+        while Instant::now() < deadline {
+            if self.v().read(|s| s.armed) {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        if self.v().read(|s| s.armed) {
+            return Ok(());
+        }
+        // its heartbeat may be what was lost: a lost link, not a refusal
+        self.stopped(
+            "waiting for the armed heartbeat",
+            "arm accepted but vehicle never reported armed".into(),
+        )
+    }
+
+    /// Set a mode by name; returns the mode number to watch for in heartbeats. Autopilots
+    /// refuse modes transiently (e.g. AUTO while the EKF settles), so a rejection is retried
+    /// for a while before the op fails. A heartbeat (or HIGH_LATENCY2) in the mode counts as
+    /// the answer: a lost ACK is not followed by a second mode change.
+    async fn set_mode(&self, name: &str) -> Result<u32> {
+        let mav_type = self.v().read(|s| s.mav_type);
+        let Some(number) = mav_type.and_then(|t| mav::mode_number(t, name)) else {
+            return fail(format!("{} has no {name} mode", self.kind.name()));
+        };
+        let in_mode = move |m: &MavMessage| match m {
+            MavMessage::HEARTBEAT(h) => {
+                h.autopilot != apm::MavAutopilot::MAV_AUTOPILOT_INVALID && h.custom_mode == number
+            }
+            MavMessage::HIGH_LATENCY2(h) => u32::from(h.custom_mode) == number,
+            _ => false,
+        };
+        let deadline = Instant::now() + MODE_PATIENCE;
+        loop {
+            let flag = apm::MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED.bits();
+            match self
+                .command_long(
+                    apm::MavCmd::MAV_CMD_DO_SET_MODE,
+                    &[f32::from(flag), number as f32],
+                    in_mode,
+                )
+                .await
+            {
+                Ok(()) => return Ok(number),
+                Err(Stop::Failed(e)) => {
+                    if Instant::now() > deadline {
+                        return fail(
+                            match self.v().read(|s| s.last_statustext().map(str::to_string)) {
+                                Some(reason) => format!("{e} ({reason})"),
+                                None => e,
+                            },
+                        );
+                    }
+                    self.op().narrate(format!("{name} refused, retrying"));
+                    sleep(RETRY_PAUSE).await;
+                }
+                Err(lost) => return Err(lost),
+            }
+        }
+    }
+
+    /// Poll until `cond`. `detail` narrates progress (given the link's timing); `guard` may
+    /// fail the op early. A reboot ends it.
+    async fn wait_until(
+        &self,
+        mut cond: impl FnMut(&Vehicle) -> bool,
+        mut detail: impl FnMut(&Vehicle, &LinkTiming) -> String,
+        mut guard: Option<&mut ModeGuard>,
+    ) -> Result {
+        loop {
+            self.check_reboot()?;
+            let timing = self.timing();
+            let step = self.v().read(|v| {
+                if cond(v) {
+                    return Ok(None);
+                }
+                if let Some(err) = guard.as_mut().and_then(|g| g.check(v)) {
+                    return Err(Stop::Failed(err));
+                }
+                Ok(Some(detail(v, &timing)))
+            })?;
+            match step {
+                None => return Ok(()),
+                Some(d) => self.op().narrate(d),
+            }
+            sleep(POLL).await;
+        }
+    }
+
+    fn wait_mode(&self, mode: u32) -> impl std::future::Future<Output = Result> + '_ {
+        self.wait_until(move |v| v.custom_mode == Some(mode), mode_detail, None)
+    }
+
+    // ---- shared mission plumbing -------------------------------------------------------------
+
+    /// Mission altitude (relative to home; negative = depth). The platform's own cruise altitude
+    /// when the fleet manifest knows it (a Global Hawk at 18 km, an AUV at 40 m depth), else
+    /// the per-autopilot default. Same-kind vehicles in one tasking are stacked apart.
+    fn task_alt(&self) -> f64 {
+        // rules 34: a group member flies its share's altitude as logged (on the surface, none)
+        if let Some(share) = &self.ctx.params.share {
+            return share.alt_m.unwrap_or(self.caps.alt.0);
+        }
+        let (cruise, home_alt) = self.v().read(|s| {
+            (
+                s.identity.as_ref().and_then(|i| i.num("cruise_alt_m")),
+                s.home_alt,
+            )
+        });
+        mission_alt(self.caps, cruise, home_alt, self.ctx.op.slot)
+    }
+
+    /// Whether a mission built now starts with a takeoff (grounded aircraft).
+    fn needs_takeoff(&self) -> bool {
+        self.caps.takeoff.is_some() && !self.v().read(|s| s.airborne())
+    }
+
+    /// The takeoff choices a mission may have been built with: both for an aircraft (it may
+    /// have been grounded or airborne then), none for the rest.
+    fn takeoff_choices(&self) -> Vec<bool> {
+        if self.caps.takeoff.is_some() {
+            vec![true, false]
+        } else {
+            vec![false]
+        }
+    }
+
+    /// Item 0 is the home slot (ArduPilot overwrites it). With `takeoff`, a takeoff item.
+    fn mission_prefix(&self, alt: f64, takeoff: bool) -> Vec<Item> {
+        let pos = self.v().read(|s| s.pos.unwrap_or((0.0, 0.0)));
+        let mut items = vec![Item::waypoint(pos.0, pos.1, 0.0)];
+        if let Some(cmd) = self.caps.takeoff
+            && takeoff
+        {
+            let mut it = Item::nav(cmd, 0.0, 0.0, alt.min(takeoff_alt(self.kind)));
+            it.p[0] = if self.kind == Kind::Plane { 15.0 } else { 0.0 }; // plane: takeoff pitch
+            items.push(it);
+        }
+        // rules 22: the transit the decision engine routed round land or a no-go area
+        if let Some(via) = self.ctx.params.via.as_ref().and_then(|m| m.get(&self.v().uid)) {
+            for [lon, lat] in via {
+                items.push(Item::waypoint(*lat, *lon, alt));
+            }
+        }
+        items
+    }
+
+    /// Deliver the mission and start it, as one transaction: the upload (unless the vehicle
+    /// holds it already: `known`), then the start. A link lost on the way ends the op
+    /// (`Stop::LinkLost`): the order goes back to the queue, and its next delivery asks the
+    /// vehicle what it holds first.
+    async fn deliver_mission(&self, items: &[Item], known: OnVehicle) -> Result {
+        if known != OnVehicle::Stored {
+            let detail = format!("uploading {} mission items", items.len());
+            // a vehicle flying a mission takes the new items as they arrive: the upload is
+            // its start
+            if self.in_mission_mode() {
+                self.mark_starting(&format!("{detail} to a vehicle flying its mission"))?;
+            } else {
+                self.op().set(OpState::Sent, detail);
+            }
+            self.upload_mission(items).await?;
+        }
+        self.start_mission().await
+    }
+
+    /// Start the mission the vehicle holds: from item 1 (confirmed by its MISSION_CURRENT),
+    /// armed, in the mission mode.
+    async fn start_mission(&self) -> Result {
+        self.op().set(OpState::Sent, "starting mission");
+        let first = |m: &MavMessage| match m {
+            MavMessage::MISSION_CURRENT(c) => c.seq == 1,
+            MavMessage::HIGH_LATENCY2(h) => h.wp_num == 1,
+            _ => false,
+        };
+        // already in its mission mode: arming (or moving the current item) starts it
+        if self.in_mission_mode_any() {
+            self.mark_starting("starting mission (already in its mission mode)")?;
+        }
+        self.command_long(apm::MavCmd::MAV_CMD_DO_SET_MISSION_CURRENT, &[1.0], first)
+            .await?;
+        self.ensure_armed().await?;
+        self.mark_starting("starting mission: mission mode commanded")?;
+        self.set_mode(self.caps.auto).await?;
+        Ok(())
+    }
+
+    /// Rules 7 (the write-ahead installed): a follow of an order the vehicle already runs is
+    /// logged ahead like a start (`op.state` starting, saying it was followed): from here the
+    /// vehicle runs it, and a bridge that stops now finds it may have started. Before rules 7
+    /// a follow went straight to acked.
+    fn follow_ahead(&self, detail: &str) -> Result {
+        if self.ctx.ahead.is_some() {
+            self.mark_starting(detail)?;
+        }
+        Ok(())
+    }
+
+    /// Armed and in its mission mode: flying a mission (any).
+    fn in_mission_mode(&self) -> bool {
+        let auto = self.auto_mode();
+        self.v()
+            .read(|s| s.armed && auto.is_some() && s.custom_mode == auto)
+    }
+
+    /// In its mission mode, armed or not.
+    fn in_mission_mode_any(&self) -> bool {
+        let auto = self.auto_mode();
+        self.v().read(|s| auto.is_some() && s.custom_mode == auto)
+    }
+
+    /// The start goes out next: from here a lost link means the vehicle may run the order
+    /// (the op `starting`). Nothing is sent when the op ended meanwhile (abandoned, replaced).
+    /// Rules 7: the start is logged ahead of sending it (`OpCtx::ahead`, which waits for the
+    /// write), so a bridge that stops right after still finds the order may have started;
+    /// if it can't be logged, nothing is sent.
+    fn mark_starting(&self, detail: &str) -> Result {
+        match self.op().state() {
+            OpState::Starting | OpState::Acked | OpState::Active => {
+                self.op().narrate(detail);
+                Ok(())
+            }
+            s if s.is_terminal() => fail(format!("ended before its start went out ({s:?})")),
+            _ => {
+                if !self.op().set(OpState::Starting, detail) {
+                    return fail("ended before its start went out");
+                }
+                let Some(log) = &self.ctx.ahead else {
+                    return Ok(());
+                };
+                // the write waits for the decision lock: on a multi-threaded runtime (the
+                // bridge's) the worker hands its other tasks off first, so a lock held for
+                // seconds never stalls other vehicles' receive loops behind a start
+                let write = || log(self.op(), detail);
+                let written = match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+                    Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(write),
+                    _ => write(),
+                };
+                written.or_else(|e| fail(format!("its start could not be logged ahead of sending it ({e}): not sent")))
+            }
+        }
+    }
+
+    async fn run_mission(
+        &self,
+        items: Vec<Item>,
+        candidates: Vec<Vec<Item>>,
+        done: impl FnMut(&Vehicle) -> bool,
+        done_text: String,
+        progress: impl FnMut(&Vehicle) -> String,
+    ) -> Result {
+        self.run_mission_to(items, candidates, done, progress).await?;
+        self.op().set(OpState::Done, done_text);
+        Ok(())
+    }
+
+    /// [`Self::run_mission`] up to the mission's end, without ending the op (a delivery order
+    /// has its work to do there: load, release).
+    async fn run_mission_to(
+        &self,
+        items: Vec<Item>,
+        candidates: Vec<Vec<Item>>,
+        done: impl FnMut(&Vehicle) -> bool,
+        mut progress: impl FnMut(&Vehicle) -> String,
+    ) -> Result {
+        let adopted = match self.ctx.resume {
+            Resume::Fresh | Resume::Undelivered | Resume::Ended => {
+                self.deliver_mission(&items, OnVehicle::Other).await?;
+                false
+            }
+            Resume::Verify | Resume::Adopt | Resume::Confirm => {
+                let held = self.held_already(&candidates).await?;
+                let what = if held == OnVehicle::Stored {
+                    "mission still held"
+                } else {
+                    "another mission"
+                };
+                let mode = self.v().read(|s| s.mode.clone()).unwrap_or_default();
+                match (held, self.ctx.resume) {
+                    (OnVehicle::Running, _) => true,
+                    (_, Resume::Adopt) => {
+                        return fail(format!(
+                            "after the bridge restart the vehicle no longer runs it (mode {mode}, {what}): it had started it, so it is not sent again",
+                        ));
+                    }
+                    (_, Resume::Confirm) => {
+                        return Err(Stop::NotRunning(format!(
+                            "it may have started before its link was lost, and does not run it now (mode {mode}, {what}): not started again; a human decides"
+                        )));
+                    }
+                    // held, not started: only the start goes; else the whole order
+                    (h, _) => {
+                        self.deliver_mission(&items, h).await?;
+                        false
+                    }
+                }
+            }
+        };
+        let auto = self
+            .auto_mode()
+            .ok_or_else(|| Stop::Failed(format!("{} has no {} mode", self.kind.name(), self.caps.auto)))?;
+        if adopted {
+            self.follow_ahead("the vehicle already runs it: followed, not sent again")?;
+            self.op().set(
+                OpState::Acked,
+                "the vehicle already runs it: followed, not sent again",
+            );
+        } else {
+            self.op()
+                .set(OpState::Acked, "accepted, waiting for vehicle to execute");
+        }
+        self.op().set_progress(None);
+        self.wait_until(
+            |v| v.custom_mode == Some(auto) && v.armed,
+            mode_detail,
+            None,
+        )
+        .await?;
+        self.op().set(OpState::Active, "executing");
+        let mut stall = StallWatch::new();
+        let mut guard = ModeGuard {
+            mode: auto,
+            left_at: None,
+        };
+        self.wait_until(
+            done,
+            |v, timing| stall.detail(v, timing, progress(v)),
+            Some(&mut guard),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The vehicle may hold the order already (sent before a lost link or a bridge restart):
+    /// what it holds and runs. An adopted order's lost link is waited for (the op's patience);
+    /// any other's ends the op (back to the queue).
+    async fn held_already(&self, candidates: &[Vec<Item>]) -> Result<OnVehicle> {
+        let adopt = self.ctx.resume == Resume::Adopt;
+        let deadline = Instant::now() + self.ctx.patience;
+        self.op()
+            .narrate("it may hold the order already: asking the vehicle what it runs");
+        loop {
+            if self.link_silent() {
+                if !adopt {
+                    return Err(Stop::LinkLost("before asking what it holds".into()));
+                }
+                self.wait_link(deadline, "after the bridge restart").await?;
+            }
+            match self.mission_held(candidates).await {
+                Err(Stop::LinkLost(w)) if adopt => self.wait_link(deadline, &w).await?,
+                other => return other,
+            }
+        }
+    }
+
+    // ---- tasks -------------------------------------------------------------------------------
+
+    async fn orbit(&self) -> Result {
+        let Some([lon, lat]) = self.ctx.params.center else {
+            return fail("orbit needs center [lon, lat]");
+        };
+        let min_r = self
+            .v()
+            .read(|s| s.identity.as_ref().and_then(|i| i.num("min_turn_radius_m")));
+        let (radius, widened, tol) = orbit_geometry(self.ctx.params.radius, min_r, self.caps.orbit);
+        let alt = self.task_alt();
+        // rules 34: a group member enters the ring where its share says, a fixed wing too (a
+        // waypoint ring no tighter than its turn, never one loiter shared by the whole group)
+        let entry = self.ctx.params.share.as_ref().and_then(|s| s.phase_deg);
+        let build = |takeoff: bool| {
+            let mut items = self.mission_prefix(alt, takeoff);
+            let loop_from = if self.caps.orbit == Some(OrbitStyle::Loiter) && entry.is_none() {
+                let mut it = Item::nav(apm::MavCmd::MAV_CMD_NAV_LOITER_UNLIM, lat, lon, alt);
+                it.p[2] = radius as f32;
+                items.push(it);
+                None
+            } else {
+                // same-kind vehicles start spread around the ring (rules 34: where the share says)
+                let phase = match entry {
+                    Some(deg) => deg.to_radians(),
+                    None => 2.0 * std::f64::consts::PI * self.ctx.op.slot as f64 / self.ctx.same_kind.max(1) as f64,
+                };
+                let from = items.len();
+                for (plat, plon) in geo::circle_points(lat, lon, radius, 12, phase) {
+                    items.push(Item::waypoint(plat, plon, alt));
+                }
+                Some(from)
+            };
+            with_jump(items, loop_from)
+        };
+        let items = build(self.needs_takeoff());
+        let candidates = self.takeoff_choices().into_iter().map(build).collect();
+        let kind = self.kind;
+        let on_station = move |v: &Vehicle| {
+            v.distance_to(lat, lon)
+                .is_some_and(|d| (d - radius).abs() < tol)
+                && (!kind.flying() || v.airborne())
+        };
+        let progress = move |v: &Vehicle| {
+            v.distance_to(lat, lon)
+                .map_or(String::new(), |d| format!("{d:.0} m from center"))
+        };
+        let text = if widened {
+            format!("on station (radius widened to {radius:.0} m, platform minimum)")
+        } else {
+            "on station".into()
+        };
+        self.run_mission(items, candidates, on_station, text, progress)
+            .await?;
+        self.op().set_progress(Some("orbiting".into()));
+        Ok(())
+    }
+
+    async fn patrol(&self) -> Result {
+        let route = self.ctx.params.route.clone().unwrap_or_default();
+        // rules 34: a group member enters its route (its lane, its racetrack) as far along as its
+        // share says, the loop measured as the layout measured it
+        let route = match self.ctx.params.share.as_ref().and_then(|s| s.entry_m) {
+            Some(entry) => {
+                let ll: Vec<fleetmesh_decide::LonLat> = route.iter().map(|[lon, lat]| fleetmesh_decide::LonLat::new(*lon, *lat)).collect();
+                fleetmesh_decide::group::entered_route(&ll, entry).into_iter().map(|p| [p.lon, p.lat]).collect()
+            }
+            None => route,
+        };
+        let alt = self.task_alt();
+        let build = |takeoff: bool| {
+            let mut items = self.mission_prefix(alt, takeoff);
+            let loop_from = items.len();
+            for [lon, lat] in &route {
+                items.push(Item::waypoint(*lat, *lon, alt));
+            }
+            (with_jump(items, Some(loop_from)), loop_from)
+        };
+        let (items, loop_from) = build(self.needs_takeoff());
+        let candidates = self
+            .takeoff_choices()
+            .into_iter()
+            .map(|t| build(t).0)
+            .collect();
+        // the last waypoint (the jump back follows it)
+        let last_wp = (items.len() - 2) as u16;
+        let mut reached_last = false;
+        // lap complete = we were heading to the last waypoint, then DO_JUMP sent us back
+        let watch = move |v: &Vehicle| {
+            if v.mission_seq == Some(last_wp) {
+                reached_last = true;
+            }
+            reached_last && v.mission_seq.is_some_and(|s| s < last_wp)
+        };
+        let has_takeoff = self.caps.takeoff.is_some();
+        let n = route.len();
+        let progress = move |v: &Vehicle| match v.mission_seq {
+            Some(seq) if usize::from(seq) >= loop_from => {
+                format!("waypoint {}/{n}", usize::from(seq) - loop_from + 1)
+            }
+            _ if has_takeoff && !v.airborne() => "taking off".into(),
+            _ => "en route to first waypoint".into(),
+        };
+        self.run_mission(
+            items,
+            candidates,
+            watch,
+            "first lap complete, patrolling".into(),
+            progress,
+        )
+        .await?;
+        self.op().set_progress(Some("patrolling".into()));
+        Ok(())
+    }
+
+    /// Rules 34: a transit, its route flown once from its first point to its last, then held
+    /// there by the vehicle's type: the mission ends with a loiter-forever item at the last point,
+    /// which each firmware flies as its own hold (ArduCopter hovers, ArduPlane circles at its
+    /// WP_LOITER_RAD, ArduRover holds station within LOIT_RADIUS, a ground vehicle stopping there,
+    /// ArduSub holds position and depth; ArduBlimp, which skips it, holds at its last waypoint, as
+    /// its mission's end does). Done once on the hold item (a blimp at its last waypoint) within
+    /// the hold's tolerance of the end; the vehicle stays in its mission mode holding there, as an
+    /// orbit circles on. A member of a group flies its own route as its member order says (its
+    /// station, or the route moved to its cell) at its share's altitude: no slot of its own.
+    async fn transit(&self) -> Result {
+        let route = self.ctx.params.route.clone().unwrap_or_default();
+        let Some([end_lon, end_lat]) = route.last().copied() else {
+            return fail("transit needs a route".to_string());
+        };
+        let action = self.ctx.params.action.clone().unwrap_or_default();
+        let alt = self.task_alt();
+        let fixed_wing = self.caps.orbit == Some(OrbitStyle::Loiter);
+        let flies = self.kind.flying();
+        let hover = flies && !fixed_wing;
+        // a copter that comes home lands there; one that delivers by landing is put down after
+        let land_end = action == "home" && hover && self.caps.land.is_some();
+        let land_release = action == "deliver" && hover && self.ctx.params.release.as_deref() == Some("land");
+        // a pickup where the vehicle already is: nothing to fly
+        if action == "pickup" {
+            let near = self
+                .v()
+                .read(|v| v.distance_to(end_lat, end_lon))
+                .is_some_and(|d| d < self.caps.home_tol.max(10.0));
+            if near {
+                self.mark_starting("at the pickup site: loading")?;
+                self.op().set(OpState::Acked, "at the site");
+                self.op().set(OpState::Active, "loading");
+                self.grip(true).await?;
+                self.op().set(OpState::Done, "loaded");
+                return Ok(());
+            }
+        }
+        let build = |takeoff: bool| {
+            let mut items = self.mission_prefix(alt, takeoff);
+            for [lon, lat] in &route {
+                items.push(Item::waypoint(*lat, *lon, alt));
+            }
+            if flies && action == "deliver" && !land_release {
+                // a multirotor goes down to a low hover over the zone and lets the parcel go
+                // (MAV_CMD_DO_GRIPPER, the servo the params define); a fixed wing drops from its height
+                if hover {
+                    items.push(Item::waypoint(end_lat, end_lon, DROP_ALT_M));
+                }
+                items.push(Item::command(apm::MavCmd::MAV_CMD_DO_GRIPPER, [0.0, 0.0, 0.0, 0.0]));
+                if hover {
+                    items.push(Item::waypoint(end_lat, end_lon, alt));
+                }
+            }
+            if land_end {
+                items.push(Item::nav(apm::MavCmd::MAV_CMD_NAV_LAND, end_lat, end_lon, 0.0));
+            } else {
+                items.push(Item::nav(apm::MavCmd::MAV_CMD_NAV_LOITER_UNLIM, end_lat, end_lon, alt));
+            }
+            items
+        };
+        let items = build(self.needs_takeoff());
+        let candidates = self.takeoff_choices().into_iter().map(build).collect();
+        let prefix = self.mission_prefix(alt, self.needs_takeoff()).len();
+        let n = route.len();
+        let loiter = self.v().read(|s| s.loiter_radius_m).map(f64::abs).filter(|r| *r > 0.0).unwrap_or(fleetmesh_decide::group::LOITER_DEFAULT_M);
+        // a fixed wing holds on its loiter circle round the end; the rest at the point
+        let tol = if fixed_wing { loiter + (loiter * 0.4).max(60.0) } else { self.caps.home_tol.max(10.0) };
+        let kind = self.kind;
+        let total = items.len();
+        // the item before the last one (its hold follows it): reached when the route is flown
+        let end_wp = (total.saturating_sub(2)) as u16;
+        let sees_release = action == "deliver" && !land_release;
+        // on its hold item (a blimp, whose firmware skips it, at its mission's end on its last
+        // waypoint), near the end; a release is waited for in the vehicle's own report of its
+        // gripper (no report, no wait)
+        let done = move |v: &Vehicle| {
+            if land_end {
+                return v.mission_seq.is_some_and(|s| usize::from(s) + 1 >= total)
+                    && v.distance_to(end_lat, end_lon).is_some_and(|d| d < tol)
+                    && !v.airborne();
+            }
+            v.mission_seq.is_some_and(|s| s > end_wp || (kind == Kind::Blimp && s == end_wp))
+                && v.distance_to(end_lat, end_lon).is_some_and(|d| d < tol)
+                && (!kind.flying() || v.airborne())
+                && (!sees_release || v.payload_pwm.is_none_or(|p| p <= 1300))
+        };
+        let has_takeoff = self.caps.takeoff.is_some();
+        let progress = move |v: &Vehicle| match v.mission_seq {
+            Some(seq) if usize::from(seq) > usize::from(end_wp) => "holding at the route's end".into(),
+            Some(seq) if usize::from(seq) >= prefix => format!("waypoint {}/{n}", (usize::from(seq) + 1 - prefix).min(n)),
+            _ if has_takeoff && !v.airborne() => "taking off".into(),
+            _ => "en route to its first waypoint".into(),
+        };
+        let what = match (action.as_str(), fixed_wing) {
+            ("deliver", _) => "the parcel released",
+            ("pickup", _) => "at the pickup site",
+            ("home", _) if land_end => "landed at the hub",
+            (_, true) => "at the route's end, loitering",
+            _ => "at the route's end, holding",
+        };
+        self.run_mission_to(items, candidates, done, progress).await?;
+        match action.as_str() {
+            "pickup" => {
+                self.op().narrate("at the pickup site: loading");
+                self.grip(true).await?;
+            }
+            "deliver" if land_release => {
+                // put down at the zone, then the release
+                self.op().narrate("over the drop zone: landing to release");
+                let mode = self.set_mode(self.caps.land.unwrap_or("LAND")).await?;
+                self.wait_mode(mode).await?;
+                self.wait_until(|v| !v.airborne(), |v, _| format!("landing, {:.0} m up", v.alt_rel.unwrap_or(0.0)), None).await?;
+                self.grip(false).await?;
+            }
+            "deliver" if !flies => {
+                // a car or a boat stops at the zone, then the release
+                self.op().narrate("at the drop zone: releasing");
+                self.grip(false).await?;
+            }
+            "deliver" => {
+                // the release item passed in the mission: its servo says it let go
+                self.wait_until(
+                    |v| v.payload_pwm.is_none_or(|p| p <= 1300),
+                    |v, _| format!("waiting for the gripper (servo {:?})", v.payload_pwm),
+                    None,
+                )
+                .await?;
+            }
+            _ => {}
+        }
+        self.op().set(OpState::Done, what.to_string());
+        self.op().set_progress(Some("holding at the route's end".into()));
+        Ok(())
+    }
+
+    /// Grab (a parcel loaded at the hub) or release it: MAV_CMD_DO_GRIPPER, answered by the
+    /// vehicle's gripper servo (ArduPilot's own `GRIP_GRAB` and `GRIP_RELEASE` PWM).
+    async fn grip(&self, grab: bool) -> Result {
+        let want = move |m: &MavMessage| match m {
+            MavMessage::SERVO_OUTPUT_RAW(s) => {
+                if grab {
+                    s.servo9_raw >= 1700
+                } else {
+                    s.servo9_raw <= 1300
+                }
+            }
+            _ => false,
+        };
+        let act = if grab { 1.0 } else { 0.0 };
+        self.command_long(apm::MavCmd::MAV_CMD_DO_GRIPPER, &[0.0, act], want).await?;
+        // its servo as the vehicle reports it, when it reports one
+        let deadline = Instant::now() + MODE_PATIENCE;
+        loop {
+            let seen = self.v().read(|v| v.payload_pwm);
+            match seen {
+                None => return Ok(()),
+                Some(p) if (grab && p >= 1700) || (!grab && p <= 1300) => return Ok(()),
+                _ => {}
+            }
+            if Instant::now() > deadline {
+                return fail(format!(
+                    "the gripper did not {}: its servo reads {:?}",
+                    if grab { "close" } else { "open" },
+                    seen
+                ));
+            }
+            sleep(POLL).await;
+        }
+    }
+
+    /// `land_now`: the vehicle's own way down where it is. A multirotor in its LAND mode; a fixed
+    /// wing by a landing mission at its position; a car or a boat stops (its hold mode).
+    async fn land(&self) -> Result {
+        if let Some(mode) = self.caps.land {
+            self.mark_starting(&format!("commanding {mode}"))?;
+            let n = self.set_mode(mode).await?;
+            self.op().set(OpState::Acked, "accepted");
+            self.wait_mode(n).await?;
+            self.op().set(OpState::Active, "landing");
+            if self.kind.flying() {
+                self.wait_until(|v| !v.airborne(), |v, _| format!("landing, {:.0} m up", v.alt_rel.unwrap_or(0.0)), None).await?;
+            }
+            self.op().set(OpState::Done, "landed");
+            return Ok(());
+        }
+        if self.caps.takeoff.is_some() {
+            // a fixed wing: a landing mission at the point below it
+            let Some((lat, lon)) = self.v().read(|s| s.pos) else {
+                return fail("position unknown");
+            };
+            let items = vec![
+                Item::waypoint(lat, lon, 0.0),
+                Item::nav(apm::MavCmd::MAV_CMD_NAV_LAND, lat, lon, 0.0),
+            ];
+            let candidates = vec![items.clone()];
+            return self
+                .run_mission(items, candidates, |v| !v.airborne(), "landed".into(), |v| format!("{:.0} m up", v.alt_rel.unwrap_or(0.0)))
+                .await;
+        }
+        // a car stops, a boat holds its station
+        self.hold().await
+    }
+
+    /// `swap_battery`: the hub takes its time, then the pack is the new one (MAV_CMD_BATTERY_RESET).
+    async fn swap(&self) -> Result {
+        let swap_s = u64::from(self.ctx.params.swap_s.unwrap_or(120));
+        self.mark_starting("hub is swapping the battery")?;
+        self.op().set(OpState::Acked, "at the hub");
+        self.op().set(OpState::Active, format!("swapping the battery ({swap_s} s)"));
+        sleep(Duration::from_secs(swap_s)).await;
+        self.command_long(apm::MavCmd::MAV_CMD_BATTERY_RESET, &[255.0, 100.0], |_| false).await?;
+        self.op().set(OpState::Done, "new battery in");
+        Ok(())
+    }
+
+    /// After a bridge restart, for an order that is a mode (hold, rtl): whether the vehicle
+    /// is in it. An order it had started (Adopt) and no longer is in ends here.
+    fn mode_after_restart(&self, number: u32, what: &str) -> Result<bool> {
+        if !matches!(
+            self.ctx.resume,
+            Resume::Verify | Resume::Adopt | Resume::Confirm
+        ) {
+            return Ok(false);
+        }
+        let (now, name) = self.v().read(|s| (s.custom_mode, s.mode.clone()));
+        if now == Some(number) {
+            return Ok(true);
+        }
+        let name = name.unwrap_or_default();
+        match self.ctx.resume {
+            Resume::Adopt => fail(format!(
+                "after the bridge restart the vehicle is no longer {what} (mode {name}): it had started it, so it is not sent again"
+            )),
+            Resume::Confirm => Err(Stop::NotRunning(format!(
+                "it may have started before its link was lost, and is not {what} now (mode {name}): not commanded again; a human decides"
+            ))),
+            _ => Ok(false),
+        }
+    }
+
+    async fn rtl(&self) -> Result {
+        let caps = self.caps;
+        let home_dist = |v: &Vehicle| v.home.and_then(|(la, lo)| v.distance_to(la, lo));
+        // exactly at home (a stand-in that never moved) counts as home
+        let at_home = move |v: &Vehicle| home_dist(v).unwrap_or(1e9) < caps.home_radius(v);
+        let progress = move |v: &Vehicle| {
+            home_dist(v).map_or(String::new(), |d| format!("{d:.0} m from home"))
+        };
+        let Some(rtl) = self.caps.rtl else {
+            // no RTL mode (Sub): fly a one-waypoint mission home at the current task depth
+            let Some((pos, home)) = self.v().read(|s| s.pos.zip(s.home)) else {
+                return fail("home position unknown");
+            };
+            let items = vec![
+                Item::waypoint(pos.0, pos.1, 0.0),
+                Item::waypoint(home.0, home.1, self.task_alt()),
+            ];
+            let candidates = vec![items.clone()];
+            return self
+                .run_mission(items, candidates, at_home, "home".into(), progress)
+                .await;
+        };
+        let number = self
+            .v()
+            .read(|s| s.mav_type)
+            .and_then(|t| mav::mode_number(t, rtl));
+        let mode = match number {
+            Some(n) if self.mode_after_restart(n, "returning")? => {
+                self.follow_ahead("the vehicle is already returning: followed, not sent again")?;
+                self.op().set(
+                    OpState::Acked,
+                    "the vehicle is already returning: followed, not sent again",
+                );
+                n
+            }
+            _ => {
+                self.mark_starting("commanding RTL")?;
+                let mode = self.set_mode(rtl).await?;
+                self.op().set(OpState::Acked, "accepted");
+                mode
+            }
+        };
+        self.wait_mode(mode).await?;
+        self.op().set(OpState::Active, "returning");
+        self.wait_until(at_home, |v, _| progress(v), None).await?;
+        self.op().set(OpState::Done, "home");
+        Ok(())
+    }
+
+    async fn hold(&self) -> Result {
+        let number = self
+            .v()
+            .read(|s| s.mav_type)
+            .and_then(|t| mav::mode_number(t, self.caps.hold));
+        if let Some(n) = number
+            && self.mode_after_restart(n, "holding")?
+        {
+            self.follow_ahead("holding (it already was: followed, not sent again)")?;
+            self.op().set(
+                OpState::Done,
+                "holding (it already was: followed, not sent again)",
+            );
+            return Ok(());
+        }
+        self.mark_starting(&format!("commanding {}", self.caps.hold))?;
+        // a fixed wing in the air and disarmed (a stand-in Puma spawned aloft before its first
+        // order, one an autopilot disarmed in flight) glides with its throttle off: its hold
+        // mode alone sends it down into the sea, so it is armed first and holds at its height
+        // (docs/SWARMS.md section 1, fault 3; the owner's stage 0 of 2026-11-10). A copter on
+        // the ground holds on the ground, which is what hold says.
+        let fixed_wing = matches!(self.kind, Kind::Plane | Kind::Vtol);
+        if fixed_wing && self.v().read(|s| s.airborne() && !s.armed) {
+            self.op().narrate("airborne and disarmed: arming before it holds");
+            self.ensure_armed().await?;
+        }
+        let mode = self.set_mode(self.caps.hold).await?;
+        self.op().set(OpState::Acked, "accepted");
+        self.wait_mode(mode).await?;
+        self.op().set(OpState::Done, "holding");
+        Ok(())
+    }
+
+}
+
+fn mode_detail(v: &Vehicle, _: &LinkTiming) -> String {
+    format!("mode {}", v.mode.as_deref().unwrap_or("None"))
+}

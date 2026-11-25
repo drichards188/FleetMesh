@@ -1,0 +1,188 @@
+//! fleetmesh-standins [standins.json]: run every stand-in in the file, one UDP link each.
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use fleetmesh_standins::conditions::{self, Slot};
+use fleetmesh_standins::config::Fleet;
+use fleetmesh_standins::failsafe;
+use fleetmesh_standins::link;
+use fleetmesh_standins::vehicle::{self, Vehicle};
+
+fn main() {
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "sim/run/standins.json".into());
+    // One worker by default: measured at 3,000 vehicles, 1 thread used 8% of a core, the
+    // default of one per core 17% (cross-thread wakeups). FLEETMESH_STANDINS_THREADS to change.
+    let threads = std::env::var("FLEETMESH_STANDINS_THREADS")
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(1);
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("fleetmesh-standins: runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(run(&path)) {
+        eprintln!("fleetmesh-standins: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(path: &str) -> Result<(), String> {
+    // a scenario rate needs a scenario start, as in the bridge (murmur-drd)
+    conditions::check_scenario_env()?;
+    let mut fleet = Fleet::load(path)?;
+    for w in fleet.endurance_warnings() {
+        eprintln!("fleetmesh-standins: {w}");
+    }
+    let tidewater = conditions::Config::from_env();
+    // the surface under each spawn point, once: a stand-in that starts in the air has its
+    // home there (VehicleConfig::surface_m); without tidewater, at 0 m
+    if let Some(tw) = &tidewater {
+        let points: Vec<(f64, f64)> = fleet
+            .vehicles
+            .iter()
+            .map(|v| (v.home[0], v.home[1]))
+            .collect();
+        match conditions::surfaces(tw, &points).await {
+            Ok(surfaces) => {
+                for (v, s) in fleet.vehicles.iter_mut().zip(surfaces) {
+                    v.surface_m = v.surface_m.or(s);
+                }
+            }
+            Err(e) => println!(
+                "tidewater: no surface heights ({e}); a stand-in that starts in the air has its home at 0 m"
+            ),
+        }
+    }
+    let host = fleet.bridge_host.clone();
+    let homes: Vec<(f64, f64)> = fleet
+        .vehicles
+        .iter()
+        .map(|v| (v.home[0], v.home[1]))
+        .collect();
+    let gnss = Arc::new(fleetmesh_standins::gnss::Env::from_env(&homes));
+
+    // fixed source ports (FLEETMESH_STANDIN_SRC_BASE + index), or ephemeral ones as before
+    let src_base = std::env::var("FLEETMESH_STANDIN_SRC_BASE").ok();
+    if let Some(b) = src_base.as_deref().filter(|b| !b.trim().is_empty()) {
+        println!(
+            "source ports: fixed from FLEETMESH_STANDIN_SRC_BASE={b} ({} ports)",
+            fleet.vehicles.len()
+        );
+    }
+    let mut vehicles = Vec::with_capacity(fleet.vehicles.len());
+    let mut slots = Vec::new();
+    let mut taken = Vec::new();
+    for (i, cfg) in fleet.vehicles.into_iter().enumerate() {
+        let mut src = link::src_port(src_base.as_deref(), i)?;
+        let sock = match link::connect(&host, cfg.port, src) {
+            // a fixed port something else holds (under WSL's mirrored networking, Windows' own
+            // listeners count too): this one vehicle sends from an ephemeral port instead. No
+            // other process reads a stand-in's source port: the emulator and the bridge answer
+            // whatever address a vehicle's packets come from.
+            Err(e) if src.is_some() && e.kind() == std::io::ErrorKind::AddrInUse => {
+                taken.extend(src.take());
+                link::connect(&host, cfg.port, None)
+            }
+            r => r,
+        }
+        .map_err(|e| format!("{}: udp {}: {e}", cfg.callsign, cfg.port))?;
+        let line = format!(
+            "{:12} sysid {:3} {} -> udp {}{}",
+            cfg.callsign,
+            cfg.sysid,
+            cfg.spec.name,
+            cfg.port,
+            src.map(|p| format!(" from {p}")).unwrap_or_default()
+        );
+        let mut v = Vehicle::new(cfg, sock, None)?;
+        v.gnss = Some(gnss.clone());
+        if tidewater.is_some() && v.behavior.wants_conditions() {
+            let slot = Arc::new(Slot::default());
+            slot.report(v.st.lat, v.st.lon, v.st.depth());
+            slots.push(slot.clone());
+            v.water = Some(slot);
+        }
+        println!("{line}");
+        vehicles.push(v);
+    }
+    println!("{} stand-ins", vehicles.len());
+    if !taken.is_empty() {
+        let list: Vec<String> = taken.iter().map(u16::to_string).collect();
+        println!(
+            "source ports: {} taken by another process, those stand-ins send from an ephemeral port: {}",
+            taken.len(),
+            list.join(", ")
+        );
+    }
+    if let Some(cfg) = tidewater
+        && !slots.is_empty()
+    {
+        conditions::start(cfg, slots).await;
+    }
+    let stats_s: u64 = std::env::var("FLEETMESH_STANDINS_STATS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    if stats_s > 0 {
+        tokio::spawn(stats(vehicles.len(), Duration::from_secs(stats_s)));
+    }
+    let n = vehicles.len().max(1) as u32;
+    let tasks: Vec<_> = (0u32..)
+        .zip(vehicles)
+        .map(|(i, v)| tokio::spawn(vehicle::run(v, vehicle::TICK * i / n)))
+        .collect();
+    for t in tasks {
+        t.await.map_err(|e| format!("a vehicle task died: {e}"))?;
+    }
+    Ok(())
+}
+
+/// A line every `period` (FLEETMESH_STANDINS_STATS seconds, 0 = off): what actually went out.
+async fn stats(n: usize, period: Duration) {
+    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    let (mut sent0, mut err0) = (0, 0);
+    loop {
+        every.tick().await;
+        let sent = link::SENT.load(Ordering::Relaxed);
+        let err = link::SEND_ERRORS.load(Ordering::Relaxed);
+        let secs = period.as_secs_f64();
+        // the GCS heartbeat as received: longest gap on the failsafe clock, failsafes
+        let gap = failsafe::GCS_GAP_MAX_MS.swap(0, Ordering::Relaxed);
+        let fs = failsafe::GCS_FAILSAFES.swap(0, Ordering::Relaxed);
+        let gcs = if gap > 0 || fs > 0 {
+            format!(
+                ", longest GCS heartbeat gap {:.1} s, {fs} GCS failsafes",
+                gap as f64 / 1000.0
+            )
+        } else {
+            String::new()
+        };
+        let skips = vehicle::STALL_SKIPS.swap(0, Ordering::Relaxed);
+        let stall = vehicle::STALL_MAX_MS.swap(0, Ordering::Relaxed);
+        let stalls = if skips > 0 {
+            format!(
+                ", engine stalled up to {:.1} s (skipped by {skips} vehicles)",
+                stall as f64 / 1000.0
+            )
+        } else {
+            String::new()
+        };
+        println!(
+            "{n} stand-ins: {:.0} msg/s sent, {:.0} send errors/s{gcs}{stalls}",
+            (sent - sent0) as f64 / secs,
+            (err - err0) as f64 / secs
+        );
+        (sent0, err0) = (sent, err);
+    }
+}

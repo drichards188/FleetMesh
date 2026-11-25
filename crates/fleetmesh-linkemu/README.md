@@ -1,0 +1,326 @@
+# fleetmesh-linkemu
+
+A user-space UDP link emulator for FleetMesh (Phase D). It sits between the vehicles and the
+bridge and degrades each vehicle's link according to its link class, with no root and no
+`tc netem`. See `docs/DECISIONS.md` for why.
+
+```
+vehicle i  --UDP-->  [emulator on A+i      ]  --UDP-->  bridge listens on B+i
+           <--UDP--  [one task, one socket ]  <--UDP--  (to A+i)
+```
+
+Each vehicle gets its own task, one socket (port `A+i`) and a delay queue per direction. The
+emulator forwards to the bridge from that same socket, so the bridge's replies come back to
+`A+i`, and tells them from the vehicle's packets by their source (the bridge's port `B+i`).
+It takes no ephemeral port: before 2026-11 each link had a second, bridge-facing socket on
+one, and at 3,000 vehicles those and the stand-ins' own ran out of the host's ephemeral range
+(murmur-z07i). The vehicle's source address is learned from its first packet; bridge replies
+go back to it. Packets are never modified. Nothing crosses between links.
+
+## Wiring
+
+`scripts/up.sh` (so `make up` and `make goldengate`) does all of this by default:
+`swarm.py --manifest-only` writes the manifest, the emulator starts and binds the vehicle
+ports (`FLEETMESH_BASE_PORT`+i), then the vehicles, then the bridge on `FLEETMESH_BRIDGE_BASE_PORT`
+(default vehicle base + 1000) with the rewritten manifest and `FLEETMESH_LINKEMU_URL`. The
+emulator gets tidewater (`FLEETMESH_TIDEWATER_URL`, set with a scenario), the scenario clock
+(`FLEETMESH_AT`, `FLEETMESH_RATE`), `--scenario $FLEETMESH_LINK_EVENTS` when set, `--config
+$FLEETMESH_LINKS` (default `sim/links.toml`) and `--http 127.0.0.1:$FLEETMESH_LINKEMU_PORT` (8766);
+it logs to `logs/linkemu.log` (PID in `logs/linkemu.pid`) and stops with the stack.
+`FLEETMESH_LINKEMU=0` leaves it out. By hand:
+
+1. Launch the vehicles with a base port the bridge does not use:
+   `swarm.py --fleet <f> --base-port A` (writes `sim/run/fleet.json`, each vehicle with its
+   `uid`, `sysid`, `port`, `link`, `domain`, `platform`).
+2. Start the emulator: `fleetmesh-linkemu --bridge-base B --manifest-out sim/run/bridge-fleet.json`
+   (defaults: `--fleet sim/run/fleet.json`, `--config sim/links.toml`, vehicle base = lowest
+   port in the manifest).
+3. Start the bridge on `B` and point it at the rewritten manifest:
+   `FLEETMESH_BASE_PORT=B FLEETMESH_FLEET_MANIFEST=sim/run/bridge-fleet.json`.
+
+Step 3's manifest matters: the bridge opens the ports its manifest lists (plus
+`FLEETMESH_MAX_VEHICLES` ports from its base), so reading the launcher's manifest it would bind
+the vehicle-facing ports and fight the emulator. `--manifest-out` writes a copy with `port`
+replaced by the bridge-side port (the original is kept as `vehicle_port`).
+
+Terrain and scenario time: `--tidewater URL` (or `FLEETMESH_TIDEWATER_URL`) turns on terrain line of
+sight; `--at ISO` / `--rate X` (or `FLEETMESH_AT` / `FLEETMESH_RATE`) set the scenario clock, read as
+every process reads them (`fleetmesh_space::scenario_clock`: the start an RFC 3339 date-time such
+as `2026-06-14T10:00:00Z`, a rate other than 1 only with a start; anything else refused). Other
+options: `--scenario FILE` (extra `[[event]]`s), `--seed N`, `--http ADDR` (default
+`127.0.0.1:8766`, `off` disables), `--log-interval SEC`, `--threads N` (default 1; one thread used less CPU than two at these rates),
+`--bridge-host`, `--listen-host`.
+
+## Model
+
+Per packet, per direction (the two directions have independent random streams and queues):
+
+1. **Blocked** (no airtime used): the link is down for the vehicle's depth (`down_when`), a
+   scripted `cut` is active, or terrain blocks the path (`terrain = "block"`).
+2. **Queue**: with a bandwidth cap the link is a virtual transmitter. A packet's airtime is
+   `bytes*8/bw`; the backlog is the bytes still ahead of it, and a packet that would push the
+   backlog (the one in service included) over `queue_bytes` is dropped (drop-tail). So low
+   bandwidth gives real queuing delay, then real loss. A hard cap `max_inflight` (default
+   2048 packets per direction) bounds memory.
+3. **Channel loss**: a Gilbert-Elliott chain. `loss` is the long-run average and `burst_len`
+   the mean burst length in packets; lost packets still used their airtime. Then scripted
+   extra loss, jammer loss, range loss and terrain loss (`terrain = "ramp"`), each independent.
+4. **Delay**: queue wait + `latency_ms` + uniform `+-jitter_ms` + event latency
+   + (slant range to the ground station carrying the link / `propagation_mps`). Delivery times are made
+   monotonic unless `reorder = true`, so jitter does not reorder.
+5. **Duplicate**: with probability `duplicate` the packet is delivered twice.
+
+Determinism: a ChaCha8 stream per (seed, uid, direction), exactly eight draws per packet
+whatever the outcome. The model is a pure function of arrival time and size
+(`model.rs`, `link.rs`), tested without sockets. The same seed and input timing give the same
+drop decisions. Real runs differ only through socket arrival timing.
+
+### Physics hooks
+
+All driven by `GLOBAL_POSITION_INT` or `HIGH_LATENCY2` (what an AUV under water sends, and
+what the bridge asks Iridium-class vehicles for) parsed from uplink traffic (mavlink crate,
+ardupilotmega dialect; frames are walked by length and only those messages are decoded; v1,
+v2 and concatenated frames work).
+
+- **Range**: `range_ok_km`/`range_max_km`/`range_exp` give loss from 0 to 1 as distance from
+  the ground station grows.
+- **Several ground stations** (`station.rs`): `[[ground_station]]` tables (name, lat, lon,
+  alt_m) in place of the one `[ground_station]`. The sites are networked to the C2: a radio
+  link (a profile with a range model, a terrain check or a propagation delay) goes through
+  whichever site gives it the best path at each position report, each path judged as the one
+  station's is (range from that site, terrain to it, the profile's `gs_antenna_m` on every
+  site): the largest share of packets let through, then the nearest, then the first listed.
+  A switch is immediate and costs nothing, no outage and no hold-down: the sites hear the
+  vehicle together and the C2 takes the best copy (selection diversity), so a vehicle at the
+  edge that flaps between two sites changes no packet's fate, and the coverage predictor, a
+  function of the point alone, chooses the same site the link does. SATCOM and tethered
+  links use no site; an acoustic link's propagation counts from the nearest. The choice draws
+  nothing: with one station every draw and every result is as before. Terrain is asked for the
+  nearest site and for every site within the profile's `range_max_km` (beyond it the range
+  curve loses every packet whatever the terrain). Scripted events act on the vehicle as before:
+  a jammer circle over it jams every path, whichever site carries it.
+- **Depth gating**: submerged means depth `-alt` exceeds `submerged_depth_m` (altitude is MSL, negative is
+  depth, matching the stand-ins). `down_when = "submerged"` for SATCOM, `"surfaced"` for
+  acoustic. Before the first position the link is open. With `gated_profile = "<profile>"` a
+  closed gate moves the traffic to that profile instead of dropping it (the vehicle's second
+  radio): the shipped acoustic profile hands a surfaced AUV to `acoustic_surface`
+  (Iridium-like, static). The gated profile may not have `down_when` or `space_class`.
+  `/stats` says which profile carries the traffic (`active_profile`).
+- **No fix**: a GLOBAL_POSITION_INT with lat = lon = 0 (ArduPilot before its first fix) is
+  not a position and is ignored.
+- **Terrain** (`terrain.rs`, needs `--tidewater URL`): the path from a ground station to the
+  vehicle is sampled from tidewater's DEM and judged against the straight ray between the
+  antennas, with Earth curvature at an effective radius of `k_factor` (default 4/3) Earth
+  radii. Antenna heights are per profile (`gs_antenna_m` above the station's `alt_m`,
+  `antenna_m` above the vehicle's altitude). The result is an obstruction depth: how far the
+  highest terrain point (raised by the Earth bulge, and by `fresnel_clear` of the first Fresnel
+  radius when `fresnel_mhz` is set) sticks up above the ray. `terrain = "block"` (default for
+  profiles with a range model) drops everything while it is positive (cause `terrain`);
+  `"ramp"` drops a share that rises from 0 at the ray to 1 at `terrain_ramp_m` deep;
+  `"off"` ignores it. The surface is the higher of the DEM and the water level, so a
+  vehicle below the sea surface is hidden. Points outside the DEM count as sea level. The
+  Earth bulge is what sets the radio horizon (a 10 m mast sees a sea-level target to about
+  15 km at k = 4/3), so the horizon is judged wherever terrain is; without a terrain source
+  neither is, and only the range curve limits a link.
+
+  The packet path never waits for HTTP. A link asks a cache keyed by grid cell (`[terrain]
+  cell_m`, 250 m), altitude band (`alt_step_m`, 10 m), the ground station and the profile's
+  antenna parameters; the
+  profile is computed from the cell centre, so every vehicle in a cell gets the same answer. A
+  miss queues the cell and the link keeps its previous answer (open, and counted as
+  `unknown_pkts`, if it has none yet). Every `interval_s` (1 s) a background task takes the
+  queued cells, samples all their profiles (every `sample_spacing_m`, 50 m, at most
+  `max_points`) and sends them in as few `POST /v1/sample` requests as fit (20,000 points each).
+  Answers are kept for good (terrain does not move); a failed request is counted and retried.
+  The request time is the scenario clock, clamped into the scenario's range from `/v1/info`.
+
+  A landed, disarmed aircraft is judged at rest (`link.rs` `Link::at_rest`: an `air` link whose
+  last autopilot HEARTBEAT says disarmed and whose GLOBAL_POSITION_INT puts it within 1 m of its
+  home's altitude): at its own altitude, to 0.1 m, with its antenna `AT_REST_ANTENNA_M` (0.5 m,
+  a GUESS) above it, instead of its altitude band, which could put an aircraft resting on 3 m
+  of ground at 0 m, under the surface. No other vehicle's check changes.
+  Without a tidewater URL nothing is checked and `los.state` is `off`.
+- **Propagation delay**: `propagation_mps = 1500` for sound.
+
+### Scripted events
+
+`[[event]]` in `sim/links.toml` or a `--scenario` file. Start with `at_s` (seconds since the
+emulator started) or `at_scenario` (ISO time on the scenario clock: `FLEETMESH_AT` at emulator
+start plus elapsed x `FLEETMESH_RATE`, the stand-ins' convention; it is an error without
+`FLEETMESH_AT`). `duration_s` is in the start's clock (scenario seconds with `at_scenario`;
+`until_scenario` gives an end time instead); omitted means until the end. Start the emulator
+with the same `FLEETMESH_AT` and `FLEETMESH_RATE` as the stand-ins and shortly after them: the
+emulator's clock starts at its own start. Events wholly in the past never fire.
+Selectors (all must match): `class`, `profile`, `platform`, `domain`, `uid`, `uids`,
+`circle = {lat, lon, radius_m}` (vehicle inside it, by its last known position), and
+`active_profile` (only while that profile carries the vehicle's traffic: an AUV's `acoustic`
+modem under water, not its `acoustic_surface` radio once surfaced; `class` and `profile` name
+the vehicle's link whichever profile carries it; a name that is no profile is refused). Effects:
+`loss` (extra, independent), `cut`, `extra_latency_ms`; `dir = both|up|down`. A circle with no
+`loss` jams (loss 1.0), counted as cause `jam`.
+
+GNSS effects share the file: a `gnss = { effect = "jam" | "spoof", ... }` table is read by
+the stand-in engine (`FLEETMESH_EVENTS`, `crates/fleetmesh-standins/src/gnss.rs`) and ignored
+here, except that a circle event with a `gnss` table no longer defaults to loss 1.0 (a GNSS
+jammer leaves the datalink alone unless the event also gives `loss` or `cut`). Example:
+`sim/events/golden-gate-gnss.toml`.
+
+```toml
+[[event]]                      # the 30%-loss study, on the scenario clock
+at_scenario = "2026-06-14T10:05:00Z"
+duration_s = 120
+class = "los"
+loss = 0.30
+```
+
+Events are reloaded while running, on `SIGHUP` or when the config or scenario file changes
+(polled each second). Each link switches to the new schedule at its next packet, so the result
+is a function of the file contents and packet arrival order. A file that does not parse (or
+a scenario-time event without a scenario clock) is logged and the running events stay.
+Profiles, the ground station and `[terrain]` are not reloaded.
+
+## Config: `sim/links.toml`
+
+Profiles are `[class.<name>]`, with `extends` for variants. A vehicle's profile is, in order:
+an explicit `[platform_profile]` entry (empty as shipped); for SATCOM vehicles, the profile
+that `[space_class_profile]` gives the platform's `space_class` (set in `sim/platforms.toml`,
+carried in the fleet manifest, and also what the bridge's space views read); else the
+platform's `link` class. Shipped profiles: `los`, `mesh`, `satcom` (GEO, 300 ms
+each way for the ~600 ms RTT), `satcom_leo`, `satcom_iridium`, `acoustic` (300 bps, 1500 m/s),
+`satcom_ku_geo`, `tether`. Each has a comment with where its numbers come from and which are guesses.
+
+## SATCOM from real satellites (`space_class`)
+
+A profile with `space_class = "starlink" | "iridium" | "inmarsat" | "ku-geo"` (classes of
+`sim/space/constellations.toml`, computed by the `fleetmesh-space` library) follows real satellite
+visibility instead of fixed numbers. For each vehicle, from its reported position and the
+scenario clock (`FLEETMESH_AT` + elapsed x `FLEETMESH_RATE`), a background task refreshes every
+`[space].interval_s` scenario seconds (never less than `min_wall_s` of wall time apart; SGP4
+runs on a blocking thread) and the packet path reads the latest answer:
+
+- **Up/down**: no satellite above the class's mask means every packet is dropped (cause `no_sat`).
+- **Latency**: one-way, from the best (highest elevation) satellite's slant range plus the
+  class's network latency (a bent pipe counts the user leg twice). It replaces `latency_ms`;
+  jitter still applies. Iridium has no published network latency, so its profile `latency_ms`
+  stays the total (`latency_source = "profile"` in `/stats`).
+- **Handover**: the best satellite changes while the link stays up. Always counted; with
+  `handover_outage_ms > 0` the link also drops that long (cause `handover`, a GUESS in the
+  shipped profiles). The outage is wall time, so at a high `FLEETMESH_RATE` handovers cost
+  proportionally more packets than at rate 1. "Best by elevation" changes about as often as,
+  or more often than, a real terminal's satellite (Starlink: every 15-20 s here).
+- **Time**: public element sets are current, scenarios are dated; `[space].epoch = "auto"` uses
+  fleetmesh-space's whole-day time shift (its README, "Epoch honesty"). The map is fixed at start
+  and reported in the log and `/stats`.
+- **No data**: if `fleetmesh-space fetch` has not been run (no `sim/space/cache`), a class has no
+  usable satellites, the source errors, or `--no-space` is given, the profile's static numbers
+  apply, stated in the log, in `/stats` (`space.classes.<class>.static_reason`) and per vehicle
+  (`satcom.mode = "static"`).
+- **Bandwidth** stays the profile's. What the vehicles send over it is the bridge's
+  link-aware telemetry plan (`crates/fleetmesh-bridge/src/telemetry.rs`): the full plan on LOS,
+  mesh, tether and Starlink-class links, a reduced one on GEO, HIGH_LATENCY2 every 5 s on
+  Iridium-class links, nothing extra from an AUV under water.
+
+`/stats/<uid>` has `satcom`: `class`, `mode` (`pending`, `live`, `static`), `up`, `visible`,
+`best_norad_id`, `best_name`, `best_elevation_deg`, `slant_range_km`, `latency_ms` and
+`latency_source`, `handovers`, `last_handover_scenario`, and `next_outage_scenario` /
+`next_outage_in_s` (link up now) or `next_pass_scenario` / `next_pass_in_s` (link down now),
+looked ahead `outlook_s` scenario seconds (null if none in the horizon; GEO has none).
+`/stats` also has `space` (per class live or static, element reference, time shift, refresh
+round times).
+
+Platform mapping: the four delivery platforms in `sim/platforms.toml` name their main and
+backup links directly (`link`, `backup_link`); the boat and the plane fall back to `satcom_leo`
+(Starlink-class LEO). A platform may also set `space_class` to pick a SATCOM profile through
+`[space_class_profile]`; none does today. To move a platform onto another SATCOM profile, add a
+`[platform_profile]` override, for example `delivery_plane = "satcom_iridium"`.
+
+Ground station altitude: with `--tidewater` the DEM is sampled at each ground station at
+startup; if `alt_m` differs by more than 5 m a warning is logged, and `alt_m = "dem"` uses the
+DEM height (the profiles' `gs_antenna_m` mast height is added on top either way).
+
+`src/bin/satprobe.rs` is the live check: fake vehicles at given positions and a fake bridge,
+printing the emulator's `/stats` view next to measured delay and loss, e.g.
+`satprobe --vehicle delivery_boat:37.82:-122.51:0 --vehicle delivery_plane:60:-100:0 --duration 60` (first with
+`--write-only` for the manifest, then the emulator with `FLEETMESH_AT` and `FLEETMESH_RATE`).
+
+## Observability
+
+`GET /stats` returns a summary plus `per_link`: for each direction in/out packets and bytes,
+drops by cause (`loss event_loss jam cut range terrain gate queue no_peer socket no_sat handover`), duplicates,
+queued packets and bytes (gauges), mean and max added latency and the number of packets it
+averages (`latency_n`, so a reader can difference two polls); per link the profile,
+`active_profile`, `nominal` (the profile's average loss, latency, jitter, bandwidth, queue,
+depth rule and gated profile), `events` (names of the scripted events acting on it now), blocked
+cause, depth state, last position, `station` (the ground station carrying the link now; null
+for a profile that uses none), `station_range_m`, `station_switches`, and `los` to that station:
+`state` (`off`, `unknown`, `clear`, `obstructed`),
+`obstruction_m` (positive: terrain above the ray; negative: clear by that much),
+`unknown_pkts` (decided before any terrain answer) and `blocked_by_terrain_pkts`. `/stats/summary` omits `per_link`; the summary also has `stations` (each ground station
+and the links it carries now), `los_links` (links per state),
+`terrain_blocked_pkts`, `terrain_unknown_pkts` and `terrain` (the client's cells cached and
+pending, requests, errors, points sampled, last request time and last error); `/stats/<uid>` is one
+link; `/health`. The summary also has the process CPU seconds and RSS. A one-line log prints
+every `--log-interval` seconds (rates and drops by cause since the last line).
+
+## Tests and tools
+
+`cargo test -p fleetmesh-linkemu`: loss convergence, burst length, determinism, jitter and
+reordering, bandwidth queuing and tail drop, duplicates, event windows and selectors, jammer
+circle, range loss, depth gating, terrain (ridge, curvature, Fresnel, unknown-then-answered, ramp,
+batching, an HTTP client against a fake server), several ground stations (the best path, a switch,
+no draw changed, terrain to one station, a jammer, coverage agreeing on the station), scenario time
+and event reload, propagation, MAVLink parsing, and a real
+loopback round trip. `src/bin/losprobe.rs` asks a running
+`tidewater serve` whether given positions see a ground station:
+`losprobe --gs 37.8068,-122.4460,5 --gs-antenna 10 37.875,-122.405,30 ...`.
+`src/bin/loadgen.rs` is the synthetic load generator (fake vehicles and
+fake bridge ports, writes its own manifest): `loadgen --vehicles 440 --rate 8 --duration 30`.
+
+## In the bridge and the console
+
+The bridge (`crates/fleetmesh-bridge/src/emu.rs`) polls `/stats` every 2 s when
+`FLEETMESH_LINKEMU_URL` is set, keeps a minute of history per link and serves `/api/links` and
+`/api/links/{uid}`: the per-link record (with the `station` carrying it) plus `recent` loss, drops by cause and added latency
+per direction over the shortest of 10, 30 or 60 s with at least 5 uplink packets, `total`, and
+`emu_rtt_ms` (added delay up plus down). Each vehicle's pushed `link.emu` is `{state: ok |
+degraded | down, cause}`: down while blocked or with 95% recent loss, degraded at 20% or while
+an event acts on the link. The fleet row shows it; the details card shows the full view.
+
+The bridge's own measurements stay independent: loss from MAVLink sequence gaps and RTT from
+TIMESYNC. On slow classes the TIMESYNC bookkeeping is per link class (`TimesyncPolicy` in
+`crates/fleetmesh-bridge/src/link.rs`): acoustic links are pinged every 30 s and answers accepted
+for 300 s (queueing alone on 300 bps with a 256-byte queue is ~7 s, plus sound at 1500 m/s and
+jitter; a ping a second would also fill the downlink by itself), SATCOM every 2 s for 60 s,
+everything else every second for 10 s (murmur-0nv.3). `emu_rtt_ms` is the fallback figure
+when no answer comes back at all.
+
+The bridge also reads each link's `active_profile`, `nominal.bandwidth_bps`, `emu_rtt_ms` and
+recent uplink queue drops from this view: the task layer's timeouts follow the round trip
+(`LinkTiming` in `crates/fleetmesh-bridge/src/link.rs`: RFC 6298 on TIMESYNC, the emulator's
+figure before the first answer or when it is more than twice TIMESYNC's), and the telemetry
+plan follows the profile carrying the link now, steps down where it would not fit a quarter of
+the bandwidth, and steps down for two minutes after queue drops (`crates/fleetmesh-bridge/src/
+telemetry.rs`). Each vehicle's choice is `link.telemetry` in `/api/state`; the details card
+shows it ("Telemetry: minimal for Iridium"). `FLEETMESH_TELEMETRY=uniform` on the bridge sends
+the full plan everywhere, for A/B runs.
+
+## Scenario files
+
+`--scenario FILE` (`FLEETMESH_LINK_EVENTS`) reads only the file's `[[event]]` tables and ignores
+other top-level tables, so other consumers (a GNSS jammer model for navigation, say) can keep
+their own tables in the same scenario file. Example: `sim/link-events/golden-gate.toml`.
+
+## Not done
+
+- Terrain is judged to the ground stations only (no relays or mesh hops), from a DEM cell
+  centre rather than the exact position, and the DEM may include structures (the Golden Gate
+  Bridge reads as 60 to 76 m at Fort Point). Each station's `alt_m` must match the ground
+  there. A station cannot be cut or jammed by itself (an event acts on vehicles), and an
+  acoustic modem has no gateway of its own (its propagation counts from the nearest station). No jitter model beyond uniform; no correlated fading
+  with range or weather; no per-packet-size loss. Loss does not depend on message type.
+- Telemetry priority under low bandwidth (murmur-f6q): the queue is a single FIFO.
+- Position comes from uplink only and lags by the link's own delay. No ICMP, MTU or
+  fragmentation modelling (datagrams over 2048 bytes are truncated).
+- `links.toml` profiles are not reloaded, only events.
+- Socket creation is slow in some sandboxes (about 10 ms per socket in this WSL2 harness), so
+  1000 links take ~20 s to start there.

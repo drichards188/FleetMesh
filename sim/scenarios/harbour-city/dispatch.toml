@@ -1,0 +1,281 @@
+# harbour-city: a mixed fleet from two hubs on the north San Francisco waterfront. Illustrative only.
+
+[dispatch]
+tick_s = 10
+max_range_frac = 0.7
+hold_reassign_s = 120
+max_proposals_per_min = 60
+
+[observations.busy]
+doorstep = 0.25
+kerb = 0.15
+locker = 0.0
+pad = 0.0
+dock = 0.0
+
+# two parcels to the hub's own pad: a confirmed zone, so policy sends the delivery at once
+[[parcel]]
+id = "p-pad-1"
+from = "hub-marina"
+to = "dz-marina-pad"
+mass_kg = 0.5
+ready_s = 15
+due_s = 1200
+priority = 2
+
+[[parcel]]
+id = "p-pad-2"
+from = "hub-marina"
+to = "dz-marina-pad"
+mass_kg = 1.0
+ready_s = 120
+due_s = 1200
+priority = 1
+
+# seeded demand: about 3 parcels a minute for the hour
+[demand]
+rate_per_min = 3.0
+from_s = 30
+hubs = ["hub-marina", "hub-marina", "hub-marina", "hub-pier"]
+zones = ["dz-fort-mason-3", "dz-city-02", "dz-city-03", "dz-city-04", "dz-city-05", "dz-city-06", "dz-city-07", "dz-city-08", "dz-city-09", "dz-city-10", "dz-city-11", "dz-city-12", "dz-city-13", "dz-city-14", "dz-city-15", "dz-city-16", "dz-city-17", "dz-city-18", "dz-city-19", "dz-city-20", "dz-city-21", "dz-city-22", "dz-sausalito-pad", "dz-sausalito-dock", "dz-angel-dock"]
+mass_kg = [0.2, 4.0]
+priority_mix = [0.02, 0.60, 0.30, 0.08]
+due_s = 1800
+
+[[hub]]
+id = "hub-marina"
+name = "Marina Green hub"
+lon = -122.437
+lat = 37.8057
+radius_m = 80
+pads = 12
+packs = 16
+
+[[hub]]
+id = "hub-pier"
+name = "Pier 39 hub"
+lon = -122.41
+lat = 37.8089
+radius_m = 80
+pads = 8
+packs = 10
+
+[[dropzone]]
+id = "dz-fort-mason-3"
+kind = "doorstep"
+lon = -122.429
+lat = 37.804
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-02"
+kind = "kerb"
+lon = -122.41458
+lat = 37.80083
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-03"
+kind = "locker"
+lon = -122.42873
+lat = 37.80144
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-04"
+kind = "doorstep"
+lon = -122.43972
+lat = 37.80106
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-05"
+kind = "kerb"
+lon = -122.42458
+lat = 37.80246
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-06"
+kind = "locker"
+lon = -122.4428
+lat = 37.80002
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-07"
+kind = "doorstep"
+lon = -122.44292
+lat = 37.80255
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-08"
+kind = "kerb"
+lon = -122.42242
+lat = 37.79871
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-09"
+kind = "locker"
+lon = -122.41261
+lat = 37.80332
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-10"
+kind = "doorstep"
+lon = -122.42377
+lat = 37.80158
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-11"
+kind = "kerb"
+lon = -122.44065
+lat = 37.79858
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-12"
+kind = "locker"
+lon = -122.42804
+lat = 37.7988
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-13"
+kind = "doorstep"
+lon = -122.43953
+lat = 37.79971
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-14"
+kind = "kerb"
+lon = -122.44498
+lat = 37.80082
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-15"
+kind = "locker"
+lon = -122.43102
+lat = 37.80271
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-16"
+kind = "doorstep"
+lon = -122.42835
+lat = 37.8017
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-17"
+kind = "kerb"
+lon = -122.42901
+lat = 37.80181
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-18"
+kind = "locker"
+lon = -122.43045
+lat = 37.79989
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-19"
+kind = "doorstep"
+lon = -122.41208
+lat = 37.80348
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-city-20"
+kind = "kerb"
+lon = -122.41743
+lat = 37.80204
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-21"
+kind = "locker"
+lon = -122.43528
+lat = 37.79965
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-city-22"
+kind = "doorstep"
+lon = -122.43617
+lat = 37.79885
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-sausalito-pad"
+kind = "pad"
+lon = -122.485
+lat = 37.859
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-sausalito-dock"
+kind = "dock"
+lon = -122.479
+lat = 37.857
+radius_m = 6
+surface = "water"
+dock_level_m = 2.4
+
+[[dropzone]]
+id = "dz-angel-dock"
+kind = "dock"
+lon = -122.432
+lat = 37.869
+radius_m = 6
+surface = "water"
+dock_level_m = 1.6
+
+[[dropzone]]
+id = "dz-marina-pad"
+kind = "pad"
+lon = -122.4372
+lat = 37.8059
+radius_m = 3
+surface = "land"
+hub = "hub-marina"
+

@@ -1,0 +1,32 @@
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+.playwright-mcp/
+.venv
+logs/
+sim/run/
+web/node_modules
+web/dist/
+__pycache__/
+*.tsbuildinfo
+target/
+.claude/worktrees/
+sim/space/cache
+
+# tidewater (tidewater/): each scenario's fetched data (`tidewater fetch`), and the egg-info
+# its editable install into .venv leaves
+tidewater/data/cache
+*.egg-info/
+
+# evaluation batches (eval/run.py); reports are published by hand
+eval/results/
+
+# operator and agent credentials (fleetmesh-auth) belong outside the repository
+# (~/.config/fleetmesh/credentials.json or FLEETMESH_CREDENTIALS); never commit one placed here
+credentials*.json
+.fleetmesh/
+
+# Working files for the cut; never commit
+CATALOG.tsv
+MANIFEST.tsv

@@ -1,0 +1,13 @@
+name = "harbour-city"
+title = "Harbour city: a normal hour"
+tidewater = "golden-gate-weather"
+at = "2026-06-14T17:00:00Z"
+rate = 1
+duration_s = 3600
+seed = 11
+fleet = "fleet.toml"
+dispatch = "dispatch.toml"
+events = "events.toml"
+areas = "areas"
+reference = "reference.toml"
+policy = "sim/policy.toml"

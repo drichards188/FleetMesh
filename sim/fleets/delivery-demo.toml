@@ -1,0 +1,21 @@
+# A small first-draft fleet of the four delivery platforms around the Golden Gate, to run the
+# stack with: `make up` (FLEET=delivery-demo is the default). Positions are rough and are to be
+# checked against tidewater's terrain (boats in water, cars on land).
+title = "Delivery demo (8 vehicles)"
+
+[[unit]]
+platform = "delivery_drone"
+count = 3
+spawn = [37.8040, -122.4650, 3, 0]     # Crissy Field launch site
+[[unit]]
+platform = "delivery_plane"
+count = 1
+spawn = [37.8030, -122.4620, 3, 90]
+[[unit]]
+platform = "delivery_car"
+count = 2
+spawn = [37.8057, -122.4370, 4, 0]     # Marina
+[[unit]]
+platform = "delivery_boat"
+count = 2
+spawn = [37.8170, -122.4150, 0, 90]    # North of Pier 39, in the Bay

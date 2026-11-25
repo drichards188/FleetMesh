@@ -1,0 +1,266 @@
+# FleetMesh DRAFT policy. First-draft values for a delivery fleet, not tuned and not reviewed by
+# the maintainer. Read by crates/fleetmesh-decide; the whole file is logged at the
+# start of every run and replay decides with that copy. Policy schema 1, rules version 1.
+#
+# Routing follows docs/design/delivery-orders.md section 9: the nine delivery kinds (pickup,
+# deliver, hold, reroute, return_to_hub, land_now, abort, swap_battery, confirm_drop_zone). The
+# inherited kinds with no delivery counterpart (orbit, patrol, transit, rtl) keep their routine
+# tiers until they are removed. Rules version 1: no *_SINCE gate applies before the first commit.
+#
+# Every intent that passes the rules is routed by the first [[tier]] whose `when` matches:
+#   tier = "auto"   approved by policy, dispatched without a person
+#   tier = "human"  a person decides. An agent's proposal waits in the operator's inbox (it
+#                   expires after approval.expire_s). An operator's own submission is a human
+#                   decision: with submitter_authorizes = true it is approved at submission
+#                   (logged as approval.at_submission); with false it waits in the inbox too.
+# An agent's proposal in a human tier always waits for a person, whatever this file says. An
+# intent with any check that came out "unverified" never gets an auto tier. If nothing matches,
+# the intent goes to a person (fail closed).
+#
+# Conditions in `when` (all must hold; an empty `when` matches everything):
+#   kind = [...]                  the task kind is one of these
+#   leaves_approved_area = bool   some vehicle's route leaves the "approved" areas in sim/areas/
+#                                 (no area loaded, or no fresh position or home, counts as leaving)
+#   source = "human" | "agent"
+#   unverified = [rule, ...]      some check of these rules could not be verified ("reserves": no
+#                                 endurance figure for the platform)
+# Delivery conditions (rules read the logged inputs, delivery-rules.md):
+#   site = "hub_or_landing_area"  land_now: the landing point is in a hub's landing zone or an
+#                                 approved landing area
+#   over_people = bool            abort: the vehicle is over, or within abort.people_buffer_m of,
+#                                 a populated area
+#   final_approach = bool         abort: the target is a deliver in its last abort.final_approach_s
+#   unplanned_landing = bool      abort: its `then` puts the vehicle down away from a hub
+#   hub_or_confirmed = bool       pickup from a hub, deliver to a confirmed zone or a hub pad,
+#                                 reroute within reroute.auto_added_pct, battery swap at a hub
+# Any check that came out `hold` (delivery-rules.md section 1) sends the order to a person,
+# whatever tier matched: "a hold outcome from any check forces human". A tier marked
+# `locked = true` stays a human tier, and the loader refuses a file with an auto tier that
+# matches confirm_drop_zone (or matches every kind): that order is only ever a person's.
+# Human tiers may also set: approvers = N (distinct approvers), proposer_may_approve = false, and
+# step_up = true (in a credentials run each approval re-enters the approver's password or
+# passkey, and the submitter's own request is never the approval).
+
+[approval]
+expire_s = 120                              # a pending approval waits this long, then expires
+submitter_authorizes = true                 # default for human tiers that do not set it
+step_up_factor = "password"                 # what a step-up takes in a credentials run: the
+                                            # password again, or a passkey (at least as strong)
+
+# How long a pending approval of a kind waits (delivery-orders.md section 9): a landing or an
+# abort is time critical, a drop-zone confirmation less so, a delivery longer.
+[approval.kind.land_now]
+expire_s = 30
+
+[approval.kind.abort]
+expire_s = 30
+
+[approval.kind.confirm_drop_zone]
+expire_s = 120
+
+[approval.kind.deliver]
+expire_s = 300
+
+# The safe command queue: an order for a vehicle the link cannot carry it to right now waits here
+# instead of going into a dead link, is re-checked when the vehicle can be reached, and expires
+# after its wait. Bounds: expire_s 1..3600; per kind 0..3600 (0: never queued, sent at once
+# whatever the link); human_expire_s 1..3600; link_intervals 1..10.
+[queue]
+expire_s = 300                              # an order waits at most this long for its vehicle
+human_expire_s = 120                        # a person's approval is good in the queue this long
+link_intervals = 3                          # reachable: heard within this many report intervals
+
+# Stopping and going home are never queued (delivery-orders.md 5.3 and 5.5): a hold or a return
+# delivered long after it was given may no longer be what the operator wants, and the vehicle's
+# own lost-link failsafe has acted by then.
+[queue.kind.hold]
+expire_s = 0
+
+[queue.kind.rtl]
+expire_s = 0
+
+[queue.kind.return_to_hub]
+expire_s = 0
+
+[queue.kind.land_now]
+expire_s = 0
+
+[queue.kind.abort]
+expire_s = 0
+
+[queue.kind.reroute]
+expire_s = 60
+
+[queue.kind.swap_battery]
+expire_s = 900
+
+[rules]
+max_fact_age_s = 10                         # older telemetry cannot support a decision
+fact_age_intervals = 3                      # a slow link's limit is at least this many of its report intervals
+orbit_radius_margin = 1.1                   # orbit radius at least 1.1 x the minimum turn radius
+fixed_wing_default_min_turn_radius_m = 60   # when the catalog has no turn rate (a plane's loiter radius)
+reserve_pct = 20                            # endurance left after the task, % of full (draft; the
+                                            # delivery energy rule sets it per platform)
+task_duration_s = 900                       # time on task assumed by the reserves estimate
+unknown_endurance = "human"                 # a platform with no endurance figure: unverified, so a person
+
+# The delivery rules' numbers (docs/design/delivery-rules.md): first-draft defaults, the same as
+# the code's. Each table may be left out; a key left out keeps its default. They are logged with
+# the policy, and replay decides with that copy.
+[rules.delivery.geofence]
+buffer_m = { air = 30.0, ground = 10.0, surface = 20.0 }
+soon_s = 600                                # a restriction that starts this soon after the ETA holds
+alt_slack_m = 20.0
+sample_m = 20.0
+
+[rules.delivery.energy]
+reserve_pct = { copter = 25.0, plane = 20.0, car = 15.0, boat = 20.0 }
+wind_margin = 0.15
+hold_band_pct = 5.0                         # margin under this holds, below 0 refuses
+max_age_s = 10.0                            # battery fact age limit, streaming link
+max_age_slow_s = 60.0                       # and on a slow link (satcom)
+min_ground_speed_frac = 0.3
+drop_hover_s = 20.0
+payload_load = { copter = 0.35, plane = 0.15, car = 0.10, boat = 0.10 }
+
+[rules.delivery.payload]
+derate_from_mps = 7.0
+derate_floor = 0.6
+hold_frac = 0.9
+
+[rules.delivery.weather]
+keel_clear_m = 0.5
+keel_hard_m = 0.2
+flood_clear_m = 0.3
+dock_level_band_m = 0.3
+max_age_s = 120.0
+lookahead_s = 0                             # current conditions only: the archive is not a forecast
+# Per platform, over the kind's defaults: [rules.delivery.weather.platform.delivery_drone]
+# gust_soft_mps = 11.0
+
+[rules.delivery.separation]
+step_s = 5.0
+horizon_s = 300.0
+marginal_factor = 1.5
+drift_mps = 0.5
+relevant_km = 5.0
+air_air_h_m = 50.0
+air_air_v_m = 30.0
+air_hub_h_m = 20.0
+air_hub_v_m = 15.0
+hub_zone_m = 100.0
+ground_ground_m = 10.0
+surface_surface_m = 30.0
+air_over_ground_m = 20.0
+max_age_s = 10.0
+
+[rules.delivery.nav]
+trusted_acc_m = { air = 5.0, ground = 8.0, surface = 10.0 }
+degraded_acc_m = { air = 15.0, ground = 20.0, surface = 25.0 }
+min_sats = 6
+max_hdop = 2.0
+max_age_s = 5.0
+jump_m = 30.0
+range_tol_m = 150.0
+recover_s = 20.0
+speed_factor = 1.2
+
+[rules.delivery.dropzone]
+confirm_valid_s = 3600
+obs_max_age_s = 30.0
+descent_gust_mps = 8.0
+descent_gust_hard_mps = 10.0
+max_slope_deg = 10.0
+
+[rules.delivery.lost_link]
+gap_hold_s = 30.0
+release_wait_s = 30.0
+car_hold_s = 60.0                           # for the fleet-side hold-then-RTL timer (not built yet)
+
+[rules.delivery.reroute]
+auto_added_pct = 25.0
+join_m = 150.0
+
+[rules.delivery.abort]
+people_buffer_m = 100.0
+final_approach_s = 20.0
+
+[rules.delivery.hub]
+swap_s = 120
+charge_s = 2400
+
+[[tier]]
+name = "safe-stops"
+when = { kind = ["hold", "rtl", "return_to_hub"] }
+tier = "auto"
+reason = "stopping and going home reduce risk"
+
+[[tier]]
+name = "confirm-is-human"
+when = { kind = ["confirm_drop_zone"] }
+tier = "human"
+reason = "a person judges the drop zone"
+locked = true
+
+[[tier]]
+name = "land-at-hub"
+when = { kind = ["land_now"], site = "hub_or_landing_area" }
+tier = "auto"
+reason = "landing at a hub or an approved site is planned"
+
+[[tier]]
+name = "land-elsewhere"
+when = { kind = ["land_now"] }
+tier = "human"
+submitter_authorizes = true
+reason = "landing outside a hub is an unplanned place"
+
+[[tier]]
+name = "abort-away-from-people"
+when = { kind = ["abort"], over_people = false, final_approach = false, unplanned_landing = false }
+tier = "auto"
+reason = "aborting away from people, early and to a safe next order, is safe"
+
+[[tier]]
+name = "abort-otherwise"
+when = { kind = ["abort"] }
+tier = "human"
+submitter_authorizes = true
+reason = "over people, at the last moment or to an unplanned landing, a person decides"
+
+[[tier]]
+name = "outside-approved-area"
+when = { leaves_approved_area = true }
+tier = "human"
+reason = "the route leaves the approved area"
+submitter_authorizes = true
+
+[[tier]]
+name = "endurance-unknown"
+when = { unverified = ["reserves"] }
+tier = "human"
+reason = "no endurance figure for the platform: the reserve after the task could not be estimated"
+submitter_authorizes = true
+
+[[tier]]
+name = "routine"
+when = { kind = ["transit", "orbit", "patrol"] }
+tier = "auto"
+reason = "routine order inside the approved area with every check clear (draft; whether this stays auto as the fleet grows is the research question)"
+
+[[tier]]
+name = "routine-delivery"
+when = { kind = ["pickup", "deliver", "reroute", "swap_battery"], hub_or_confirmed = true }
+tier = "auto"
+reason = "routine delivery order with every check clear (draft; whether this stays auto as the fleet grows is the research question)"
+
+[[tier]]
+name = "everything-else"
+tier = "human"
+reason = "default: a person approves"
+
+# Group orders: an order naming more than one vehicle is one group order, checked member by member
+# and decided once. min_share is the least share of the named vehicles that must be able to take it
+# (a hold or a return: one member); fewer and the order is refused. A draft figure.
+[group]
+min_share = 0.8

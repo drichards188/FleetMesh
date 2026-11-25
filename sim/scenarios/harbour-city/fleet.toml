@@ -1,0 +1,36 @@
+title = "Harbour city (54 vehicles)"
+
+[[unit]]
+platform = "delivery_drone"
+count = 24
+sim = "standin"
+spacing_m = 5
+spawn = [37.8057, -122.4370, 3, 0]
+
+[[unit]]
+platform = "delivery_car"
+count = 8
+sim = "standin"
+spacing_m = 6
+spawn = [37.8053, -122.4368, 4, 0]
+
+[[unit]]
+platform = "delivery_plane"
+count = 2
+sim = "standin"
+spacing_m = 40
+spawn = [37.8061, -122.4360, 3, 90]
+
+[[unit]]
+platform = "delivery_drone"
+count = 16
+sim = "standin"
+spacing_m = 5
+spawn = [37.8089, -122.4105, 3, 0]
+
+[[unit]]
+platform = "delivery_boat"
+count = 4
+sim = "standin"
+spacing_m = 20
+spawn = [37.8100, -122.4095, 0, 90]

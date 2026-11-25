@@ -1,0 +1,567 @@
+//! The authorize step, closed to agents by construction.
+//!
+//! Approving needs a [`HumanAuthority`]. The only way to get one is an [`OperatorSession`],
+//! and the only way to get one of those is [`crate::Engine::open_operator_session`], which
+//! logs the session opening. Neither type can be built by struct literal (private fields),
+//! cloned, defaulted, deserialized from JSON, or converted from an agent identity. An
+//! [`crate::AgentPort`], the agent-facing surface, has no method that yields either.
+//!
+//! only inside a session opened with consequential authority
+//! ([`crate::Engine::open_operator_session_with`] and [`Grants::consequential`], logged with the
+//! into the other.
+//!
+//! Stable rustdoc does not check the error codes on these `compile_fail` blocks, only that
+//! they fail to compile; the codes record the intended reason, and each block was checked
+//! to fail with exactly that code and no other.
+//!
+//! What this does and doesn't guarantee is spelled out in the crate docs ("The
+//! authorization guarantee").
+//!
+//! ```compile_fail,E0451
+//! // Forging an authority by struct literal: the fields are private.
+//! use fleetmesh_decide::{HumanAuthority, OperatorId, SessionId};
+//! let forged = HumanAuthority { operator: OperatorId::new("mallory"), session: SessionId(1) };
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // Smuggling an authority through JSON (e.g. an MCP tool call): no Deserialize impl.
+//! let forged: fleetmesh_decide::HumanAuthority =
+//!     serde_json::from_str(r#"{"operator":"mallory","session":1}"#).unwrap();
+//! ```
+//!
+//! ```compile_fail,E0308
+//! // Copying someone else's authority: not Clone (so `clone` only copies the reference).
+//! fn steal(a: &fleetmesh_decide::HumanAuthority) -> fleetmesh_decide::HumanAuthority {
+//!     a.clone()
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! // Forging consequential authority by struct literal: the fields are private.
+//! use fleetmesh_decide::{ConsequentialAuthority, OperatorId, SessionId};
+//! let forged = ConsequentialAuthority { operator: OperatorId::new("mallory"), session: SessionId(1) };
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // Consequential authority from JSON: no Deserialize impl.
+//! let forged: fleetmesh_decide::ConsequentialAuthority =
+//!     serde_json::from_str(r#"{"operator":"mallory","session":1}"#).unwrap();
+//! ```
+//!
+//! A step-up (the signer's credential re-entered at the moment of signing, rules 8) is a
+//! [`StepUp`]: only [`crate::Engine::step_up`] (or, rules 10, a passkey's,
+//! [`crate::Engine::step_up_passkey`]) makes one, after logging it under the session it is
+//! for, and a signature consumes it. It can't be forged, copied or read from JSON either, so
+//! a signature can't quote a step-up it did not just make:
+//!
+//! ```compile_fail,E0451
+//! // Forging a step-up by struct literal: the fields are private.
+//! use fleetmesh_decide::{AuthMethod, OperatorId, SessionId, StepUp, Time};
+//! let forged = StepUp {
+//!     operator: OperatorId::new("mallory"), session: SessionId(1), seq: 7, t: Time(0),
+//!     factor: AuthMethod::Passkey, session_method: None, purpose: None,
+//! };
+//! ```
+//!
+//! ```compile_fail,E0277
+//! // A step-up from JSON (a request body, an MCP call): no Deserialize impl.
+//! let forged: fleetmesh_decide::StepUp =
+//!     serde_json::from_str(r#"{"operator":"mallory","session":1,"seq":7,"t":0}"#).unwrap();
+//! ```
+//!
+//! ```compile_fail,E0599
+//! // Using one step-up for two signatures: not Clone.
+//! fn twice(s: fleetmesh_decide::StepUp) -> (fleetmesh_decide::StepUp, fleetmesh_decide::StepUp) {
+//!     (s.clone(), s)
+//! }
+//! ```
+
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{OperatorId, SessionId};
+use crate::time::Time;
+
+/// Proof, at the type level, that a human operator is acting. Not `Clone`, not `Default`,
+/// not `Deserialize`; constructible only inside this crate.
+#[derive(Debug)]
+pub struct HumanAuthority {
+    operator: OperatorId,
+    session: SessionId,
+}
+
+impl HumanAuthority {
+    pub fn operator(&self) -> &OperatorId {
+        &self.operator
+    }
+
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+}
+
+/// Proof that a human operator with consequential authority is acting: the only thing
+/// opened with [`Grants::consequential`]. Not `Clone`, not `Default`, not `Deserialize`.
+#[derive(Debug)]
+pub struct ConsequentialAuthority {
+    operator: OperatorId,
+    session: SessionId,
+}
+
+impl ConsequentialAuthority {
+    pub fn operator(&self) -> &OperatorId {
+        &self.operator
+    }
+
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+}
+
+/// What an operator session may do beyond tasking, fixed when the session opens and logged
+/// with it (`operator.action session.opened`). The bridge grants it from the run's roster:
+/// in a credentials run, the operator's credential holds consequential authority (and did when
+/// the run started); in dev mode, `FLEETMESH_CONSEQUENTIAL_OPERATORS` names them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grants {
+    #[serde(default)]
+    pub consequential: bool,
+}
+
+/// How a run established who its operators are (rules 8,
+/// [`crate::rules::OPERATOR_AUTH_SINCE`]; logged on the roster in `run.started`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// Per-person credentials: the bridge checked each operator's password at login (and
+    /// again at every step-up) against the credential file, and opens sessions only then.
+    /// The only mode whose decisions can stand as evidence about authenticated people.
+    Credentials,
+    /// Identities asserted by whoever sent the request (the bridge's `X-FleetMesh-Operator`
+    /// header under `FLEETMESH_AUTH=dev`, a scripted scenario, a test). Useful for scripted runs
+    /// and the evaluation's proxy; never evidence that a person decided anything.
+    Dev,
+}
+
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::Credentials => "credentials",
+            AuthMode::Dev => "dev",
+        }
+    }
+
+    /// The session-opening method a person uses in this mode.
+    pub fn method(self) -> AuthMethod {
+        match self {
+            AuthMode::Credentials => AuthMethod::Password,
+            AuthMode::Dev => AuthMethod::Asserted,
+        }
+    }
+
+    /// Whether a session may be opened by `method` in this mode: a credentials run takes a
+    /// person's password or (rules 10) passkey and a machine-held (scripted) credential, a dev
+    /// run asserted ids.
+    pub fn admits(self, method: AuthMethod) -> bool {
+        match self {
+            AuthMode::Credentials => matches!(method, AuthMethod::Password | AuthMethod::Passkey | AuthMethod::Scripted),
+            AuthMode::Dev => method == AuthMethod::Asserted,
+        }
+    }
+}
+
+/// The run's mode for comparing two runs (carrying intents over): a log of rules before 7
+/// records none, and its ids were asserted, as in a dev run.
+pub fn effective_mode(mode: Option<AuthMode>) -> AuthMode {
+    mode.unwrap_or(AuthMode::Dev)
+}
+
+/// How one operator session was opened (rules 8; logged as `auth` on `session.opened`, and
+/// on a step-up).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// A person's password, checked by the bridge against its argon2id hash.
+    Password,
+    /// A machine-held credential (`fleetmesh-auth add --scripted`: the evaluation harness's
+    /// scripted operators, a script): checked like a password, but whoever holds it is a
+    /// program, so its acts are never evidence about a person.
+    Scripted,
+    /// The operator's id as the request named it, unchecked (dev mode, scenarios, tests).
+    Asserted,
+    /// Rules 10: a person's passkey, a WebAuthn assertion with user verification the bridge
+    /// checked and the engine verified against the public key the run logged (the use is
+    /// logged with it: `passkey`).
+    Passkey,
+}
+
+impl AuthMethod {
+    /// A person's credential (a password or a passkey), not a harness's or an asserted name.
+    pub fn is_person(self) -> bool {
+        matches!(self, AuthMethod::Password | AuthMethod::Passkey)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMethod::Password => "password",
+            AuthMethod::Scripted => "scripted",
+            AuthMethod::Asserted => "asserted",
+            AuthMethod::Passkey => "passkey",
+        }
+    }
+}
+
+/// Proof that the signer re-entered their credential just now (rules 8, a credentials run):
+/// made only by [`crate::Engine::step_up`] (rules 10: or [`crate::Engine::step_up_passkey`],
+/// with the assertion and what it is for), which logs it (`operator.action step_up`) under
+/// the session it is for, and consumed by the one signature that quotes it. Not `Clone`, not
+/// `Default`, not `Deserialize`, no public fields. The engine refuses it for another session
+/// or once it is older than [`STEP_UP_MAX_AGE_MS`]; the signature records the step-up's
+/// event (`step_up: {seq}`), which replay checks.
+#[derive(Debug)]
+pub struct StepUp {
+    operator: OperatorId,
+    session: SessionId,
+    seq: u64,
+    t: Time,
+    /// Rules 10: how the credential was re-entered (a password, a passkey, a scripted
+    /// credential), and how its session was opened.
+    factor: AuthMethod,
+    session_method: Option<AuthMethod>,
+    /// Rules 10, a passkey's: the act its assertion was made for (the act quoting it must be
+    /// that act).
+    purpose: Option<crate::passkey::StepUpFor>,
+}
+
+/// The oldest a step-up may be when the signature quoting it is checked. The bridge checks
+/// the credential and signs in one request, so this only bounds a slow re-check.
+pub const STEP_UP_MAX_AGE_MS: i64 = 10_000;
+
+impl StepUp {
+    pub(crate) fn mint(
+        operator: OperatorId,
+        session: SessionId,
+        seq: u64,
+        t: Time,
+        factor: AuthMethod,
+        session_method: Option<AuthMethod>,
+        purpose: Option<crate::passkey::StepUpFor>,
+    ) -> StepUp {
+        StepUp {
+            operator,
+            session,
+            seq,
+            t,
+            factor,
+            session_method,
+            purpose,
+        }
+    }
+
+    /// How the credential was re-entered.
+    pub fn factor(&self) -> AuthMethod {
+        self.factor
+    }
+
+    /// How the session it was made in was opened.
+    pub fn session_method(&self) -> Option<AuthMethod> {
+        self.session_method
+    }
+
+    /// A passkey step-up's act.
+    pub fn purpose(&self) -> Option<&crate::passkey::StepUpFor> {
+        self.purpose.as_ref()
+    }
+
+    pub fn operator(&self) -> &OperatorId {
+        &self.operator
+    }
+
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// The `operator.action step_up` event it was logged as.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn t(&self) -> Time {
+        self.t
+    }
+}
+
+/// A signature's reference to the step-up it quoted (`step_up` on `approval.concurred` and
+/// `approval.granted`): the `operator.action step_up` event's `seq`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepUpRef {
+    pub seq: u64,
+}
+
+/// Who may act as an operator in a run, who of them with consequential authority, and (rules 8)
+/// how they prove it: with `auth = credentials` the bridge's credential file at the run's
+/// start (each person's password checked at login), with `auth = dev` the bridge's
+/// `FLEETMESH_OPERATORS` and `FLEETMESH_CONSEQUENTIAL_OPERATORS`, names a request asserts. Fixed when the
+/// run starts and logged in `run.started` (rules 4). The engine opens sessions only for
+/// operators on it, with consequential authority only for those on its consequential list, and
+/// replay checks every logged session against it, so a log can't gain an operator or a grant
+/// the run never had.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Roster {
+    /// Operators who may open a session.
+    pub operators: Vec<OperatorId>,
+    /// Those of them whose sessions carry consequential authority.
+    pub consequential: Vec<OperatorId>,
+    /// Rules 8: how operators are authenticated. Absent in older logs (asserted names). An
+    /// engine of rules 8 or later always logs it, `dev` when none was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthMode>,
+    /// Rules 10, a credentials run: the WebAuthn relying party and every operator's passkeys
+    /// when the run started, as public keys (replay verifies each logged assertion against
+    /// them). Absent in a dev run and before rules 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passkeys: Option<Box<crate::passkey::PasskeyRoster>>,
+    /// Rules 10: a study run's participant and, only by explicit choice, the override that
+    /// lets them step up with a password (such a run is never evidence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub study: Option<Box<crate::passkey::Study>>,
+    /// Rules 12 ([`crate::rules::REVIEW_FOLLOWUPS_SINCE`]), a credentials run: the operators
+    /// whose credential was harness-held (`scripted`) when the run started, fixed for the run
+    /// (an empty list when none was). Their sessions open as `scripted`, everyone else's as a
+    /// person's (`password`, `passkey`): the engine refuses, and replay flags, a session opened
+    /// otherwise, so a credential re-marked mid-run can't move an operator between people and
+    /// scripts in the log. Absent in a dev run and before rules 12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripted: Option<Vec<OperatorId>>,
+}
+
+impl Roster {
+    /// A roster, checked: at least one operator, no empty or repeated id, and every
+    /// consequential operator listed as an operator too. Its auth mode is unset (the engine
+    /// logs `dev` for it under rules 8); [`Roster::with_auth`] sets one.
+    pub fn new(operators: Vec<OperatorId>, consequential: Vec<OperatorId>) -> Result<Roster, String> {
+        let r = Roster {
+            operators,
+            consequential,
+            auth: None,
+            passkeys: None,
+            study: None,
+            scripted: None,
+        };
+        r.validate()?;
+        Ok(r)
+    }
+
+    /// The same roster, authenticated as `mode` says.
+    #[must_use]
+    pub fn with_auth(mut self, mode: AuthMode) -> Roster {
+        self.auth = Some(mode);
+        self
+    }
+
+    /// Rules 10: the same roster with the relying party and the operators' passkeys.
+    #[must_use]
+    pub fn with_passkeys(mut self, passkeys: crate::passkey::PasskeyRoster) -> Roster {
+        self.passkeys = Some(Box::new(passkeys));
+        self
+    }
+
+    /// Rules 10: the same roster for a study run.
+    #[must_use]
+    pub fn with_study(mut self, study: crate::passkey::Study) -> Roster {
+        self.study = Some(Box::new(study));
+        self
+    }
+
+    /// Rules 12: the same roster with the operators whose credential is harness-held
+    /// (`scripted`) at the run's start (a credentials run's; the engine logs an empty list
+    /// when it is given none).
+    #[must_use]
+    pub fn with_scripted(mut self, scripted: Vec<OperatorId>) -> Roster {
+        self.scripted = Some(scripted);
+        self
+    }
+
+    /// Rules 12: how `operator` opens a session in this run, if the roster fixes it: `true`
+    /// for a scripted (harness-held) credential, `false` for a person's. None without a
+    /// scripted list (a dev run, older rules).
+    pub fn is_scripted(&self, operator: &OperatorId) -> Option<bool> {
+        self.scripted.as_ref().map(|s| s.contains(operator))
+    }
+
+    /// Rules 12: why a session of `operator` opened by `method` is not the one the roster's
+    /// scripted list gives it, if it is not (a scripted credential opens `scripted` sessions,
+    /// a person's `password` or `passkey` ones). None without a scripted list, and for an
+    /// asserted session (a dev run's, refused elsewhere in a credentials run).
+    pub fn method_refused(&self, operator: &OperatorId, method: AuthMethod) -> Option<String> {
+        let scripted = self.is_scripted(operator)?;
+        match method {
+            AuthMethod::Scripted if !scripted => Some(format!(
+                "{operator}'s credential was a person's when the run started, not a harness's (scripted): restart the bridge for a change of it to count"
+            )),
+            AuthMethod::Password | AuthMethod::Passkey if scripted => Some(format!(
+                "{operator}'s credential was harness-held (scripted) when the run started: its sessions are scripted, never a person's (restart the bridge for a change of it to count)"
+            )),
+            _ => None,
+        }
+    }
+
+    /// Rules 10: why the passkeys and the study this roster names could not be a run's, if
+    /// they couldn't (`policy_factor`: the policy's step-up factor). Checked by the engine at
+    /// start and by replay on the logged roster.
+    pub fn validate_passkeys(&self, policy_factor: crate::policy::StepUpFactor) -> Result<(), String> {
+        let credentials = self.auth == Some(AuthMode::Credentials);
+        if let Some(p) = &self.passkeys {
+            if !credentials {
+                return Err("passkeys on the roster of a run that does not authenticate with credentials".into());
+            }
+            if p.rp_id.trim().is_empty() || p.rp_id.parse::<std::net::IpAddr>().is_ok() {
+                return Err(format!("relying party id {:?}: a domain (WebAuthn takes no IP address)", p.rp_id));
+            }
+            if p.origins.is_empty() {
+                return Err("passkeys without an origin they may be used from".into());
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            for k in &p.keys {
+                if !self.operators.contains(&k.operator) {
+                    return Err(format!("a passkey of {}, who is not on the roster", k.operator));
+                }
+                if !ids.insert(k.id.as_str()) {
+                    return Err(format!("passkey {} listed twice", k.id));
+                }
+                crate::passkey::check_key(&k.public_key).map_err(|e| format!("passkey {}: {e}", k.id))?;
+            }
+        }
+        if let Some(s) = &self.study {
+            if !credentials {
+                return Err("a study run authenticates with credentials".into());
+            }
+            if !self.operators.contains(&s.participant) {
+                return Err(format!("the study's participant {} is not on the roster", s.participant));
+            }
+            // rules 12: a study's participant is a person, never a harness's credential
+            if self.is_scripted(&s.participant) == Some(true) {
+                return Err(format!(
+                    "the study's participant {} is marked scripted (a harness's credential): a participant is a person",
+                    s.participant
+                ));
+            }
+            if s.password_step_up.is_none() {
+                if policy_factor != crate::policy::StepUpFactor::Passkey {
+                    return Err("a study run requires passkey step-ups ([approval] step_up_factor = \"passkey\") unless its override allows a password".into());
+                }
+                let has = self
+                    .passkeys
+                    .as_ref()
+                    .is_some_and(|p| p.keys.iter().any(|k| k.operator == s.participant));
+                if !has {
+                    return Err(format!(
+                        "the study's participant {} has no passkey: register one before the run (or allow password step-ups, explicitly)",
+                        s.participant
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Why this roster could not have been configured, if it couldn't.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.operators.is_empty() {
+            return Err("the roster lists no operator".into());
+        }
+        for (i, o) in self.operators.iter().enumerate() {
+            if o.as_str().trim().is_empty() {
+                return Err("the roster lists an empty operator id".into());
+            }
+            if self.operators[..i].contains(o) {
+                return Err(format!("the roster lists operator {o} twice"));
+            }
+        }
+        for (i, o) in self.consequential.iter().enumerate() {
+            if !self.operators.contains(o) {
+                return Err(format!(
+                    "consequential operator {o} is not on the operator roster (list every consequential operator as an operator too)"
+                ));
+            }
+            if self.consequential[..i].contains(o) {
+                return Err(format!("the roster lists consequential operator {o} twice"));
+            }
+        }
+        // rules 12: the scripted operators are on the roster, once each, in a credentials run
+        if let Some(list) = &self.scripted {
+            if self.auth != Some(AuthMode::Credentials) {
+                return Err("scripted operators on the roster of a run that does not authenticate with credentials".into());
+            }
+            for (i, o) in list.iter().enumerate() {
+                if !self.operators.contains(o) {
+                    return Err(format!("scripted operator {o} is not on the operator roster"));
+                }
+                if list[..i].contains(o) {
+                    return Err(format!("the roster lists scripted operator {o} twice"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Why `operator` may not open a session with `grants`, if they may not.
+    pub fn refuses(&self, operator: &OperatorId, grants: Grants) -> Option<&'static str> {
+        if !self.operators.contains(operator) {
+            Some("session opened for an operator not on the run's roster")
+        } else if grants.consequential && !self.consequential.contains(operator) {
+            Some("consequential authority granted to an operator not on the run's consequential roster")
+        } else {
+            None
+        }
+    }
+}
+
+/// An authenticated operator's session. The bridge opens one per operator login (its login
+/// endpoint is the only caller of `Engine::open_authenticated_session` in a credentials
+/// run; in dev mode the operator endpoints open one per asserted id) and keeps it on the
+/// operator side; it is never handed to agent code. Ending it
+/// ([`crate::Engine::close_operator_session`]) consumes it, and with it the authorities it
+/// holds.
+#[derive(Debug)]
+pub struct OperatorSession {
+    authority: HumanAuthority,
+    consequential: Option<ConsequentialAuthority>,
+    /// Rules 8: how it was opened (None before).
+    method: Option<AuthMethod>,
+}
+
+impl OperatorSession {
+    pub(crate) fn mint(operator: OperatorId, session: SessionId, grants: Grants, method: Option<AuthMethod>) -> Self {
+        OperatorSession {
+            consequential: grants.consequential.then(|| ConsequentialAuthority {
+                operator: operator.clone(),
+                session,
+            }),
+            authority: HumanAuthority { operator, session },
+            method,
+        }
+    }
+
+    /// Rules 8: how the session was opened (a person's password, a machine-held credential,
+    /// an asserted id); None under earlier rules.
+    pub fn method(&self) -> Option<AuthMethod> {
+        self.method
+    }
+
+    pub fn authority(&self) -> &HumanAuthority {
+        &self.authority
+    }
+
+    /// Consequential authority, if the session was opened with it.
+    pub fn consequential_authority(&self) -> Option<&ConsequentialAuthority> {
+        self.consequential.as_ref()
+    }
+
+    pub fn operator(&self) -> &OperatorId {
+        &self.authority.operator
+    }
+}

@@ -1,0 +1,21 @@
+# Python side of FleetMesh: the fleet generator (sim/swarm.py), test and measurement scripts.
+# The bridge and the stand-in engine are Rust (crates/); tidewater (tidewater/) goes in this
+# venv too, editable, with its own dependencies (make setup: pip install -e './tidewater[sfbofs]').
+pymavlink>=2.4.40
+websockets>=12
+# the official MCP SDK, for agents/scripted_agent.py (Phase F; the server is in the bridge)
+mcp>=2
+# unit tests of the evaluation harness (eval/tests, run by make check)
+pytest
+# ArduPilot SITL build deps (waf runs under this venv)
+empy==3.3.4
+future
+pexpect
+dronecan
+setuptools
+lxml
+httpx
+numpy
+scipy
+# optional: model-backed agents
+anthropic

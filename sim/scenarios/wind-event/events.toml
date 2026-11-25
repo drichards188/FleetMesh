@@ -1,0 +1,30 @@
+# wind-event: scripted gusts over the archive's mean wind (a gust ramp through the drone limits:
+# soft 11 m/s, hard 14 m/s). The scripted gust reaches the rules, not the vehicles' physics.
+
+[weather]
+wind_east_mps = 4.0
+wind_north_mps = 1.0
+visibility_m = 15000
+archive = "tidewater/data/cache/golden-gate-2026-06/weather.json"
+
+[[weather.timeline]]
+at_s = 0.0
+values = { gust_mps = 7.0 }
+[[weather.timeline]]
+at_s = 900.0
+values = { gust_mps = 7.5 }
+[[weather.timeline]]
+at_s = 1500.0
+values = { gust_mps = 12.5 }
+[[weather.timeline]]
+at_s = 2100.0
+values = { gust_mps = 13.5 }
+[[weather.timeline]]
+at_s = 2400.0
+values = { gust_mps = 15.5 }
+[[weather.timeline]]
+at_s = 2700.0
+values = { gust_mps = 12.0 }
+[[weather.timeline]]
+at_s = 3600.0
+values = { gust_mps = 8.0 }

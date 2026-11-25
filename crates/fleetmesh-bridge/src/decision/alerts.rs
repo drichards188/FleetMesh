@@ -1,0 +1,264 @@
+//! Inbox alerts, from what the bridge already detects: a lost link (no telemetry for more
+//! than 3 expected intervals: 3 s when streaming, 60 s for an AUV reporting by
+//! HIGH_LATENCY2 over its acoustic link; see `link::STALE_INTERVALS`), NOT MOVING, a vehicle
+//! that left its task, a failed task, an ACK timeout, and (rules 5) a vehicle that may run an
+//! order nothing confirmed: its start went out before the link was lost (op `unconfirmed`),
+//! and it is in that order's mode now, or still out of contact.
+//!
+//! Derived from the current state on every read, so an alert clears itself when its cause
+//! does (the link comes back, the vehicle gets a new task). Op alerts look only at each
+//! vehicle's latest op: an old failure stops mattering once the vehicle has been re-tasked.
+//! Acknowledge and snooze are console work (C.5).
+
+use serde::Serialize;
+
+use crate::tasks::{OpSnapshot, OpState};
+use crate::vehicle::{Uid, VehicleCell};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    High,
+    Medium,
+    /// Something the operator may want to know that asks nothing of them (`identify_meanwhile`,
+    /// `node_lost`): listed after the rest, never counted as a warning.
+    Info,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Alert {
+    /// Stable while the condition lasts: `link:<uid>` or `op:<op id>`.
+    pub id: String,
+    /// lost_link | not_moving | left_task | task_failed | ack_timeout | may_be_running |
+    /// restore_pending (rules 6: a platform's own lost-link failsafe not confirmed back after
+    /// way home crosses land) | identify_holding | identify_lost | identify_timed_out |
+    /// identify_held (rules 21) | identify_meanwhile (rules 23: another vehicle identified an
+    /// out of action; rules 25) | node_lost (rules 30: one of ours confirmed lost, for
+    /// information; its lost_link, restore_pending and may_be_running alerts close behind it) |
+    /// node_reported_again (rules 30: one confirmed lost reported again, the loss revoked) |
+    /// signed for, its fire having ended on the window, the rounds, the target leaving, a cease
+    /// or the assessment)
+    pub kind: &'static str,
+    pub severity: Severity,
+    pub uid: Uid,
+    pub callsign: Option<String>,
+    pub detail: String,
+    /// When the condition started (wall clock, seconds).
+    pub since_t: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<u64>,
+}
+
+pub(super) fn callsign(cell: &VehicleCell) -> Option<String> {
+    cell.read(|v| {
+        v.identity
+            .as_ref()
+            .and_then(|i| i.str("callsign"))
+            .map(str::to_string)
+    })
+}
+
+/// What an op's state says, if it needs the operator.
+fn op_alert(op: &OpSnapshot) -> Option<(&'static str, Severity)> {
+    match op.state {
+        OpState::Failed if op.detail.starts_with("no ACK") => Some(("ack_timeout", Severity::High)),
+        OpState::Failed if op.detail.starts_with("vehicle left the task") => {
+            Some(("left_task", Severity::High))
+        }
+        OpState::Failed => Some(("task_failed", Severity::Medium)),
+        s if !s.is_terminal() && op.detail.starts_with("NOT MOVING") => {
+            Some(("not_moving", Severity::High))
+        }
+        _ => None,
+    }
+}
+
+/// All current alerts, most severe first, then oldest first.
+pub fn alerts(
+    vehicles: &[std::sync::Arc<VehicleCell>],
+    ops: &[OpSnapshot],
+    now_wall: f64,
+) -> Vec<Alert> {
+    // each op's vehicle by uid, not by a search of the fleet for each (bd murmur-jvdc:
+    // Saturation's hundreds of alerts each searched 3,602 vehicles)
+    let by_uid: std::collections::HashMap<Uid, &std::sync::Arc<VehicleCell>> = vehicles.iter().map(|c| (c.uid, c)).collect();
+    let mut out = Vec::new();
+    for cell in vehicles {
+        // rules 25: a vehicle that reported damage of its own, while the run lasts
+        if let Some(d) = cell.read(|v| v.damage) {
+            let mut detail = format!("reports {} since t={:.1}", d.describe(), d.since);
+            if d.mobility {
+                detail.push_str(": it cannot move, so an order will not move it");
+            }
+            if d.payload_loss {
+                detail.push_str(if d.mobility { "; its payload can't be used" } else { ": its payload can't be used" });
+            }
+            out.push(Alert {
+                id: format!("damaged:{}", cell.uid),
+                kind: "damaged",
+                severity: Severity::High,
+                uid: cell.uid,
+                callsign: callsign(cell),
+                detail,
+                since_t: d.since,
+                op_id: None,
+                intent_id: None,
+            });
+        }
+        let link = cell.link_snapshot(crate::clock::mono());
+        if let Some(last) = link.last_rx_t
+            && now_wall - last > link.stale_after_s()
+        {
+            out.push(Alert {
+                id: format!("link:{}", cell.uid),
+                kind: "lost_link",
+                severity: Severity::High,
+                uid: cell.uid,
+                callsign: callsign(cell),
+                detail: format!("no telemetry since t={last:.1}"),
+                since_t: last,
+                op_id: None,
+                intent_id: None,
+            });
+        }
+    }
+    for op in ops {
+        if op.state == OpState::Unconfirmed {
+            if let Some(a) = may_be_running(&by_uid, op, now_wall) {
+                out.push(a);
+            }
+            continue;
+        }
+        let Some((kind, severity)) = op_alert(op) else {
+            continue;
+        };
+        let since_t = op.history.last().map_or(0.0, |h| h.t);
+        out.push(Alert {
+            id: format!("op:{}", op.id),
+            kind,
+            severity,
+            uid: op.uid,
+            callsign: by_uid.get(&op.uid).and_then(|c| callsign(c)),
+            detail: op.detail.clone(),
+            since_t,
+            op_id: Some(op.id),
+            intent_id: (op.intent_id != 0).then_some(op.intent_id),
+        });
+    }
+    out.sort_by(|a, b| {
+        a.severity
+            .cmp(&b.severity)
+            .then(a.since_t.total_cmp(&b.since_t))
+            .then(a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// An op whose start went out unconfirmed (the latest on its vehicle): the vehicle in that
+/// order's mode (armed, for a mission) may be running it though nothing confirmed it, and
+/// whatever became of its intent; out of contact, it may be. None when the vehicle is heard
+/// and in another mode.
+fn may_be_running(
+    vehicles: &std::collections::HashMap<Uid, &std::sync::Arc<VehicleCell>>,
+    op: &OpSnapshot,
+    now_wall: f64,
+) -> Option<Alert> {
+    let cell = *vehicles.get(&op.uid)?;
+    let link = cell.link_snapshot(crate::clock::mono());
+    let silent = link
+        .last_rx_t
+        .is_none_or(|last| now_wall - last > link.stale_after_s());
+    let (mode, armed, kind) = cell.read(|v| (v.mode.clone(), v.armed, v.kind));
+    let caps = kind.and_then(crate::tasks::caps);
+    let want = caps.and_then(|c| match op.task {
+        crate::tasks::TaskKind::Hold => Some(c.hold),
+        crate::tasks::TaskKind::Rtl => c.rtl.or(Some(c.auto)),
+        _ => Some(c.auto),
+    });
+    let mission = !matches!(op.task, crate::tasks::TaskKind::Hold | crate::tasks::TaskKind::Rtl);
+    let running = want.is_some() && mode.as_deref() == want && (armed || !mission);
+    let (severity, detail) = if running {
+        (
+            Severity::High,
+            format!(
+                "in {}{}: it may be running the {} of i{} (its start went out before the link was lost, and nothing confirmed it); look at what the vehicle does",
+                mode.as_deref().unwrap_or("?"),
+                if armed { ", armed" } else { "" },
+                op.task.name(),
+                op.intent_id
+            ),
+        )
+    } else if silent {
+        (
+            Severity::Medium,
+            format!(
+                "out of contact: it may be running the {} of i{} (its start went out before the link was lost)",
+                op.task.name(),
+                op.intent_id
+            ),
+        )
+    } else {
+        return None;
+    };
+    Some(Alert {
+        id: format!("op:{}", op.id),
+        kind: "may_be_running",
+        severity,
+        uid: op.uid,
+        callsign: callsign(cell),
+        detail,
+        since_t: op.history.last().map_or(0.0, |h| h.t),
+        op_id: Some(op.id),
+        intent_id: (op.intent_id != 0).then_some(op.intent_id),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::{HistoryEntry, TaskKind};
+
+    fn op(id: u64, state: OpState, detail: &str) -> OpSnapshot {
+        OpSnapshot {
+            id,
+            tasking: 1,
+            intent_id: 7,
+            task: TaskKind::Orbit,
+            uid: 3,
+            sysid: 3,
+            state,
+            detail: detail.into(),
+            progress: None,
+            history: vec![HistoryEntry { state, t: 100.0 }],
+        }
+    }
+
+    #[test]
+    fn op_states_become_alerts() {
+        let ops = [
+            op(1, OpState::Failed, "no ACK for DO_SET_MODE after 5 tries"),
+            op(
+                2,
+                OpState::Failed,
+                "vehicle left the task, now in RTL: Failsafe",
+            ),
+            op(3, OpState::Failed, "mission rejected"),
+            op(
+                4,
+                OpState::Active,
+                "NOT MOVING for 12s (aground or stuck?) · waypoint 1/2",
+            ),
+            op(5, OpState::Active, "executing"),
+            op(6, OpState::Done, "on station"),
+        ];
+        let a = alerts(&[], &ops, 200.0);
+        let kinds: Vec<_> = a.iter().map(|a| a.kind).collect();
+        assert_eq!(
+            kinds,
+            ["ack_timeout", "left_task", "not_moving", "task_failed"]
+        );
+        assert_eq!(a[0].intent_id, Some(7));
+    }
+}

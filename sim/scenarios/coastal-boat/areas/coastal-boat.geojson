@@ -1,0 +1,111 @@
+{
+ "type": "FeatureCollection",
+ "name": "coastal-boat",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "bay-ops",
+    "name": "Bay and approaches operating area",
+    "kind": "approved"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.76,
+       37.7
+      ],
+      [
+       -122.36,
+       37.7
+      ],
+      [
+       -122.36,
+       37.95
+      ],
+      [
+       -122.76,
+       37.95
+      ],
+      [
+       -122.76,
+       37.7
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "ship-channel",
+    "name": "Ship channel",
+    "kind": "restricted"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.488,
+       37.852
+      ],
+      [
+       -122.47,
+       37.852
+      ],
+      [
+       -122.47,
+       37.862
+      ],
+      [
+       -122.488,
+       37.862
+      ],
+      [
+       -122.488,
+       37.852
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "landing-crissy",
+    "name": "Crissy Field landing area",
+    "kind": "landing"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.4479054811513,
+       37.80565253323751
+      ],
+      [
+       -122.44449451884871,
+       37.80565253323751
+      ],
+      [
+       -122.44449451884871,
+       37.80834746676249
+      ],
+      [
+       -122.4479054811513,
+       37.80834746676249
+      ],
+      [
+       -122.4479054811513,
+       37.80565253323751
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,254 @@
+// Estimates for silent vehicles on the map (murmur-4y9), as deck.gl layers through MapView's
+// `layers` prop, drawn under the vehicle symbols. Only vehicles past their stale threshold
+// with a model from the bridge are in the data (estimate.ts `estimated`), so the cost follows
+// the silent few, not the fleet. Attributes are rebuilt per clock tick (positions move); per
+// silent vehicle:
+//
+//   estimate-regions   the region now: a circle, an ellipse along the course, a ring sector
+//   estimate-bands     a patrol route the vehicle could be anywhere on (a wide path)
+//   estimate-leaders   last known position to the estimate
+//   estimate-symbols   the 2525 frame again, faded, at the estimate
+//   estimate-labels    "probably on its orbit; silent 47 s"
+//
+// and, once the platform's lost-link timer has fired, the same in violet for the failsafe
+// branch ("probably returning (lost-link RTL); silent 47 s"): a second hypothesis, not a second
+// vehicle; the task model then reads "if it kept its task: on its orbit".
+//
+// Dim, don't paint (docs/research/saturation-display.md R1): a jamming silences hundreds at
+// once, and two filled regions, two symbols and two boxed labels each flood the map. Out of focus
+// (not selected, details not open) a silent vehicle shows its leading hypothesis only, its region
+// outlined, not filled; in focus, both, filled, as before. `showAll` (a few silent at once:
+// App.tsx) draws every one in full.
+//
+// Their labels go through the one label budget (declutter.ts, R2): its callsign short, the full
+// line in words (mapWords.ts estimateWords) in focus, where it fits, or on hover.
+import { IconLayer, LineLayer, PathLayer, PolygonLayer, TextLayer } from '@deck.gl/layers'
+import type { MapScreen } from './aloft'
+import { ALL_FULL, centred, type LabelCandidate, type LabelPlan } from './declutter'
+import { bandPath, estimateAt, failsafeAt, regionRings, type Evaluated } from './estimate'
+import { estimateWords } from './mapWords'
+import { drawnHeight } from './map3d'
+import { frameIcon } from './symbols'
+import type { LngLat, Vehicle } from './types'
+import { callsign } from './types'
+
+export interface EstimateLayerInput {
+  /** silent vehicles with an estimate (estimate.ts `estimated`) */
+  vehicles: Vehicle[]
+  /** bridge clock, ms */
+  nowMs: number
+  /** the vehicle whose details are open: its estimate drawn bolder */
+  focus: number | null
+  /** the vehicles in focus (selected, details open): both hypotheses, filled */
+  inFocus?: ReadonlySet<number>
+  /** a few silent at once: every silent vehicle as if in focus */
+  showAll?: boolean
+  /** the label budget's plan (declutter.ts) */
+  plan?: LabelPlan
+}
+
+type RGBA = [number, number, number, number]
+type XYZ = [number, number, number]
+const OURS: RGBA = [127, 184, 255, 255]
+const BRANCH: RGBA = [196, 155, 255, 255]
+const TEXT: RGBA = [215, 221, 228, 255]
+const OUTLINE: RGBA = [11, 15, 20, 255]
+const FONT = 'IBM Plex Mono, ui-monospace, monospace'
+const FONT_SETTINGS = { sdf: true, fontSize: 48, buffer: 6 }
+
+function a(c: RGBA, k: number): RGBA {
+  return [c[0], c[1], c[2], Math.round(c[3] * k)]
+}
+
+/** one drawn hypothesis: the task model, or the lost-link branch */
+interface Drawn {
+  v: Vehicle
+  branch: boolean
+  /** the leading hypothesis: the branch once its timer fired, else the task model */
+  lead: boolean
+  at: Evaluated
+  /** where its leader starts: the last known position, or the branch's start */
+  from: LngLat
+  rings: LngLat[][]
+  band: LngLat[] | null
+  label: string
+  focus: boolean
+  /** drawn in full: in focus, or a few silent at once */
+  full: boolean
+}
+
+const NO_UIDS: ReadonlySet<number> = new Set()
+
+/** A hypothesis's label key for the budget: `e:<uid>:t` the task model, `e:<uid>:b` the branch. */
+const keyOf = (d: Pick<Drawn, 'v' | 'branch'>) => `e:${d.v.uid}:${d.branch ? 'b' : 't'}`
+
+/** This layer's labels for the budget, where the camera draws them: above the leading
+ *  hypothesis's symbol, under the other's. In focus first (the one whose details are open
+ *  always), a leading one as a vehicle with an alert (3), the other last. */
+export function estimateLabelCandidates(input: EstimateLayerInput, screen: MapScreen): LabelCandidate[] {
+  return hypotheses(input).map((d) => {
+    const halfH = frameIcon(d.v, true).halfH
+    const dy = (d.lead ? -1 : 1) * (halfH + 4)
+    return {
+      key: keyOf(d),
+      at: screen.at(d.at.position[0], d.at.position[1], drawnHeight(d.v)),
+      short: centred(shortLabel(d), 10, dy, 5),
+      full: centred(d.label, 10, dy, 5),
+      priority: d.focus || (input.inFocus?.has(d.v.uid) ?? false) ? 1 : d.lead ? 3 : 4,
+      force: d.focus,
+    }
+  })
+}
+
+/** its callsign: the short label */
+function shortLabel(d: Drawn) {
+  return callsign(d.v)
+}
+
+/** The full block of an estimate under the pointer (MapView's tooltip). */
+export function estimateTooltip(layerId: string, object: unknown): { key: string; text: string } | null {
+  if (layerId !== 'estimate-symbols') return null
+  const d = object as Drawn
+  return { key: keyOf(d), text: `${callsign(d.v)}: ${d.label}` }
+}
+
+/** The hypotheses drawn: in focus both, else the leading one. */
+function hypotheses({ vehicles, nowMs, focus, inFocus = NO_UIDS, showAll = false }: EstimateLayerInput): Drawn[] {
+  const drawn: Drawn[] = []
+  for (const v of vehicles) {
+    const e = v.estimate
+    if (!e || !v.position) continue
+    const full = showAll || inFocus.has(v.uid) || v.uid === focus
+    const silent = (v.link.since_last_ms ?? 0) / 1000
+    const at = estimateAt(e, nowMs)
+    const fs = failsafeAt(e, nowMs)
+    // once the lost-link timer has fired the branch leads: the task model stays, dimmed, as
+    // the other hypothesis
+    const fired = !!(fs && e.failsafe)
+    // out of focus, the leading hypothesis only
+    if (full || !fired)
+      drawn.push({
+      v,
+      branch: false,
+      lead: !fired,
+      at,
+      from: v.position,
+      rings: regionRings(at.region),
+      band: bandPath(at.region),
+      label: estimateWords({ basis: e.basis, second: fired }, silent),
+      focus: v.uid === focus,
+      full,
+    })
+    if (fs && e.failsafe) {
+      const m = e.failsafe.motion
+      const from: LngLat = m.kind === 'line' ? m.from : m.kind === 'point' ? m.at : at.position
+      drawn.push({
+        v,
+        branch: true,
+        lead: true,
+        at: fs,
+        from,
+        rings: regionRings(fs.region),
+        band: bandPath(fs.region),
+        label: estimateWords({ failsafe: e.failsafe.action }, silent),
+        focus: v.uid === focus,
+        full,
+      })
+    }
+  }
+  return drawn
+}
+
+export function buildEstimateLayers(input: EstimateLayerInput) {
+  const { nowMs, focus, inFocus = NO_UIDS, showAll = false, plan = ALL_FULL } = input
+  const drawn = hypotheses(input)
+  const level = (d: Drawn) => plan.level(keyOf(d))
+  // at the height it last reported (the estimate is a plan position)
+  const z = (d: Drawn) => drawnHeight(d.v)
+  const at = (d: Drawn): XYZ => [d.at.position[0], d.at.position[1], z(d)]
+  const color = (d: Drawn) => (d.branch ? BRANCH : OURS)
+  const dim = (d: Drawn) => (d.lead ? (d.focus ? 1 : 0.75) : 0.35)
+  const tick = Math.floor(nowMs / 500)
+  const triggers = { getPosition: tick, getPolygon: tick, getPath: tick, getSourcePosition: tick, getTargetPosition: tick, getText: tick, getFillColor: [focus, inFocus, showAll], getLineColor: [focus, inFocus, showAll], getColor: [focus, inFocus, showAll], getWidth: focus, getLineWidth: focus }
+  const onTop = { depthCompare: 'always' as const, depthWriteEnabled: false }
+  return [
+    new PolygonLayer<Drawn>({
+      id: 'estimate-regions',
+      data: drawn.filter((d) => d.rings.length > 0),
+      getPolygon: (d) => d.rings,
+      stroked: true,
+      filled: true,
+      // filled only in focus (R1)
+      getFillColor: (d) => a(color(d), !d.full ? 0 : d.lead ? 0.08 : 0.03),
+      getLineColor: (d) => a(color(d), (d.full ? 0.6 : 0.4) * dim(d)),
+      getLineWidth: (d) => (d.lead ? (d.focus ? 2.5 : 1.5) : 1),
+      lineWidthUnits: 'pixels',
+      updateTriggers: triggers,
+      parameters: onTop,
+    }),
+    new PathLayer<Drawn>({
+      id: 'estimate-bands',
+      data: drawn.filter((d) => d.band),
+      getPath: (d) => d.band!,
+      getColor: (d) => a(color(d), d.full ? 0.14 : 0.06),
+      getWidth: (d) => (d.at.region.kind === 'band' ? d.at.region.width_m : 0),
+      widthUnits: 'meters',
+      widthMinPixels: 2,
+      capRounded: true,
+      jointRounded: true,
+      updateTriggers: triggers,
+      parameters: onTop,
+    }),
+    new LineLayer<Drawn>({
+      id: 'estimate-leaders',
+      data: drawn,
+      getSourcePosition: (d) => [d.from[0], d.from[1], z(d)],
+      getTargetPosition: at,
+      getColor: (d) => a(color(d), 0.75 * dim(d)),
+      getWidth: (d) => (d.lead ? (d.focus ? 2.5 : 1.5) : 1),
+      widthUnits: 'pixels',
+      updateTriggers: triggers,
+      parameters: onTop,
+    }),
+    new IconLayer<Drawn>({
+      id: 'estimate-symbols',
+      data: drawn,
+      // its full block on hover (estimateTooltip)
+      pickable: true,
+      billboard: true,
+      getPosition: at,
+      getIcon: (d) => frameIcon(d.v, true),
+      getSize: (d) => frameIcon(d.v, true).size * (d.lead ? 1 : 0.8),
+      sizeUnits: 'pixels',
+      getColor: (d) => (d.branch ? [220, 200, 255, d.lead ? 170 : 80] : [255, 255, 255, d.lead ? 150 : 70]),
+      updateTriggers: triggers,
+      parameters: onTop,
+    }),
+    // above the symbol: the last-known symbol's LOST badge is below its own, so the two don't
+    // collide when the estimate is still close to where the vehicle was last seen
+    new TextLayer<Drawn>({
+      id: 'estimate-labels',
+      data: drawn.filter((d) => level(d) !== 'none'),
+      getPosition: at,
+      getText: (d) => (level(d) === 'full' ? d.label : shortLabel(d)),
+      getSize: 10,
+      getColor: (d) => a(TEXT, dim(d)),
+      getTextAnchor: 'middle',
+      // the other hypothesis labels below its symbol, so the two don't collide while the
+      // estimates are still close together
+      getAlignmentBaseline: (d) => (d.lead ? 'bottom' : 'top'),
+      getPixelOffset: (d) => [0, (d.lead ? -1 : 1) * (frameIcon(d.v, true).halfH + 4)],
+      fontFamily: FONT,
+      fontWeight: 600,
+      background: true,
+      getBackgroundColor: (d) => a(color(d), d.lead ? 0.28 : 0.12),
+      backgroundPadding: [5, 3, 5, 3],
+      outlineWidth: 2,
+      outlineColor: OUTLINE,
+      fontSettings: FONT_SETTINGS,
+      characterSet: 'auto',
+      updateTriggers: triggers,
+      parameters: onTop,
+    }),
+  ]
+}

@@ -1,0 +1,23 @@
+# coastal-boat: weather, a jammer in the harbour approach, a spoof near the Sausalito mooring.
+# Vehicle uids follow the fleet: 1-4 the boats, 5-10 the drones, 11 the plane.
+
+[weather]
+wind_east_mps = 3.5
+wind_north_mps = 1.0
+visibility_m = 10000
+archive = "tidewater/data/cache/golden-gate-2026-06/weather.json"
+
+[[event]]
+name = "port interference: jammer"
+at_s = 1800
+duration_s = 900
+circle = { lat = 37.8095, lon = -122.4180, radius_m = 1800 }
+gnss = { effect = "jam", power_w = 5.0, height_m = 15 }
+
+[[event]]
+name = "approach spoof"
+at_s = 4200
+duration_s = 1200
+uids = [2]
+circle = { lat = 37.857, lon = -122.482, radius_m = 2500 }
+gnss = { effect = "spoof", walk_mps = 1.5, bearing_deg = 100, max_offset_m = 600 }

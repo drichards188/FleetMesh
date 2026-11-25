@@ -1,0 +1,74 @@
+# FleetMesh DRAFT platform catalog: four civilian delivery platforms. Rewritten from scratch
+# for FleetMesh (the earlier catalog is not carried over); every figure is a first-draft
+# value to be tuned, not a measurement. Schema as read by crates/fleetmesh-linkemu (`link`,
+# `space_class`), crates/fleetmesh-standins (`name`, `behavior`, `cruise_mps`, `max_mps`,
+# `climb_mps`, `turn_dps`, `loiter_radius_m`, `endurance_h`, `link`) and the decision
+# engine's catalog (`domain`, `sim`, `vehicle`, `behavior`, and the same speed and
+# endurance figures). `link` is the main link; `backup_link` records the intended backup
+# and is read by the link emulator from the fleet manifest (automatic failover). `payload_kg` is the payload rule's maximum, `typical_alt_m` the geofence rule's route altitude, `draft_m` the tide rule's keel depth, and `land_now` what the platform's own safe stop is (land, loiter_land, stop, moor). Keys are the platform ids.
+
+[delivery_drone]
+name = "Delivery drone"
+domain = "air"
+sim = "sitl"
+vehicle = "copter"        # ArduCopter, multirotor
+behavior = "copter"
+cruise_mps = 12           # first-draft value
+max_mps = 18              # first-draft value
+climb_mps = 3             # first-draft value
+turn_dps = 60             # first-draft value
+endurance_h = 0.4         # first-draft value: about 25 minutes loaded
+payload_kg = 2.5          # first-draft value
+land_now = "land"         # first-draft value
+typical_alt_m = 80        # first-draft value
+link = "cellular"         # first-draft value: main link
+backup_link = "los"       # first-draft value: backup
+
+[delivery_car]
+name = "Delivery car"
+domain = "ground"
+sim = "sitl"
+vehicle = "ugv"           # ArduPilot Rover, car frame
+behavior = "ugv"
+cruise_mps = 6            # first-draft value
+max_mps = 12              # first-draft value
+turn_dps = 40             # first-draft value
+endurance_h = 6           # first-draft value
+payload_kg = 40           # first-draft value
+land_now = "stop"         # first-draft value
+link = "cellular"         # first-draft value: main link
+backup_link = "mesh"      # first-draft value: backup
+
+[delivery_boat]
+name = "Delivery boat"
+domain = "surface"
+sim = "sitl"
+vehicle = "boat"          # ArduPilot Rover, boat frame
+behavior = "boat"
+cruise_mps = 3            # first-draft value
+max_mps = 6               # first-draft value
+turn_dps = 20             # first-draft value
+endurance_h = 8           # first-draft value
+payload_kg = 60           # first-draft value
+draft_m = 0.4             # first-draft value
+land_now = "moor"         # first-draft value
+link = "cellular"         # first-draft value: main link, near shore
+backup_link = "satcom_leo" # first-draft value: backup offshore
+
+[delivery_plane]
+name = "Delivery plane"
+domain = "air"
+sim = "sitl"
+vehicle = "plane"         # ArduPlane, fixed wing
+behavior = "plane"
+cruise_mps = 22           # first-draft value
+max_mps = 32              # first-draft value
+climb_mps = 4             # first-draft value
+turn_dps = 12             # first-draft value
+loiter_radius_m = 120     # first-draft value
+endurance_h = 2.5         # first-draft value
+payload_kg = 5            # first-draft value
+land_now = "loiter_land"  # first-draft value
+typical_alt_m = 120       # first-draft value
+link = "los"              # first-draft value: main link
+backup_link = "satcom_leo" # first-draft value: backup

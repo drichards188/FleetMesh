@@ -1,0 +1,479 @@
+//! Group tasking and the per-vehicle command lifecycle.
+//!
+//! A Tasking is what the operator issued ("orbit here" to vehicles 1, 3, 7). It fans out into
+//! one op per vehicle (see `op` for the lifecycle each walks through).
+//!
+//! The boundary: a request becomes a [`TaskOrder`] (parsed and checked against the world),
+//! and [`TaskManager::dispatch`] is the only way an order reaches the vehicles. It takes an
+//! [`AuthorizedOrder`], which only the decision layer (`crate::decision`) can make, from the
+//! `DispatchOrder` the engine hands out for an auto-approved or human-approved intent. So
+//! every action passes intent, rules, policy and the audit log first; nothing below
+//! `dispatch` changed.
+
+mod caps;
+mod exec;
+mod op;
+#[cfg(test)]
+pub(crate) mod tests;
+
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use serde::{Deserialize, Serialize};
+
+pub use caps::{caps, mission_alt, platform_kind, task_names};
+pub use exec::Resume;
+pub(crate) use exec::link_silent;
+#[cfg(test)]
+pub use op::HistoryEntry;
+pub use op::{OpCell, OpSnapshot, OpState};
+
+use crate::clock;
+use crate::decision::AuthorizedOrder;
+use crate::mav::Kind;
+use crate::vehicle::{Uid, VehicleCell};
+
+/// The last this many taskings are kept (and shown).
+const KEEP_TASKINGS: usize = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    Orbit,
+    Patrol,
+    Hold,
+    Rtl,
+    /// Rules 34: fly a route once and hold at its end by the vehicle's type (a copter hovers, a
+    /// fixed wing loiters, a boat or a sub holds station, a ground vehicle stops).
+    Transit,
+    /// Delivery orders: bring the vehicle to the ground (a `land_now`) ...
+    Land,
+    /// ... or replace its battery at a hub (a `swap_battery`: the hub's time, then the reset).
+    Swap,
+}
+
+impl TaskKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            TaskKind::Orbit => "orbit",
+            TaskKind::Patrol => "patrol",
+            TaskKind::Hold => "hold",
+            TaskKind::Rtl => "rtl",
+            TaskKind::Transit => "transit",
+            TaskKind::Land => "land",
+            TaskKind::Swap => "swap",
+        }
+    }
+}
+
+impl FromStr for TaskKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "orbit" => TaskKind::Orbit,
+            "patrol" => TaskKind::Patrol,
+            "hold" => TaskKind::Hold,
+            "rtl" => TaskKind::Rtl,
+            "transit" => TaskKind::Transit,
+            "land" => TaskKind::Land,
+            "swap" => TaskKind::Swap,
+            _ => return Err(format!("unknown task {s}")),
+        })
+    }
+}
+
+/// [lon, lat]
+pub type LngLat = [f64; 2];
+
+/// Rules 7: logs a vehicle start ahead of sending it (the decision layer's `op.state`
+/// starting, `ahead`): called with the op and what is about to go out, before it goes. An
+/// `Err` (the log refused it, the order ended meanwhile) means nothing is sent.
+pub type WriteAhead = Arc<dyn Fn(&OpCell, &str) -> Result<(), String> + Send + Sync>;
+
+/// Task parameters as the operator gave them (echoed back in the tasking).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<LngLat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<Vec<LngLat>>,
+    /// abort: the id of the intent to stop
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<Uid>,
+    /// Rules 22: each vehicle's transit waypoints, the route the decision engine planned round
+    /// the wrong surface or a no-go area, flown before the task (`fleetmesh_decide::plan`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<BTreeMap<Uid, Vec<LngLat>>>,
+    /// Rules 34, a group's member order: its share of the group's task as the decision engine
+    /// laid it out and logged it (`fleetmesh_decide::group::Share`): flown as it is, with no slot
+    /// arithmetic of the task layer's own
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share: Option<MemberShare>,
+    // ---- the delivery orders' own parameters (the decision layer reads them; the task layer
+    // flies the route they resolve to) ----
+    /// What a transit does when it gets there (a delivery order flown as one): `pickup` (load
+    /// the parcel), `deliver` (release it) or `home` (a return to a hub: an aircraft that can
+    /// land does). Absent: it only holds, as a plain transit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// swap: how long the hub takes, s
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_s: Option<u32>,
+    /// pickup, deliver, confirm_drop_zone: the parcel's id
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parcel: Option<String>,
+    /// deliver, confirm_drop_zone: the drop zone's id
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_zone: Option<String>,
+    /// pickup: a hub's id or a point [lon, lat]; land_now: a point [lon, lat]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<SiteParam>,
+    /// return_to_hub, swap_battery: a hub's id
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
+    /// swap_battery: a pad's id
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad: Option<String>,
+    /// deliver: land, winch, dock or slip
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    /// deliver: the latest time it may still be delivered (RFC 3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_end: Option<String>,
+    /// pickup: the time by which the parcel must be loaded, s
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_by_s: Option<u32>,
+    /// hold: the seconds after which the vehicle's own lost-link style return applies
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_s: Option<u32>,
+    /// reroute: keep_out, weather, conflict, battery or operator
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// abort: what it does next (return_to_hub, hold or land_now); its `target` is the intent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub then: Option<String>,
+    /// confirm_drop_zone: ids of the observations that bear on it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Vec<String>>,
+}
+
+/// A place a delivery order names: a hub's id, or a point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SiteParam {
+    Id(String),
+    Point(LngLat),
+}
+
+/// Rules 34: what the task layer flies of a member order's share (its member task carries the
+/// rest of its geometry: a surface ring's radius, its lane, the racetrack a two-point route
+/// becomes): the altitude (above home; negative, a depth; none on the surface), where it enters a
+/// ring (degrees clockwise from north of the centre) and how far along its route it enters (m).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemberShare {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_m: Option<f64>,
+}
+
+impl From<&fleetmesh_decide::group::Share> for MemberShare {
+    fn from(s: &fleetmesh_decide::group::Share) -> MemberShare {
+        MemberShare {
+            alt_m: s.alt_m,
+            phase_deg: s.phase_deg,
+            entry_m: s.entry_m,
+        }
+    }
+}
+
+/// POST /api/tasks
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskRequest {
+    pub task: String,
+    pub uids: Vec<Uid>,
+    #[serde(flatten)]
+    pub params: TaskParams,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum OrderError {
+    UnknownVehicles(Vec<Uid>),
+    Invalid(String),
+}
+
+impl std::fmt::Display for OrderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderError::UnknownVehicles(uids) => {
+                let list: Vec<String> = uids.iter().map(ToString::to_string).collect();
+                write!(f, "unknown vehicles [{}]", list.join(", "))
+            }
+            OrderError::Invalid(s) => f.write_str(s),
+        }
+    }
+}
+
+/// A well-formed order: known vehicles, a known task, the parameters it needs. Whether each
+/// vehicle can do it is decided per op at dispatch (an incapable one fails, the rest go).
+pub struct TaskOrder {
+    pub kind: TaskKind,
+    pub params: TaskParams,
+    pub vehicles: Vec<Arc<VehicleCell>>,
+    /// how each vehicle's op delivers it (after a bridge restart: the vehicle may hold it
+    /// already); absent: fresh
+    pub resume: HashMap<Uid, Resume>,
+    /// how long an op following an order its vehicle had started (after a bridge restart)
+    /// waits for a lost link before it fails (zero: not at all)
+    pub patience: std::time::Duration,
+    /// rules 5: a link lost before the vehicle started the order ends the op `requeued` (the
+    /// decision layer puts the order back in the queue) instead of failing it
+    pub requeue: bool,
+    /// rules 7: each vehicle's start is logged ahead of sending it through this (none: not)
+    pub ahead: Option<WriteAhead>,
+    /// the task layer's own slots: same-kind vehicles of one order stacked apart in height and
+    /// spread round a ring by their place in it (rules 33 and before); rules 34 never (each
+    /// vehicle's order is its own, a group member's share says where it flies)
+    pub stack: bool,
+}
+
+impl TaskOrder {
+    pub fn new(
+        req: TaskRequest,
+        fleet: &BTreeMap<Uid, Arc<VehicleCell>>,
+    ) -> Result<TaskOrder, OrderError> {
+        let missing: Vec<Uid> = req
+            .uids
+            .iter()
+            .copied()
+            .filter(|u| !fleet.contains_key(u))
+            .collect();
+        if !missing.is_empty() {
+            return Err(OrderError::UnknownVehicles(missing));
+        }
+        if req.uids.is_empty() {
+            return Err(OrderError::Invalid("select at least one vehicle".into()));
+        }
+        let kind: TaskKind = req.task.parse().map_err(OrderError::Invalid)?;
+        let p = &req.params;
+        let invalid = |s: &str| Err(OrderError::Invalid(s.into()));
+        match kind {
+            TaskKind::Orbit if p.center.is_none() => {
+                return invalid("orbit needs center [lon, lat]");
+            }
+            TaskKind::Patrol if p.route.as_ref().is_none_or(|r| r.len() < 2) => {
+                return invalid("patrol needs a route of at least 2 points");
+            }
+            TaskKind::Transit if p.route.as_ref().is_none_or(Vec::is_empty) => {
+                return invalid("transit needs a route of at least 1 point, held at its last");
+            }
+            _ => {}
+        }
+        Ok(TaskOrder {
+            kind,
+            vehicles: req
+                .uids
+                .iter()
+                .filter_map(|u| fleet.get(u).cloned())
+                .collect(),
+            params: req.params,
+            resume: HashMap::new(),
+            patience: std::time::Duration::ZERO,
+            requeue: false,
+            ahead: None,
+            stack: true,
+        })
+    }
+}
+
+pub struct Tasking {
+    pub id: u64,
+    /// the intent this tasking carries out
+    pub intent_id: u64,
+    pub kind: TaskKind,
+    pub params: TaskParams,
+    pub created: f64,
+    pub ops: Vec<Arc<OpCell>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskingSnapshot {
+    pub id: u64,
+    pub intent_id: u64,
+    pub task: TaskKind,
+    pub params: TaskParams,
+    pub created: f64,
+    pub ops: Vec<OpSnapshot>,
+}
+
+impl Tasking {
+    pub fn snapshot(&self) -> TaskingSnapshot {
+        TaskingSnapshot {
+            id: self.id,
+            intent_id: self.intent_id,
+            task: self.kind,
+            params: self.params.clone(),
+            created: self.created,
+            ops: self.ops.iter().map(|o| o.snapshot()).collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Inner {
+    last_tasking: u64,
+    last_op: u64,
+    taskings: VecDeque<Arc<Tasking>>,
+    /// uid -> the op that last took the vehicle
+    active: HashMap<Uid, Arc<OpCell>>,
+}
+
+#[derive(Default)]
+pub struct TaskManager {
+    inner: Mutex<Inner>,
+}
+
+fn kind_name(k: Option<Kind>) -> &'static str {
+    k.map_or("None", Kind::name)
+}
+
+impl TaskManager {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Send an order to its vehicles: one op each, run concurrently. A vehicle that can't do
+    /// the task gets a failed op; one that was busy has its previous op superseded.
+    ///
+    /// The only path to the vehicles, and it takes only an [`AuthorizedOrder`]: an order the
+    /// decision engine released for an approved intent (see `crate::decision`).
+    pub fn dispatch(&self, order: AuthorizedOrder) -> Arc<Tasking> {
+        let (intent_id, order) = order.into_parts();
+        // the vehicles are read before this manager's lock is taken, never under it: a reader
+        // holding a vehicle asks this manager (a silent vehicle's estimate, `crate::estimate`),
+        // so a vehicle read under the lock could deadlock against it
+        let kinds: Vec<Option<Kind>> = order.vehicles.iter().map(|v| v.read(|s| s.kind)).collect();
+        let epochs: Vec<u32> = order
+            .vehicles
+            .iter()
+            .map(|v| v.read(|s| s.boot_epoch))
+            .collect();
+        let mut inner = self.lock();
+        inner.last_tasking += 1;
+        let tasking_id = inner.last_tasking;
+        let mut counts: HashMap<Option<Kind>, usize> = HashMap::new();
+        let mut ops = Vec::new();
+        for ((v, kind), epoch) in order.vehicles.iter().zip(&kinds).zip(&epochs) {
+            let slot = counts.entry(*kind).or_default();
+            inner.last_op += 1;
+            let mut op = OpCell::new(
+                inner.last_op,
+                tasking_id,
+                intent_id,
+                order.kind,
+                v.uid,
+                v.sysid,
+                if order.stack { *slot } else { 0 },
+            );
+            op.boot_epoch = *epoch;
+            ops.push(Arc::new(op));
+            *slot += 1;
+        }
+        for ((op, v), kind) in ops.iter().zip(&order.vehicles).zip(&kinds) {
+            if !caps::can(*kind, order.kind) {
+                op.set(
+                    OpState::Failed,
+                    format!("a {} can't {}", kind_name(*kind), order.kind.name()),
+                );
+                continue;
+            }
+            if let Some(prev) = inner.active.get(&v.uid)
+                && !prev.finished()
+            {
+                prev.supersede(format!("replaced by {} #{tasking_id}", order.kind.name()));
+            }
+            inner.active.insert(v.uid, op.clone());
+            let ctx = exec::OpCtx {
+                op: op.clone(),
+                v: v.clone(),
+                kind: order.kind,
+                params: order.params.clone(),
+                same_kind: if order.stack { counts.get(kind).copied().unwrap_or(1) } else { 1 },
+                resume: order.resume.get(&v.uid).copied().unwrap_or_default(),
+                patience: order.patience,
+                requeue: order.requeue,
+                ahead: order.ahead.clone(),
+            };
+            exec::spawn(ctx);
+        }
+        let tasking = Arc::new(Tasking {
+            id: tasking_id,
+            intent_id,
+            kind: order.kind,
+            params: order.params,
+            created: clock::wall(),
+            ops,
+        });
+        inner.taskings.push_back(tasking.clone());
+        while inner.taskings.len() > KEEP_TASKINGS {
+            inner.taskings.pop_front();
+        }
+        tasking
+    }
+
+    /// Newest first.
+    pub fn snapshot(&self) -> Vec<TaskingSnapshot> {
+        let taskings: Vec<Arc<Tasking>> = self.lock().taskings.iter().rev().cloned().collect();
+        taskings.iter().map(|t| t.snapshot()).collect()
+    }
+
+    /// The circle a vehicle flies for an orbit task once on station (its op done: an orbit
+    /// keeps orbiting) and still in the mission's mode: (center [lon, lat], radius m with
+    /// the tolerance it counts as on station within). None otherwise.
+    pub fn orbit_of(&self, v: &VehicleCell) -> Option<([f64; 2], f64)> {
+        // this manager's lock is released before the vehicle is read (see `dispatch`)
+        let (boot_epoch, params) = {
+            let inner = self.lock();
+            let op = inner.active.get(&v.uid)?;
+            if op.task != TaskKind::Orbit || op.state() != OpState::Done {
+                return None;
+            }
+            let tasking = op.tasking;
+            (op.boot_epoch, inner.taskings.iter().find(|t| t.id == tasking)?.params.clone())
+        };
+        if v.read(|s| s.boot_epoch) != boot_epoch {
+            return None;
+        }
+        let center = params.center?;
+        v.read(|s| {
+            let caps = caps::caps(s.kind?)?;
+            if s.mode.as_deref() != Some(caps.auto) {
+                return None;
+            }
+            let min_r = s.identity.as_ref().and_then(|i| i.num("min_turn_radius_m"));
+            let (radius, _, tol) = exec::orbit_geometry(params.radius, min_r, caps.orbit);
+            Some((center, radius + tol))
+        })
+    }
+
+    /// A newer order (intent `newer`) was queued for `uid`: its current op, if it carries an
+    /// older intent and the vehicle has not started it yet (waiting for a fix or a link,
+    /// mid-exchange), is stopped and failed saying so; one it started runs on until the newer
+    /// order is dispatched. Returns the stopped op's id.
+    pub fn abandon_unstarted(&self, uid: Uid, newer: u64, detail: &str) -> Option<u64> {
+        let op = self.lock().active.get(&uid).cloned()?;
+        (op.intent_id < newer && op.abandon(detail.to_string())).then_some(op.id)
+    }
+
+    /// Each vehicle's latest op, in uid order.
+    pub fn current_ops(&self) -> Vec<OpSnapshot> {
+        let mut ops: Vec<Arc<OpCell>> = self.lock().active.values().cloned().collect();
+        ops.sort_by_key(|o| o.uid);
+        ops.iter().map(|o| o.snapshot()).collect()
+    }
+}

@@ -1,0 +1,638 @@
+//! One episode: the bridge assembled as its `main.rs` assembles it, minus every socket, thread
+//! and HTTP client, with the stand-ins, the link emulator and the contacts beside it, all on one
+//! current-thread tokio runtime whose clock is paused. Time moves only when the driver asks
+//! ([`Episode::step_to`]); everything else (a tool call, an operator's request, a read of
+//! truth) happens at the instant the clock stands at, and is checked not to move it.
+//!
+//! Started like the bridge (`main.rs`), in the same order: the fleet manifest, the estimate's
+//! configuration, the decision layer (`Decision::load`, the production constructor: its audit
+//! log and anchors in the episode's directory), the housekeeping, the decision loop, the GCS
+//! heartbeat round
+//! (`heartbeat::send_round`, once a simulated second, as the thread sends it), the link
+//! emulator's view for the console (`emu`, every 2 s, from the in-memory emulator's `/stats`),
+//! the router (`api::router`, with `emu` and `situation` merged as `main.rs` merges them), the
+//! operators' authentication (dev) and the MCP server's shared state (`mcp::Mcp`). Not started:
+//! the console push, the CoT export, the tidewater water sampler, the HTTP listener.
+
+pub mod emulator;
+pub mod faults;
+pub mod fleet;
+pub mod perf;
+pub mod server;
+pub mod silent;
+pub mod space_cache;
+pub mod spec;
+pub mod terrain;
+pub mod water;
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Method, Request, header};
+use serde_json::{Value, json};
+use tokio::time::Instant;
+use tower::ServiceExt;
+
+use crate::decision::Decision;
+use crate::link::Link;
+use crate::mcp::Mcp;
+use crate::world::{Config, World};
+
+use self::emulator::Emulator;
+use self::fleet::Fleet;
+use self::spec::Spec;
+
+/// The settle after a step: the clock has reached the target, and every task woken at that
+/// instant runs before the driver's next request (a yield puts the stepping task behind them).
+const SETTLE_YIELDS: usize = 64;
+
+pub struct Episode {
+    pub rt: tokio::runtime::Runtime,
+    zero: Instant,
+    pub spec: Spec,
+    decision: Arc<Decision>,
+    api: Router,
+    mcp: Arc<Mcp>,
+    emu: Arc<Emulator>,
+    fleet: Arc<Fleet>,
+    /// The water (world v3: the world's currents, a `current` fault; still otherwise).
+    water: Arc<water::Water>,
+    /// Agents whose `session.connected` is logged (once each, as the MCP server logs it).
+    connected: BTreeSet<String>,
+    /// The bridge's own `/mcp` endpoint on the same `Mcp` (the view-identity test), and each
+    /// agent's session on it.
+    mcp_http: Option<Router>,
+    http_sessions: std::collections::BTreeMap<String, String>,
+    pub audit_path: PathBuf,
+}
+
+fn err<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
+    move |e| format!("{what}: {e}")
+}
+
+impl Episode {
+    pub fn start(spec: Spec) -> Result<Episode, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .map_err(err("runtime"))?;
+        let parts = rt.block_on(assemble(&spec))?;
+        let (zero, _world, decision, api, mcp, emu, fleet, audit_path, water) = parts;
+        let mut ep = Episode {
+            rt,
+            zero,
+            spec,
+            decision,
+            api,
+            mcp,
+            emu,
+            fleet,
+            water,
+            connected: BTreeSet::new(),
+            mcp_http: None,
+            http_sessions: std::collections::BTreeMap::new(),
+            audit_path,
+        };
+        ep.settle();
+        Ok(ep)
+    }
+
+    /// Situation seconds now.
+    pub fn now_s(&self) -> f64 {
+        let _g = self.rt.enter();
+        Instant::now().saturating_duration_since(self.zero).as_secs_f64()
+    }
+
+    fn settle(&mut self) {
+        self.rt.block_on(async {
+            for _ in 0..SETTLE_YIELDS {
+                tokio::task::yield_now().await;
+            }
+        });
+    }
+
+    /// Run everything up to situation second `t` (never backwards).
+    pub fn step_to(&mut self, t: f64) -> f64 {
+        let target = self.zero + Duration::from_secs_f64(t.max(0.0));
+        self.rt.block_on(async move { tokio::time::sleep_until(target).await });
+        self.settle();
+        self.now_s()
+    }
+
+    /// Run a request at the current instant; an error if it moved the clock.
+    fn at_once<F: std::future::Future>(&mut self, what: &str, f: F) -> Result<F::Output, String> {
+        let before = {
+            let _g = self.rt.enter();
+            Instant::now()
+        };
+        let out = self.rt.block_on(f);
+        let after = {
+            let _g = self.rt.enter();
+            Instant::now()
+        };
+        if after != before {
+            return Err(format!(
+                "{what} moved the simulated clock by {:?}: a request must answer at the instant it is asked",
+                after - before
+            ));
+        }
+        Ok(out)
+    }
+
+    /// An MCP tool call as `agent` (its client's name and version, as an MCP session's
+    /// `initialize` gives them): the bridge's own `mcp::tools::call`, answered as the MCP
+    /// server answers it (`structuredContent`, `isError`).
+    pub fn mcp_call(&mut self, agent: &str, client: (&str, &str), tool: &str, args: Value) -> Result<Value, String> {
+        let id = self.mcp.resolve(agent).map_err(|e| e.message.to_string())?;
+        if self.connected.insert(agent.to_string()) {
+            // `Mcp::connected`: once per agent and run, as the header names it
+            let detail = format!("via X-FleetMesh-Agent header; client {} {}", client.0, client.1);
+            let _g = self.rt.enter();
+            if let Err(e) = self.decision.agent_action(&id, "session.connected", &detail) {
+                eprintln!("mcp: agent.action: {}", e.detail);
+            }
+        }
+        let args = match args {
+            Value::Object(m) => m,
+            Value::Null => serde_json::Map::new(),
+            other => return Err(format!("{tool}: arguments must be an object, not {other}")),
+        };
+        let mcp = self.mcp.clone();
+        let name = tool.to_string();
+        let out = self.at_once(tool, async move { crate::mcp::tools::call(&mcp, &id, &name, args).await })?;
+        match out {
+            Ok(result) => {
+                let is_error = result.is_error.unwrap_or(false);
+                let structured = match result.structured_content {
+                    // what `tool_result_json` takes first, moved rather than copied out of the
+                    // whole result serialized (a large answer, murmur-4yj)
+                    Some(s) if !s.is_null() => s,
+                    _ => tool_result_json(&serde_json::to_value(&result).map_err(err("result"))?),
+                };
+                Ok(json!({
+                    "is_error": is_error,
+                    "structured": structured,
+                }))
+            }
+            // a protocol error (an unknown tool, bad parameters): what an MCP client raises
+            Err(e) => Ok(json!({ "protocol_error": e.message })),
+        }
+    }
+
+    /// The same tool call through the bridge's own `/mcp` endpoint (rmcp's streamable HTTP
+    /// server around the same `Mcp`, driven in process with JSON-RPC as `mcp/tests.rs` drives
+    /// it): what an MCP client over HTTP gets. For the view-identity test only.
+    pub fn mcp_over_http(&mut self, agent: &str, client: (&str, &str), tool: &str, args: Value) -> Result<Value, String> {
+        use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+        use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+        if self.mcp_http.is_none() {
+            let _g = self.rt.enter();
+            let mcp = self.mcp.clone();
+            let svc = StreamableHttpService::new(
+                move || Ok(crate::mcp::Handler(mcp.clone())),
+                Arc::new(LocalSessionManager::default()),
+                StreamableHttpServerConfig::default(),
+            );
+            self.mcp_http = Some(Router::new().nest_service("/mcp", svc));
+        }
+        let router = self.mcp_http.clone().ok_or("no endpoint")?;
+        let session = match self.http_sessions.get(agent).cloned() {
+            Some(s) => s,
+            None => {
+                let init = json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": client.0, "version": client.1}},
+                });
+                let (r, a) = (router.clone(), agent.to_string());
+                let (sess, _) = self.at_once("initialize", async move { rpc(&r, None, &a, init).await })??;
+                let s = sess.ok_or("initialize: no session id")?;
+                let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+                let (r, a, s2) = (router.clone(), agent.to_string(), s.clone());
+                self.at_once("initialized", async move { rpc(&r, Some(&s2), &a, note).await })??;
+                self.http_sessions.insert(agent.to_string(), s.clone());
+                s
+            }
+        };
+        let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                           "params": { "name": tool, "arguments": args } });
+        let (r, a) = (router, agent.to_string());
+        let (_, v) = self.at_once(tool, async move { rpc(&r, Some(&session), &a, call).await })??;
+        if let Some(e) = v.get("error") {
+            return Ok(json!({ "protocol_error": e["message"] }));
+        }
+        let res = &v["result"];
+        Ok(json!({
+            "is_error": res.get("isError").and_then(Value::as_bool).unwrap_or(false),
+            "structured": tool_result_json(res),
+        }))
+    }
+
+    /// An operator's request to the bridge's own REST API (a dev run: the header names the
+    /// operator), answered with its status and JSON.
+    pub fn api_call(&mut self, method: &str, path: &str, body: Option<Value>, operator: Option<&str>) -> Result<Value, String> {
+        let method = Method::from_bytes(method.as_bytes()).map_err(err("method"))?;
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(op) = operator {
+            req = req.header("x-fleetmesh-operator", op);
+        }
+        let req = req
+            .body(match body {
+                Some(v) => Body::from(v.to_string()),
+                None => Body::empty(),
+            })
+            .map_err(err("request"))?;
+        let api = self.api.clone();
+        let (status, bytes) = self.at_once(path, async move {
+            let resp = match api.oneshot(req).await {
+                Ok(r) => r,
+                Err(never) => match never {},
+            };
+            let status = resp.status().as_u16();
+            let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20).await;
+            (status, bytes)
+        })?;
+        let bytes = bytes.map_err(err("body"))?;
+        let body: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "detail": String::from_utf8_lossy(&bytes) }));
+        Ok(json!({ "status": status, "body": body }))
+    }
+
+    /// Truth now, for labels (evaluation only; nothing here is reachable from the bridge's API
+    /// or the MCP tools): our vehicles as the stand-ins really are, and each link's blocking
+    /// cause.
+    pub fn truth(&mut self) -> Result<Value, String> {
+        let _g = self.rt.enter();
+        let now = crate::clock::wall();
+        let ours: Vec<Value> = (0..self.fleet.len())
+            .map(|i| {
+                let blocked = self.emu.blocked(i);
+                self.fleet.read(i, |v| {
+                    let (lat, lon, alt) = v.truth();
+                    json!({
+                        "uid": v.cfg.uid(),
+                        "callsign": v.cfg.callsign,
+                        "lat": lat, "lon": lon, "alt_m": alt,
+                        "mode": v.st.mode,
+                        "armed": v.st.armed,
+                        "speed_mps": v.st.speed,
+                        "battery_consumed_mah": v.battery.consumed_mah,
+                        "battery_capacity_mah": v.capacity_mah(),
+                        "link_blocked": blocked,
+                    })
+                })
+            })
+            .collect();
+        Ok(json!({
+            "t": self.now_s(),
+            "wall": now,
+            "ours": ours,
+            "bridge_start_s": self.spec.bridge_start_s,
+        }))
+    }
+
+    /// A scripted fault, outside the bridge: a link event (the emulator's own `[[event]]`
+    /// schema), or a stand-in that stops making way (its cruise and top speed set to zero, as a
+    /// fouled propeller would; nothing goes through the bridge), or one of world v3's
+    /// (`faults.rs`: gnss, battery, reboot, current).
+    pub fn fault(&mut self, f: &Value) -> Result<Value, String> {
+        let _g = self.rt.enter();
+        match f["kind"].as_str() {
+            Some("link_event") => {
+                let e: fleetmesh_linkemu::config::EventCfg =
+                    serde_json::from_value(f["event"].clone()).map_err(err("link event"))?;
+                let n = self.emu.add_event(e)?;
+                Ok(json!({ "events": n }))
+            }
+            Some("stop") => {
+                let uid = f["uid"].as_u64().ok_or("stop: uid")?;
+                let i = self.index_of(uid)?;
+                self.fleet.write(i, |v| {
+                    v.cfg.spec.cruise_mps = 0.0;
+                    v.cfg.spec.max_mps = 0.0;
+                });
+                Ok(json!({ "stopped": uid }))
+            }
+            Some(other) => {
+                drop(_g);
+                faults::apply(self, other, f)
+            }
+            None => Err("a fault without a kind".into()),
+        }
+    }
+
+    fn index_of(&self, uid: u64) -> Result<usize, String> {
+        self.emu
+            .uids
+            .iter()
+            .position(|u| u64::from(*u) == uid)
+            .ok_or_else(|| format!("no vehicle with uid {uid}"))
+    }
+
+    /// The tool names the MCP server lists.
+    pub fn tools(&self) -> Vec<String> {
+        crate::mcp::tools::tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    /// The tools' definitions as the MCP server lists them (`tools/list`: name, description,
+    /// `inputSchema`, annotations), for an agent that hands them to a model as they are
+    /// (eval/headless/officer.py).
+    pub fn tool_defs(&self) -> Result<Value, String> {
+        serde_json::to_value(crate::mcp::tools::tools()).map_err(err("tools"))
+    }
+
+    /// The end: anchor the audit log's head and close it, as the bridge's clean stop does
+    /// (`Decision::shutdown_and_exit`), which ends the process.
+    pub fn finish(self) -> ! {
+        let _g = self.rt.enter();
+        self.emu.save_space_cache();
+        self.decision.shutdown_and_exit()
+    }
+}
+
+
+
+/// A tool result's JSON as the live session reads it (agents/scripted_agent.py `content`): the
+/// structured content, else the first text block parsed, or `{"text": ...}` when it is not JSON,
+/// else `{}`.
+pub fn tool_result_json(v: &Value) -> Value {
+    if let Some(s) = v.get("structuredContent").filter(|s| !s.is_null()) {
+        return s.clone();
+    }
+    for block in v["content"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        if block["type"].as_str() == Some("text") {
+            let text = block["text"].as_str().unwrap_or_default();
+            return serde_json::from_str(text).unwrap_or_else(|_| json!({ "text": text }));
+        }
+    }
+    json!({})
+}
+
+/// One JSON-RPC exchange with an `/mcp` endpoint: (the session id it named, the answer); the
+/// answer may come as JSON or as an SSE stream (its last `data:` event).
+async fn rpc(router: &Router, session: Option<&str>, agent: &str, body: Value) -> Result<(Option<String>, Value), String> {
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::HOST, "127.0.0.1")
+        .header(crate::mcp::AGENT_HEADER, agent);
+    if let Some(s) = session {
+        req = req.header("mcp-session-id", s);
+    }
+    let req = req.body(Body::from(body.to_string())).map_err(err("request"))?;
+    let resp = match router.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(never) => match never {},
+    };
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let sse = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/event-stream"));
+    let bytes = axum::body::to_bytes(resp.into_body(), 16 << 20).await.map_err(err("body"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let json = if sse {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .and_then(|l| serde_json::from_str(l).ok())
+            .unwrap_or(Value::Null)
+    } else {
+        serde_json::from_str(&text).unwrap_or(Value::Null)
+    };
+    Ok((session, json))
+}
+
+type Parts = (
+    Instant,
+    Arc<World>,
+    Arc<Decision>,
+    Router,
+    Arc<Mcp>,
+    Arc<Emulator>,
+    Arc<Fleet>,
+    PathBuf,
+    Arc<water::Water>,
+);
+
+async fn assemble(spec: &Spec) -> Result<Parts, String> {
+    crate::clock::sim_clock::set_epoch(spec.epoch);
+    let zero = Instant::now();
+    std::fs::create_dir_all(&spec.workdir).map_err(err("workdir"))?;
+    let platforms = spec.root.join("sim/platforms.toml");
+
+    // the bridge's fleet manifest: the emulator's copy of swarm.py's, ports on the bridge side
+    let mut bridge_fleet = Vec::new();
+    for v in &spec.fleet {
+        let mut v = v.clone();
+        let port = v["port"].as_u64().ok_or("fleet: a vehicle without a port")?;
+        let bport = u64::from(spec.bridge_base) + port - u64::from(spec.vehicle_base);
+        v["vehicle_port"] = json!(port);
+        v["port"] = json!(bport);
+        bridge_fleet.push(v);
+    }
+    let manifest = spec.workdir.join("bridge-fleet.json");
+    let mut doc = json!({ "vehicles": bridge_fleet });
+    if !spec.swarms.is_empty() {
+        // a fleet with swarms (Saturation's): declared as swarm.py's manifest declares them
+        doc["swarms"] = json!(spec.swarms);
+    }
+    if let Some(f) = &spec.fleet_source {
+        // rules 29: a fleet with starting tasks names its file, which the bridge hands them over from
+        doc["fleet"] = f.clone();
+    }
+    std::fs::write(&manifest, doc.to_string()).map_err(err("manifest"))?;
+
+    // as main.rs: settings, the world, the manifest, the estimate's configuration
+    let mut settings = crate::decision::Settings::from_env(&spec.root, &platforms);
+    let run = std::env::var("FLEETMESH_RUN_ID").unwrap_or_else(|_| "headless".into());
+    settings.audit = spec.workdir.join(format!("{run}.jsonl"));
+    if let Some(a) = settings.anchors.as_mut() {
+        a.path = spec.workdir.join(format!("{run}.anchors"));
+        a.cmd = None;
+    }
+    settings.last_run = Some(spec.workdir.join(format!(".last-run-{}", spec.http_port)));
+    settings.tidewater = None;
+    let world = World::new(Config {
+        base_port: spec.bridge_base,
+        http_port: spec.http_port,
+        default_ports: 0,
+        manifest,
+        platforms: platforms.clone(),
+        root: spec.root.clone(),
+    });
+    world.load_manifest();
+    crate::estimate::init(&world);
+    let decision = Decision::load(world.clone(), &settings).map_err(err("decision layer"))?;
+
+    // the link emulator, then the bridge's in-memory links, then the stand-ins
+    let vspecs: Vec<fleetmesh_linkemu::config::VehicleSpec> = spec
+        .fleet
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(err("fleet"))?;
+    let events: Vec<fleetmesh_linkemu::config::EventCfg> = spec
+        .events
+        .iter()
+        .map(|e| serde_json::from_value(e.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(err("link events"))?;
+    let grid = match &spec.terrain_grid {
+        Some(p) => Some(Arc::new(terrain::Grid::load(p)?)),
+        None => None,
+    };
+    // the link coverage predictor (information only) on the episode's own links file, the same
+    // baked terrain and SATCOM data as its emulator, with caches of its own
+    world.set_coverage(crate::coverage::Coverage::new(crate::coverage::Sources {
+        links: spec.links.clone(),
+        root: spec.root.clone(),
+        terrain: grid.as_ref().map(|g| {
+            let s: Arc<dyn fleetmesh_linkemu::terrain::Sampler> = Arc::new(crate::coverage::GridSampler(g.clone()));
+            (s, format!("surface grid {}", g.source))
+        }),
+        space_root: spec.space_root.clone(),
+        space: spec.space,
+    }));
+    let emu = Emulator::new(
+        emulator::Setup {
+            links_file: &spec.links,
+            events,
+            fleet: &vspecs,
+            seed: spec.linkemu_seed.unwrap_or(spec.seed),
+            epoch: spec.epoch,
+            grid: grid.clone(),
+            space: spec.space,
+            space_outlook: spec.space_outlook,
+            space_cache: spec.space_cache.clone(),
+            space_root: spec.space_root.as_deref(),
+        },
+        zero,
+    )?;
+    let mut bridge_links = Vec::new();
+    for (i, v) in vspecs.iter().enumerate() {
+        let bport = spec.bridge_base + (v.port - spec.vehicle_base);
+        let e = emu.clone();
+        let link = Link::in_memory(bport, Box::new(move |f: &[u8]| e.downlink(i, f))).map_err(err("link"))?;
+        world.attach_link(link.clone());
+        bridge_links.push(link);
+    }
+    let mut cfgs: Vec<fleetmesh_standins::config::VehicleConfig> = spec
+        .standins
+        .iter()
+        .map(|v| serde_json::from_value(v.clone()))
+        .collect::<Result<_, _>>()
+        .map_err(err("stand-ins"))?;
+    // a stand-in that starts in the air has its home on the surface below it: the baked grid's
+    // height there, as the stand-in engine samples tidewater's live
+    if let Some(g) = &grid {
+        for c in &mut cfgs {
+            c.surface_m = c.surface_m.or_else(|| g.height(c.home[0], c.home[1]));
+        }
+    }
+    if cfgs.len() != vspecs.len() {
+        return Err(format!("{} stand-ins for {} vehicles: every vehicle must be a stand-in", cfgs.len(), vspecs.len()));
+    }
+    // world v3: the world's water (still without one), and the GNSS events of the events files
+    let water = match &spec.water {
+        Some(w) => water::Water::load(w, grid.clone())?,
+        None => water::Water::still(),
+    };
+    let water = Arc::new(water);
+    let conditions = spec.water.as_ref().map(|_| (&*water, spec.epoch + spec.standins_start_s.max(0.0)));
+    let fleet = Arc::new(Fleet::new(cfgs, spec.seed, &spec.battery_pct, conditions)?);
+    if let Some(env) = faults::from_events(spec)? {
+        fleet.set_gnss(&env);
+    }
+    // the bridge is up at `bridge_start_s` (the full stack's first anchor): before, a frame from
+    // the emulator or a contacts message reaches no one
+    let bridge_up = zero + Duration::from_secs_f64(spec.bridge_start_s.max(0.0));
+    emu.connect(bridge_links, world.clone(), fleet.clone(), bridge_up);
+
+    // the loops, in main.rs's order, from the bridge's start
+    let emu_view = crate::emu::Emu::from_env();
+    {
+        let (world, decision, emu_view, e) = (world.clone(), decision.clone(), emu_view.clone(), emu.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep_until(bridge_up).await;
+            tokio::spawn(perf::timed("bridge.housekeeping", world.clone().housekeeping()));
+            tokio::spawn(perf::timed("bridge.decision", decision.run()));
+            {
+                let world = world.clone();
+                tokio::spawn(perf::timed("bridge.heartbeat", async move {
+                    let msg = crate::heartbeat::gcs_heartbeat();
+                    let mut every = tokio::time::interval(crate::heartbeat::PERIOD);
+                    let mut k: u64 = 0;
+                    loop {
+                        every.tick().await;
+                        crate::heartbeat::send_round(&world, k, &msg);
+                        k += 1;
+                    }
+                }));
+            }
+            tokio::spawn(perf::timed("bridge.emu", async move {
+                // emu.rs's poll: every 2 s, the /stats answer to the vehicles' links
+                let mut every = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    every.tick().await;
+                    let briefs = emu_view.ingest(&e.stats_json(), crate::clock::mono());
+                    for cell in world.vehicles() {
+                        let (b, f) = briefs.get(&cell.uid).cloned().unzip();
+                        cell.set_emu(b, f);
+                    }
+                }
+            }));
+        });
+    }
+    tokio::spawn(perf::timed("emulator", emu.clone().run()));
+    tokio::spawn(perf::timed("emulator.terrain", emu.clone().run_terrain()));
+    tokio::spawn(perf::timed("emulator.space", emu.clone().run_space()));
+    let s0 = fleet::start_at(zero, spec.standins_start_s);
+    for i in 0..fleet.len() {
+        tokio::spawn(perf::timed("standins", fleet::run(fleet.clone(), emu.clone(), i, s0)));
+    }
+    if spec.water.is_some() {
+        tokio::spawn(perf::timed("standins.water", fleet::feed_water(fleet.clone(), water.clone(), s0, zero, spec.epoch)));
+    }
+
+    // the router and the agents' server, as main.rs builds them
+    let auth_settings = crate::auth::Settings::from_env(spec.http_port).map_err(err("auth"))?;
+    let auth = crate::auth::Auth::new(auth_settings, decision.clone(), fleetmesh_auth::CredentialFile::default())
+        .map_err(err("auth"))?;
+    tokio::spawn(auth.clone().run());
+    let api = crate::api::router(crate::api::App {
+        world: world.clone(),
+        frames: Arc::new(tokio::sync::watch::channel(None).0),
+        decision: decision.clone(),
+        lod: crate::push::LodSettings::from_env(),
+        auth: auth.clone(),
+        groups: Default::default(),
+        tasking: Default::default(),
+    })
+    .merge(crate::emu::router(emu_view))
+    .merge(crate::situation::router(crate::situation::Situation::from_env()));
+    let mcp = Mcp::new(crate::mcp::Settings::from_env(), world.clone(), decision.clone(), api.clone());
+
+    // the contacts process (simulated contacts of the scenario) went with the removed contacts crate
+    Ok((zero, world, decision, api, mcp, emu, fleet, settings.audit.clone(), water))
+}
+

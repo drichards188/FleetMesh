@@ -1,0 +1,614 @@
+//! One stand-in: autopilot state, its behavior, its link, and the task that runs it.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use mavlink::MessageData;
+use mavlink::dialects::ardupilotmega::{HOME_POSITION_DATA, MavMessage, MavSeverity};
+use tokio::net::UdpSocket;
+use tokio::time::MissedTickBehavior;
+
+use crate::battery::{self, Battery};
+use crate::behavior::{self, Behavior, Firmware, Tick};
+use crate::conditions::{Sample, Slot};
+use crate::config::VehicleConfig;
+use crate::failsafe::Failsafes;
+use crate::geo::{Gauss, M_PER_DEG, wrap180};
+use crate::gnss::{self, Reception};
+use crate::kinematics::{Out, State};
+use crate::link::{self, Inbound, Link};
+use crate::mission::{Mission, NavCfg};
+use crate::nav::{Aid, Nav};
+use crate::params::Params;
+use crate::telemetry::Streams;
+use crate::{messages, telemetry};
+
+pub const PHYSICS_HZ: u32 = 10;
+/// Home follows a disarmed plane or rover that has moved this far, at most this often.
+const HOME_FOLLOW_M: f64 = 2.0;
+const HOME_FOLLOW_S: f64 = 5.0;
+
+pub struct Vehicle {
+    pub cfg: VehicleConfig,
+    pub behavior: Box<dyn Behavior>,
+    pub firmware: Firmware,
+    /// the autopilot's own estimate (see nav.rs for the truth)
+    pub st: State,
+    pub mission: Mission,
+    pub params: Params,
+    pub streams: Streams,
+    pub nav: Nav,
+    pub battery: Battery,
+    pub fs: Failsafes,
+    pub link: Link,
+    pub started: Instant,
+    pub tick: u64,
+    /// Ticks of an engine stall the physics skipped ([`skip_to`]): the time since boot still
+    /// counts them, as an autopilot's clock runs whatever its GCS's host does. Without them a
+    /// vehicle's time since boot fell behind the bridge's clock by every stall, and past 30 s
+    /// the bridge took it for a reboot (`BOOT_JUMP_S`) and ended its order.
+    pub skipped_ticks: u64,
+    pub water: Option<Arc<Slot>>,
+    /// GNSS geometry, jammers and spoofers (None: open sky, `Sky::LEGACY`)
+    pub gnss: Option<Arc<gnss::Env>>,
+    /// what the GPS receiver sees this tick (GPS_RAW_INT)
+    pub rx: Reception,
+    /// rad/s over the last tick (ATTITUDE)
+    pub yaw_rate: f64,
+    /// came down without power
+    pub crashed: bool,
+    /// the payload gripper: None neutral (nothing grabbed yet), Some(true) grabbed (a parcel
+    /// aboard), Some(false) released. Reported as the gripper servo's PWM (SERVO_OUTPUT_RAW).
+    pub gripper: Option<bool>,
+    /// still tied up where it spawned (`VehicleConfig::moored`) until it first arms
+    pub moored: bool,
+    /// when the next acoustic status is due (sim seconds)
+    pub acoustic_next: f64,
+    /// MISSION_CURRENT last sent, so events don't repeat it
+    announced_seq: Option<u16>,
+    /// warned once that the GCS used MISSION_REQUEST (ArduPilot does the same)
+    pub(crate) mission_request_warned: bool,
+    pub(crate) mission_item_warned: bool,
+    /// next PARAM_VALUE of a PARAM_REQUEST_LIST stream
+    pub(crate) param_stream: Option<usize>,
+    /// sim time home last followed the disarmed vehicle (`follow_home`)
+    home_followed: f64,
+    rng: Gauss,
+    out: Vec<Out>,
+}
+
+impl Vehicle {
+    /// A vehicle whose random draws (its navigation errors, sensor noise) differ every run:
+    /// seeded from the wall clock.
+    pub fn new(
+        cfg: VehicleConfig,
+        sock: UdpSocket,
+        water: Option<Arc<Slot>>,
+    ) -> Result<Vehicle, String> {
+        Vehicle::seeded(cfg, sock, water, wall_nanos())
+    }
+
+    /// [`Vehicle::new`] drawing from `seed` (with its uid): the same draws every run, so a test
+    /// of what the errors do does not depend on when it ran (bd murmur-ek3).
+    pub fn seeded(
+        cfg: VehicleConfig,
+        sock: UdpSocket,
+        water: Option<Arc<Slot>>,
+        seed: u64,
+    ) -> Result<Vehicle, String> {
+        let behavior = behavior::create(&cfg.spec.behavior)
+            .ok_or_else(|| format!("{}: unknown behavior {:?}", cfg.callsign, cfg.spec.behavior))?;
+        let mut behavior = behavior;
+        let [lat, lon, alt, hdg] = cfg.home;
+        let passive = if behavior.mode_number("MANUAL").is_some() {
+            "MANUAL"
+        } else {
+            behavior.hold_mode()
+        };
+        let mut st = State {
+            lat,
+            lon,
+            alt,
+            heading: hdg,
+            speed: 0.0,
+            vz: 0.0,
+            ve: 0.0,
+            vn: 0.0,
+            home: (lat, lon, alt),
+            armed: false,
+            mode: passive,
+            hold_point: (lat, lon),
+            aground: false,
+            demand: 0.0,
+        };
+        match cfg.start_at {
+            // a starting task (decision rules 29): on its station, holding there, its home where
+            // the unit spawns it
+            Some([slat, slon, salt, shdg]) => {
+                (st.lat, st.lon, st.alt, st.heading) = (slat, slon, salt, shdg);
+                behavior.start_on_station(&cfg.spec, &mut st);
+            }
+            None => behavior.spawn(&cfg.spec, &mut st),
+        }
+        // a vehicle that starts in the air (its behavior put its home below it) has its home
+        // on the surface there: at the surface's height when the launcher knows it, else 0 m
+        if st.home.2 < alt
+            && behavior.airborne(&st)
+            && let Some(surface) = cfg.surface_m.filter(|s| s.is_finite() && *s < alt)
+        {
+            st.home.2 = surface;
+        }
+        let seed = u64::from(cfg.uid()).wrapping_mul(0x1000_0000_01B3) ^ seed;
+        let mut rng = Gauss::new(seed);
+        let firmware = behavior.firmware();
+        let mut params = Params::seed(firmware, &cfg.spec, cfg.sysid());
+        params.extend(behavior.extra_params(&cfg.spec));
+        for (name, value) in &cfg.params {
+            if !params.preset(name, *value) {
+                eprintln!(
+                    "{}: no parameter {name} in this stand-in, ignored",
+                    cfg.callsign
+                );
+            }
+        }
+        let fix = behavior.gps(&st).0 as u8
+            >= mavlink::dialects::ardupilotmega::GpsFixType::GPS_FIX_TYPE_3D_FIX as u8;
+        let nav = Nav::new(&mut rng, (st.lat, st.lon, st.alt), Aid::for_firmware(firmware), fix);
+        let rx = if fix {
+            gnss::receive(gnss::Sky::LEGACY, true, 0.0, true)
+        } else {
+            Reception::none()
+        };
+        let link = Link::new(sock, cfg.sysid());
+        let mut mission = Mission::default();
+        mission.cfg.firmware = firmware;
+        // a starting task casts it off: it holds its station armed
+        let moored = cfg.moored && cfg.start_at.is_none();
+        Ok(Vehicle {
+            cfg,
+            behavior,
+            firmware,
+            st,
+            mission,
+            params,
+            streams: Streams::default(),
+            nav,
+            battery: Battery::default(),
+            fs: Failsafes::default(),
+            link,
+            started: Instant::now(),
+            tick: 0,
+            skipped_ticks: 0,
+            water,
+            gnss: None,
+            rx,
+            yaw_rate: 0.0,
+            crashed: false,
+            gripper: None,
+            moored,
+            acoustic_next: 0.0,
+            announced_seq: None,
+            mission_request_warned: false,
+            mission_item_warned: false,
+            param_stream: None,
+            home_followed: f64::NEG_INFINITY,
+            rng,
+            out: Vec::new(),
+        })
+    }
+
+
+    pub fn sysid(&self) -> u8 {
+        self.cfg.sysid()
+    }
+
+    pub fn airborne(&self) -> bool {
+        self.behavior.airborne(&self.st)
+    }
+
+    /// Seconds since boot on the physics clock.
+    pub fn now(&self) -> f64 {
+        self.tick as f64 / f64::from(PHYSICS_HZ)
+    }
+
+    pub fn time_boot_ms(&self) -> u64 {
+        (self.tick + self.skipped_ticks) * 1000 / u64::from(PHYSICS_HZ)
+    }
+
+    pub fn capacity_mah(&self) -> f64 {
+        self.params.f("BATT_CAPACITY", 0.0)
+    }
+
+    pub fn flat(&self) -> bool {
+        self.battery.flat(self.capacity_mah())
+    }
+
+    /// Where the vehicle really is: its estimate minus the navigation error.
+    pub fn truth(&self) -> (f64, f64, f64) {
+        let lat = self.st.lat - self.nav.err_n / M_PER_DEG;
+        let lon = self.st.lon - self.nav.err_e / (M_PER_DEG * self.st.lat.to_radians().cos());
+        (lat, lon, self.st.alt)
+    }
+
+    pub fn set_mode(&mut self, name: &'static str) {
+        if name != self.st.mode {
+            self.st.mode = name;
+            self.st.hold_point = (self.st.lat, self.st.lon);
+            if let Some(armed) = self.behavior.mode_arms(name) {
+                self.st.armed = armed;
+            }
+            if name == "AUTO" {
+                let restart = self.params.get("MIS_RESTART") == Some(1.0);
+                self.mission.start_or_resume(restart);
+                if self.firmware != Firmware::Plane {
+                    // Rover / Sub reset to the default speed on entering AUTO
+                    self.mission.speed = None;
+                }
+                if matches!(
+                    self.firmware,
+                    Firmware::Plane | Firmware::Rover | Firmware::Sub
+                ) {
+                    // the shared walker's firmwares: the first command starts now
+                    let mut out = Vec::new();
+                    self.mission.announce_current(&mut out);
+                    self.emit(&mut out);
+                }
+            }
+        }
+    }
+
+    /// A mode change the autopilot makes itself (failsafe, mission end): only to a mode this
+    /// firmware has and the behavior accepts.
+    pub fn try_mode(&mut self, name: &'static str) -> bool {
+        let Some(name) = self
+            .behavior
+            .mode_number(name)
+            .and_then(|n| self.behavior.mode_name(n))
+        else {
+            return false;
+        };
+        if !self.behavior.accepts_mode(name) {
+            return false;
+        }
+        self.set_mode(name);
+        true
+    }
+
+    pub fn text(&mut self, severity: MavSeverity, s: &str) {
+        self.link.send(&messages::statustext(severity, s));
+    }
+
+    /// The text ArduPilot sends on arming / disarming (AP_Arming_*::arm / disarm).
+    pub fn arm_text(&self, armed: bool) -> &'static str {
+        match (self.firmware, armed) {
+            (Firmware::Plane | Firmware::Rover, true) => "Throttle armed",
+            (Firmware::Plane | Firmware::Rover, false) => "Throttle disarmed",
+            (_, true) => "Arming motors",
+            (_, false) => "Disarming motors",
+        }
+    }
+
+    /// Acceptance radius for waypoints, from this firmware's parameter.
+    pub fn wp_radius(&self) -> f64 {
+        match self.firmware {
+            Firmware::Sub | Firmware::Copter => self.params.f("WP_RADIUS_M", 2.0),
+            _ => self.params.f("WP_RADIUS", 10.0),
+        }
+    }
+
+    /// One physics step and the telemetry due on this tick.
+    pub fn step(&mut self) {
+        let dt = 1.0 / f64::from(PHYSICS_HZ);
+        let now = self.now();
+        let spec = &self.cfg.spec;
+        self.mission.cfg = NavCfg {
+            firmware: self.firmware,
+            now,
+            wp_radius: self.wp_radius(),
+            min_radius: if self.firmware == Firmware::Plane {
+                spec.min_turn_radius_m()
+            } else {
+                0.0
+            },
+            max_speed: spec.max_mps.max(spec.cruise_mps),
+        };
+        let mut sample = if self.behavior.wants_conditions() {
+            self.water.as_ref().and_then(|w| w.latest())
+        } else {
+            None
+        };
+        // tied up until it first arms: the water still under it, no current to carry it off
+        if self.moored && self.st.armed {
+            self.moored = false;
+        }
+        if self.moored
+            && let Some(s) = sample.as_mut()
+        {
+            s.current_east = Some(0.0);
+            s.current_north = Some(0.0);
+        }
+        self.check_failsafes(now);
+
+        // a flat battery drives nothing: the behavior sees an unpowered vehicle
+        let flat = self.flat();
+        let armed = self.st.armed;
+        let was_airborne = self.airborne();
+        if flat {
+            self.st.armed = false;
+        }
+        let heading = self.st.heading;
+        let before = (self.st.lat, self.st.lon);
+        let mut out = std::mem::take(&mut self.out);
+        self.behavior.step(&mut Tick {
+            spec: &self.cfg.spec,
+            params: &self.params,
+            st: &mut self.st,
+            mission: &mut self.mission,
+            water: sample.as_ref(),
+            rng: &mut self.rng,
+            out: &mut out,
+            dt,
+        });
+        if flat {
+            self.st.armed = armed;
+            if was_airborne && !self.airborne() && !self.crashed {
+                self.crashed = true;
+                self.st.speed = 0.0;
+                self.st.armed = false;
+            }
+        }
+        self.yaw_rate = wrap180(self.st.heading - heading).to_radians() / dt;
+        self.emit(&mut out);
+        if let Some(g) = self.mission.gripper_cmd.take() {
+            self.set_gripper(g);
+        }
+        if let Some(home) = self.mission.new_home.take() {
+            self.st.home = home;
+            self.streams.once.push(HOME_POSITION_DATA::ID);
+        }
+        self.follow_home(now);
+
+        let moved = (
+            (self.st.lat - before.0) * M_PER_DEG,
+            (self.st.lon - before.1) * M_PER_DEG * self.st.lat.to_radians().cos(),
+        );
+        self.navigate(dt, now, sample.as_ref(), moved, &mut out);
+        self.emit(&mut out);
+        self.out = out;
+        if let Some(w) = &self.water {
+            let (lat, lon, _) = self.truth();
+            w.report(lat, lon, self.st.depth());
+        }
+        self.drain_battery(dt);
+        crate::commands::upload_tick(self, now);
+        crate::commands::param_stream_tick(self);
+        telemetry::send(self);
+        self.tick += 1;
+    }
+
+    /// Disarmed on the ground or the water, ArduPlane and ArduRover keep home at the vehicle
+    /// (update_home), so it is where the vehicle arms: a boat that drifts before arming has
+    /// its home where it drifted to, with a HOME_POSITION each time home moves (seen in SITL
+    /// every few seconds; here at most every `HOME_FOLLOW_S`).
+    fn follow_home(&mut self, now: f64) {
+        if self.st.armed
+            || self.airborne()
+            || !matches!(self.firmware, Firmware::Plane | Firmware::Rover)
+            || now - self.home_followed < HOME_FOLLOW_S
+        {
+            return;
+        }
+        let (lat, lon, alt) = (self.st.lat, self.st.lon, self.st.alt);
+        let moved = crate::geo::distance_m(lat, lon, self.st.home.0, self.st.home.1);
+        if moved > HOME_FOLLOW_M {
+            self.home_followed = now;
+            self.st.home = (lat, lon, alt);
+            self.streams.once.push(HOME_POSITION_DATA::ID);
+        }
+    }
+
+    pub(crate) fn emit(&mut self, out: &mut Vec<Out>) {
+        for o in out.drain(..) {
+            match o {
+                Out::Text(sev, s) => self.text(sev, &s),
+                Out::MissionCurrent(seq) => {
+                    if self.announced_seq != Some(seq) {
+                        self.announced_seq = Some(seq);
+                        self.link.send(&messages::mission_current(seq));
+                    }
+                }
+                Out::ItemReached(seq) => self.link.send(&messages::mission_item_reached(seq)),
+                Out::SetMode(name) => {
+                    self.try_mode(name);
+                }
+            }
+        }
+    }
+
+    /// The GPS receiver and the EKF: what the vehicle believes (self.st) against the truth.
+    fn navigate(
+        &mut self,
+        dt: f64,
+        now: f64,
+        sample: Option<&Sample>,
+        moved: (f64, f64),
+        out: &mut Vec<Out>,
+    ) {
+        let open_sky = self.behavior.gps(&self.st).0 as u8
+            >= mavlink::dialects::ardupilotmega::GpsFixType::GPS_FIX_TYPE_3D_FIX as u8;
+        let truth = self.truth();
+        let (sky, hit) = match &self.gnss {
+            Some(env) => (
+                env.sky_at(truth.0, truth.1, now)
+                    .unwrap_or(gnss::Sky::LEGACY),
+                env.interference(&self.cfg, now, truth),
+            ),
+            None => (gnss::Sky::LEGACY, gnss::Interference::default()),
+        };
+        self.rx = gnss::receive(sky, open_sky, hit.js, self.nav.fix);
+        let input = crate::nav::Input {
+            dt,
+            now,
+            signal: self.rx.fix3d(),
+            spoof: hit.spoof,
+            vel: (self.st.ve, self.st.vn),
+            moved,
+            depth_m: self.st.depth(),
+            water: sample,
+            truth,
+            airborne: self.airborne(),
+        };
+        let (dn, de) = self.nav.step(&input, &mut self.rng, out);
+        if dn != 0.0 || de != 0.0 {
+            self.st.lat += dn / M_PER_DEG;
+            self.st.lon += de / (M_PER_DEG * self.st.lat.to_radians().cos());
+        }
+    }
+
+    /// The payload gripper moves (MAV_CMD_DO_GRIPPER, or a mission's DO_GRIPPER item).
+    pub fn set_gripper(&mut self, grab: bool) {
+        self.gripper = Some(grab);
+        self.text(
+            MavSeverity::MAV_SEVERITY_INFO,
+            if grab { "Gripper grabbed" } else { "Gripper released" },
+        );
+    }
+
+    /// The gripper servo's PWM as ArduPilot's gripper writes it (GRIP_NEUTRAL 1500, GRIP_GRAB 1900,
+    /// GRIP_RELEASE 1100): neutral until the first command.
+    pub fn gripper_pwm(&self) -> u16 {
+        match self.gripper {
+            None => 1500,
+            Some(true) => 1900,
+            Some(false) => 1100,
+        }
+    }
+
+    /// MAV_CMD_BATTERY_RESET: the pack is replaced (a hub's swap): full again.
+    pub fn reset_battery(&mut self) {
+        self.battery = Battery::default();
+    }
+
+    fn drain_battery(&mut self, dt: f64) {
+        let load = battery::load(self.firmware, &self.cfg.spec, &self.st, self.airborne());
+        let load = if self.flat() { 0.0 } else { load };
+        let cap = self.capacity_mah();
+        self.battery
+            .step(dt, load, cap, self.cfg.spec.endurance_h());
+    }
+
+    pub fn on_datagram(&mut self, data: &[u8]) {
+        for m in link::parse_all(data) {
+            match m {
+                Inbound::Msg(h, msg) => self.handle_from(&h, &msg),
+                other => crate::commands::handle_unknown(self, &other),
+            }
+        }
+    }
+
+    /// A message from the usual GCS (255/190).
+    pub fn handle(&mut self, msg: &MavMessage) {
+        let h = mavlink::MavHeader {
+            system_id: messages::GCS_SYSID,
+            component_id: messages::GCS_COMPID,
+            sequence: 0,
+        };
+        self.handle_from(&h, msg);
+    }
+
+    pub fn handle_from(&mut self, header: &mavlink::MavHeader, msg: &MavMessage) {
+        crate::commands::handle(self, header, msg);
+    }
+}
+
+fn wall_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+pub const TICK: Duration = Duration::from_millis(1000 / PHYSICS_HZ as u64);
+
+/// The longest delay the physics catches up on, tick by tick. A longer stall of the engine
+/// (the host swapping, a stopped process) is skipped instead: its vehicles freeze through it.
+/// Caught up, it would run their clocks through the stall before they could read what the
+/// GCS sent meanwhile (still queued in their sockets), and every armed vehicle's GCS failsafe
+/// would fire on heartbeats that had in fact arrived: a 7 s stop of the engine put 85 of 100
+/// airborne stand-ins into RTL (murmur-nb1). A real autopilot doesn't stall with the host
+/// its GCS runs on. 1 s: under every failsafe timer, over any scheduling hiccup.
+pub const MAX_CATCH_UP: Duration = Duration::from_secs(1);
+
+/// Stalls skipped, all vehicles together, for the engine's stats line (which resets them):
+/// how many vehicles skipped one, and the longest, in ms.
+pub static STALL_SKIPS: AtomicU64 = AtomicU64::new(0);
+pub static STALL_MAX_MS: AtomicU64 = AtomicU64::new(0);
+
+/// After a tick that came `late` past its due time: the next due time on the same phase if
+/// the stall is to be skipped (see [`MAX_CATCH_UP`]), else None (catch up tick by tick).
+pub fn skip_to(due: tokio::time::Instant, late: Duration) -> Option<tokio::time::Instant> {
+    if late <= MAX_CATCH_UP {
+        return None;
+    }
+    let ticks = late.as_nanos() / TICK.as_nanos() + 1;
+    Some(due + TICK * u32::try_from(ticks).unwrap_or(u32::MAX))
+}
+
+/// The ticks a skip from `due` to `next` ([`skip_to`]) leaves out: those between the late one,
+/// run now, and `next`.
+pub fn skipped_ticks(due: tokio::time::Instant, next: tokio::time::Instant) -> u64 {
+    let n = next.saturating_duration_since(due).as_nanos() / TICK.as_nanos();
+    u64::try_from(n.saturating_sub(1)).unwrap_or(u64::MAX)
+}
+
+/// Run one vehicle forever: 10 Hz physics and telemetry, and answer whatever the GCS sends
+/// as soon as it arrives. `phase` (within one tick) offsets this vehicle's ticks from the
+/// others': real autopilots are not in lockstep, and thousands of links sending in the same
+/// millisecond overflow the host's loopback queue (seen at 3,000 vehicles).
+pub async fn run(mut v: Vehicle, phase: Duration) {
+    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + phase, TICK);
+    every.set_missed_tick_behavior(MissedTickBehavior::Burst);
+    let mut buf = vec![0u8; 2048];
+    loop {
+        tokio::select! {
+            due = every.tick() => {
+                let late = tokio::time::Instant::now().saturating_duration_since(due);
+                if let Some(next) = skip_to(due, late) {
+                    every.reset_at(next);
+                    v.skipped_ticks += skipped_ticks(due, next);
+                    STALL_SKIPS.fetch_add(1, Ordering::Relaxed);
+                    STALL_MAX_MS.fetch_max(late.as_millis() as u64, Ordering::Relaxed);
+                }
+                v.step()
+            }
+            r = v.link.sock.recv(&mut buf) => {
+                // errors (e.g. ICMP port unreachable while the bridge is down) are not fatal
+                if let Ok(n) = r {
+                    v.on_datagram(&buf[..n]);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_stall_is_skipped_on_the_same_phase() {
+        let due = tokio::time::Instant::now();
+        // a scheduling hiccup is caught up tick by tick
+        assert_eq!(skip_to(due, Duration::from_millis(250)), None);
+        assert_eq!(skip_to(due, MAX_CATCH_UP), None);
+        // a 7.05 s stall: next tick 7.1 s after the late one was due, same phase
+        assert_eq!(
+            skip_to(due, Duration::from_millis(7_050)),
+            Some(due + Duration::from_millis(7_100))
+        );
+        // the 70 ticks left out still count in the time since boot (murmur-z07i)
+        assert_eq!(skipped_ticks(due, due + Duration::from_millis(7_100)), 70);
+        assert_eq!(skipped_ticks(due, due + TICK), 0);
+    }
+}

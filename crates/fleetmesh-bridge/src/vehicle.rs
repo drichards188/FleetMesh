@@ -1,0 +1,1334 @@
+//! Vehicle state decoded from its MAVLink link, and the cell that shares it.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+pub use fleetmesh_decide::world::NavSource;
+use serde::Serialize;
+use serde_json::{Map, Value};
+use tokio::sync::broadcast;
+
+use crate::clock::{self, round};
+use crate::link::{LinkCounters, LinkSnapshot, LinkStats, Transmit};
+use crate::mav::{self, Kind, MavMessage, apm};
+
+/// Fleet-unique vehicle id (the launcher's manifest), what the API and console key on.
+/// The MAVLink sysid is one byte and unique only per link.
+pub type Uid = u64;
+
+const STATUSTEXT_KEEP: usize = 8;
+/// Vehicle events (mode changes, failsafes, STATUSTEXT) waiting for the audit log; the
+/// decision loop drains them about once a second. Bounded so a silent consumer can't grow it.
+const EVENTS_KEEP: usize = 256;
+pub const TRAIL_KEEP: usize = 120;
+/// Firmware that doesn't report EKF status gets this long after a 3D fix before it counts as
+/// ready to navigate.
+const NO_EKF_GRACE_S: f64 = 15.0;
+/// A time since boot this much earlier than the last one is a reboot, not a reordered packet
+/// (messages of one burst carry times milliseconds apart; the links deliver in order).
+pub const REBOOT_SLACK_MS: u64 = 1_000;
+/// A reboot also shows when the time since boot did not go back (an outage longer than the
+/// uptime before it): the boot instant it implies (arrival less the time since boot, at the
+/// rate the vehicle's clock runs against ours) is later than the recent reports put it, by
+/// more than this (a slow link's delay), plus a share of the silence before the report for
+/// what the rate estimate may be off by (see [`boot_rate`]). A reboot that came within this
+/// of the last report before an outage that outlasts the new uptime is not seen.
+pub const BOOT_JUMP_S: f64 = 30.0;
+/// The vehicle's clock rate is estimated over the recent reports once they span this long
+/// (a simulator may run slower than the wall clock); before that it is taken as 1.
+const BOOT_RATE_SPAN_S: f64 = 30.0;
+/// The reports the rate and the boot instant's baseline come from: one a second, this far
+/// back.
+const BOOT_RATE_WINDOW_S: f64 = 300.0;
+/// How far off the arrival delays may put the rate estimate: this many seconds of delay
+/// across its span.
+const BOOT_DELAY_S: f64 = 3.0;
+/// The drift allowed per second of silence on top of the delays' share: a rate that changes.
+const BOOT_DRIFT_PER_S: f64 = 0.02;
+/// Allowed per second of silence while the rate is not known yet.
+const BOOT_DRIFT_UNKNOWN_PER_S: f64 = 0.15;
+
+/// Rules 30 (docs/NODE-LOSS.md section 7): the GCS failsafe parameters of every firmware
+/// (ArduPilot 4.8), kept as the vehicle reports them ([`LostLinkParams`]). Which firmware has
+/// which, and what they make the vehicle do, is `decision/lost_link_read.rs`'s.
+pub const LOST_LINK_PARAMS: &[&str] = &[
+    "FS_ACTION",
+    "FS_GCS_ENABL",
+    "FS_GCS_ENABLE",
+    "FS_GCS_TIMEOUT",
+    "FS_LONG_ACTN",
+    "FS_LONG_TIMEOUT",
+    "FS_OPTIONS",
+    "FS_TIMEOUT",
+    "Q_OPTIONS",
+];
+
+/// Rules 30: one GCS failsafe parameter as the vehicle last reported it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamReport {
+    /// Its value; None: the vehicle said it has no such parameter (PARAM_ERROR, does not exist).
+    pub value: Option<f64>,
+    /// When the report arrived (the bridge's clock, `clock::wall`, s).
+    pub t: f64,
+    /// In which of the vehicle's boots the bridge took it ([`Vehicle::boot_epoch`]).
+    pub epoch: u32,
+}
+
+/// Rules 30: what the bridge knows of a vehicle's own lost-link failsafe (decision D4: read
+/// from the vehicle, configured only where the link cannot carry a read). Every report of one
+/// of [`LOST_LINK_PARAMS`] lands here, whoever asked: the lost-link read
+/// echo; so what it holds is what the vehicle last said it holds. Kept in every run; only a
+/// run under rules 30 reads it or asks for more.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LostLinkParams {
+    /// Each parameter as the vehicle last reported it.
+    pub reported: BTreeMap<&'static str, ParamReport>,
+    /// A read is under way: no other starts.
+    pub reading: bool,
+    /// Reads in a row that did not finish, and when the next may start (monotonic s).
+    pub failures: u32,
+    pub next_try: f64,
+    /// Configured instead, because the link could not carry a read and none had finished: the
+    /// parameters FleetMesh gives the vehicle's firmware and link profile, and when the bridge
+    /// configured them (the bridge's clock, s). A read that finishes takes over.
+    pub configured: Option<(BTreeMap<&'static str, Option<f64>>, f64)>,
+}
+
+impl LostLinkParams {
+    /// A report of `name` (its value, or None: the vehicle has no such parameter) in boot
+    /// `epoch`; anything not a GCS failsafe parameter is not kept.
+    fn report(&mut self, name: &str, value: Option<f64>, epoch: u32) {
+        if let Some(name) = LOST_LINK_PARAMS.iter().find(|n| **n == name) {
+            self.reported.insert(name, ParamReport { value, t: clock::wall(), epoch });
+        }
+    }
+}
+
+/// The vehicle clock's rate against ours from (monotonic s, time since boot s) samples, and
+/// the drift to allow per second of silence for it: estimated over the samples' span once it
+/// is [`BOOT_RATE_SPAN_S`] (bounded to 0.5..1.5), else 1 with a wide allowance.
+pub fn boot_rate(samples: &VecDeque<(f64, f64)>) -> (f64, f64) {
+    match (samples.front(), samples.back()) {
+        (Some(a), Some(b)) if b.0 - a.0 >= BOOT_RATE_SPAN_S => {
+            let span = b.0 - a.0;
+            let rate = ((b.1 - a.1) / span).clamp(0.5, 1.5);
+            (rate, BOOT_DRIFT_PER_S + BOOT_DELAY_S / span)
+        }
+        _ => (1.0, BOOT_DRIFT_UNKNOWN_PER_S),
+    }
+}
+
+/// What the launcher's fleet manifest says a node is: callsign, platform, role, domain, link...
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Identity(pub Map<String, Value>);
+
+impl Identity {
+    const KEYS: [&str; 12] = [
+        "callsign",
+        "platform",
+        "name",
+        "short",
+        "role",
+        "domain",
+        "link",
+        // the SATCOM constellation class (starlink, iridium, inmarsat, ku-geo): the telemetry plan
+        "space_class",
+        "sim",
+        "armed",
+        "cruise_alt_m",
+        "min_turn_radius_m",
+    ];
+
+    pub fn from_manifest(entry: &Map<String, Value>) -> Identity {
+        Identity(
+            Self::KEYS
+                .iter()
+                .map(|k| {
+                    (
+                        (*k).to_string(),
+                        entry.get(*k).cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn str(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(Value::as_str)
+    }
+
+    pub fn num(&self, key: &str) -> Option<f64> {
+        self.0.get(key).and_then(Value::as_f64)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StatusText {
+    pub t: f64,
+    pub severity: u8,
+    pub text: String,
+}
+
+/// The vehicle as the console sees it. Rounded so tiny jitter doesn't count as a change
+/// (see the change-only push).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VehicleSnapshot {
+    pub uid: Uid,
+    pub sysid: u8,
+    /// The push layer takes this out before serializing (it goes to each client once,
+    /// `push.rs`), so a snapshot without one has no `identity` key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Arc<Identity>>,
+    pub kind: Option<Kind>,
+    pub mode: Option<String>,
+    pub armed: bool,
+    pub position: Option<[f64; 2]>,
+    pub alt_rel: Option<f64>,
+    pub alt_msl: Option<f64>,
+    pub roll: Option<f64>,
+    pub pitch: Option<f64>,
+    pub heading: Option<f64>,
+    pub yaw: Option<f64>,
+    pub tracking: Option<Uid>,
+    pub nav_bearing: Option<i16>,
+    pub nav_ready: bool,
+    /// gnss | dead_reckoning (a submerged AUV: ready, but its position drifts) | none
+    pub nav_source: NavSource,
+    pub groundspeed: Option<f64>,
+    pub airspeed: Option<f64>,
+    pub battery_pct: Option<i8>,
+    /// The payload gripper as the vehicle reports it (its servo): `empty` (never grabbed),
+    /// `loaded` (grabbed), `released`; absent until the vehicle has reported its servos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<&'static str>,
+    pub gps_fix: u8,
+    pub satellites: u8,
+    pub mission_seq: Option<u16>,
+    pub home: Option<[f64; 2]>,
+    pub link: LinkSnapshot,
+    pub statustext: Vec<StatusText>,
+    /// Where the vehicle probably is while its link is silent (`crate::estimate`): set by the
+    /// push frame for vehicles past their stale threshold, absent otherwise. Display only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<crate::estimate::Estimate>,
+}
+
+/// Decoded state of one vehicle. Plain data: only its cell's lock guards it.
+#[derive(Default)]
+pub struct Vehicle {
+    pub identity: Option<Arc<Identity>>,
+    pub kind: Option<Kind>,
+    pub mav_type: Option<apm::MavType>,
+    pub mode: Option<String>,
+    pub custom_mode: Option<u32>,
+    pub armed: bool,
+    /// (lat, lon)
+    pub pos: Option<(f64, f64)>,
+    pub alt_rel: Option<f64>,
+    pub alt_msl: Option<f64>,
+    pub heading: Option<f64>,
+    pub yaw: Option<f64>,
+    pub roll: Option<f64>,
+    pub pitch: Option<f64>,
+    /// Velocity over ground, [east, north] m/s, with the position it came with:
+    /// GLOBAL_POSITION_INT's vy and vx; HIGH_LATENCY2 has none, so there its heading and
+    /// ground speed.
+    pub vel_en: Option<[f64; 2]>,
+    pub groundspeed: Option<f64>,
+    pub airspeed: Option<f64>,
+    pub battery_pct: Option<i8>,
+    /// The payload gripper servo's last PWM (SERVO_OUTPUT_RAW servo 9, `GRIP_*`: 1500 neutral,
+    /// 1900 grab, 1100 release) and when it came.
+    pub payload_pwm: Option<u16>,
+    pub gps_fix: u8,
+    pub satellites: u8,
+    /// The receiver's HDOP (GPS_RAW_INT `eph`, hundredths) and horizontal accuracy (`h_acc`, mm),
+    /// as reported: None when the receiver says it does not know (no fix, or no such field).
+    pub gps_hdop: Option<f64>,
+    pub gps_h_acc_m: Option<f64>,
+    /// How far the last reported position was from where the one before it, carried along its
+    /// velocity, put it, m: the navigation rule's jump check (a position that walks off fast).
+    pub nav_jump_m: Option<f64>,
+    /// The position and time (wall s) the jump check carries forward from.
+    nav_prev: Option<((f64, f64), f64)>,
+    pub mission_seq: Option<u16>,
+    /// (lat, lon)
+    pub home: Option<(f64, f64)>,
+    pub home_alt: Option<f64>,
+    pub statustext: VecDeque<StatusText>,
+    /// (lon, lat, metres above mean sea level), one point a second at most
+    pub trail: VecDeque<[f64; 3]>,
+    /// total points ever appended, so clients can ask for "new since n"
+    pub trail_count: u64,
+    last_trail: Option<f64>,
+    /// links that get a copy of this vehicle's position (antenna trackers pointed at it)
+    pub forward_to: BTreeMap<u16, Arc<dyn Transmit>>,
+    /// for trackers: the uid being tracked
+    pub tracking: Option<Uid>,
+    /// planes only: None until Q_ENABLE is read
+    pub is_vtol: Option<bool>,
+    /// fixed wing only: WP_LOITER_RAD and RTL_RADIUS (m), None until read
+    pub loiter_radius_m: Option<f64>,
+    pub rtl_radius_m: Option<f64>,
+    pub ekf_flags: Option<apm::EkfStatusFlags>,
+    /// failure flags of the last HIGH_LATENCY2 (a vehicle on its low-rate link)
+    pub hl_failure: Option<apm::HlFailureFlag>,
+    pub nav_bearing: Option<i16>,
+    pub target_dist: Option<u16>,
+    /// Where the autopilot navigates to (NAV_CONTROLLER_OUTPUT's target bearing and
+    /// distance from the position then): the loiter center in LOITER, home or a rally point
+    /// in RTL. Stamped `seen.nav_target`.
+    pub nav_target: Option<(f64, f64)>,
+    /// When the mode last changed (the bridge's clock, s): a navigation target reported before it
+    /// belongs to the previous mode (the last AUTO waypoint, say).
+    pub mode_since: Option<f64>,
+    /// The GPS fix comes from a HIGH_LATENCY2 report (which carries no fix type: without
+    /// its GPS failure flag it counts as a 3D fix), not from GPS_RAW_INT.
+    pub gps_fix_hl2: bool,
+    fix_since: Option<f64>,
+    /// the telemetry plan went out at least once
+    pub rates_sent: bool,
+    /// When each fact the decision layer reads last arrived (the bridge's clock, `clock::wall`, s): every
+    /// fact in a decision's world snapshot carries its age.
+    pub seen: FactTimes,
+    /// Events for the audit log (`vehicle.event`), oldest first.
+    pub events: VecDeque<VehicleEvent>,
+    /// `DAMAGE mobility: ...`, `DAMAGE payload_loss: ...`, as a stand-in reports what the truth
+    /// reported.
+    pub damage: Option<DamageReport>,
+    /// Rules 30: its own lost-link failsafe's parameters as it reported them, and the read's
+    /// progress (`decision/lost_link_read.rs`).
+    pub lost_link: LostLinkParams,
+    system_status: Option<apm::MavState>,
+    /// When anything was last heard from it (monotonic s, the tokio clock): the task layer
+    /// tells a lost link mid-exchange from a vehicle that refuses.
+    pub heard_mono: Option<f64>,
+    /// The last time since boot it reported (ms: GLOBAL_POSITION_INT, ATTITUDE, SYSTEM_TIME,
+    /// HIGH_LATENCY2), when it booted by that (the bridge's clock, s, estimated once: the arrival time less
+    /// the time since boot) and how many reboots the bridge has seen (each one: the time since
+    /// boot went back). An op started before a reboot is over: the vehicle lost the mode and
+    /// armed state its order set.
+    pub boot_ms: Option<u64>,
+    pub booted_wall: Option<f64>,
+    pub boot_epoch: u32,
+    /// Reboots waiting for the audit log, oldest first.
+    pub reboots: VecDeque<Reboot>,
+    /// Recent reports' (monotonic s, time since boot s), one a second over the last
+    /// [`BOOT_RATE_WINDOW_S`], and when the last report came.
+    boot_samples: VecDeque<(f64, f64)>,
+    boot_heard_mono: Option<f64>,
+}
+
+/// Arrival times (the bridge's clock, `clock::wall`, s) of the messages behind each decision fact.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FactTimes {
+    /// autopilot HEARTBEAT (kind, mode)
+    pub heartbeat: Option<f64>,
+    pub position: Option<f64>,
+    pub home: Option<f64>,
+    pub battery: Option<f64>,
+    pub gps: Option<f64>,
+    pub ekf: Option<f64>,
+    /// HIGH_LATENCY2 (position, battery and navigation health in one low-rate report)
+    pub hl2: Option<f64>,
+    /// NAV_CONTROLLER_OUTPUT (the navigation target)
+    pub nav_target: Option<f64>,
+}
+
+/// The latest report from a vehicle's navigation filter, with its arrival time.
+#[derive(Clone, Copy)]
+enum NavReport {
+    Ekf(apm::EkfStatusFlags, Option<f64>),
+    HighLatency(apm::HlFailureFlag, Option<f64>),
+}
+
+
+/// A circle a fixed wing flies on its own ([`Vehicle::loiter_circle`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoiterCircle {
+    /// (lat, lon)
+    pub center: (f64, f64),
+    /// with the tolerance it is flown to
+    pub radius_m: f64,
+    /// circling in RTL (else LOITER)
+    pub rtl: bool,
+    /// when the center was reported (the bridge's clock, s)
+    pub center_t: f64,
+}
+
+/// Something the vehicle did or said that belongs in the audit log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VehicleEvent {
+    pub kind: &'static str,
+    pub text: String,
+}
+
+/// Rules 25: what a vehicle reported damaged in itself, and when (the bridge's clock, s): first
+/// and latest (a damaged vehicle repeats its report every 30 s).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct DamageReport {
+    pub mobility: bool,
+    pub payload_loss: bool,
+    pub since: f64,
+    pub last: f64,
+}
+
+impl DamageReport {
+    /// The damage a STATUSTEXT reports, if it is a damage report (`DAMAGE mobility: ...`,
+    /// `DAMAGE payload_loss: ...`): (mobility, payload_loss).
+    pub fn parse(text: &str) -> Option<(bool, bool)> {
+        let rest = text.strip_prefix("DAMAGE ")?;
+        let word = rest.split(|c: char| c == ':' || c.is_whitespace()).next()?;
+        match word {
+            "mobility" => Some((true, false)),
+            "payload_loss" => Some((false, true)),
+            _ => None,
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match (self.mobility, self.payload_loss) {
+            (true, true) => "propulsion lost and payload out of action",
+            (true, false) => "propulsion lost",
+            (false, true) => "payload out of action",
+            (false, false) => "no damage",
+        }
+    }
+}
+
+/// A reboot the bridge saw: the time since boot before and after (ms), the new boot instant
+/// and the one before (the bridge's clock, s). Logged as `vehicle.rebooted` by the decision loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reboot {
+    pub boot_ms_before: u64,
+    pub boot_ms: u64,
+    pub booted_wall: f64,
+    pub booted_before_wall: Option<f64>,
+}
+
+impl Vehicle {
+    /// Apply one message. False when the message carries nothing usable (a GCS heartbeat, a
+    /// zero position), in which case nobody waiting on the vehicle hears about it either.
+    pub fn apply(&mut self, msg: &MavMessage, raw: &[u8], now: f64) -> bool {
+        match msg {
+            MavMessage::HEARTBEAT(m) => {
+                if m.autopilot == apm::MavAutopilot::MAV_AUTOPILOT_INVALID {
+                    return false;
+                }
+                self.mav_type = Some(m.mavtype);
+                let mut kind = Kind::from_mav_type(m.mavtype);
+                // ArduPlane reports FIXED_WING even as a QuadPlane; Q_ENABLE tells them apart
+                if kind == Kind::Plane && self.is_vtol == Some(true) {
+                    kind = Kind::Vtol;
+                }
+                self.kind = Some(kind);
+                self.set_mode(m.mavtype, m.custom_mode);
+                let critical = |s: Option<apm::MavState>| {
+                    matches!(
+                        s,
+                        Some(
+                            apm::MavState::MAV_STATE_CRITICAL | apm::MavState::MAV_STATE_EMERGENCY
+                        )
+                    )
+                };
+                let now_critical = critical(Some(m.system_status));
+                if self.system_status.is_some() && now_critical != critical(self.system_status) {
+                    self.push_event("failsafe", format!("system status {:?}", m.system_status));
+                }
+                self.system_status = Some(m.system_status);
+                self.seen.heartbeat = Some(clock::wall());
+                self.armed = m
+                    .base_mode
+                    .contains(apm::MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+            }
+            MavMessage::GLOBAL_POSITION_INT(m) => {
+                if m.lat == 0 && m.lon == 0 {
+                    return false;
+                }
+                let (lat, lon) = (f64::from(m.lat) / 1e7, f64::from(m.lon) / 1e7);
+                let (alt_rel, alt_msl) = (
+                    f64::from(m.relative_alt) / 1000.0,
+                    f64::from(m.alt) / 1000.0,
+                );
+                if self.home.is_none() {
+                    self.home = Some((lat, lon));
+                    self.home_alt = Some(alt_msl - alt_rel);
+                    self.seen.home = Some(clock::wall());
+                }
+                self.set_position(lat, lon, alt_msl, Some(alt_rel), now);
+                if m.hdg != u16::MAX {
+                    self.heading = Some(f64::from(m.hdg) / 100.0);
+                }
+                // vx north, vy east, cm/s
+                self.vel_en = Some([f64::from(m.vy) / 100.0, f64::from(m.vx) / 100.0]);
+                if m.time_boot_ms > 0 {
+                    self.observe_boot(u64::from(m.time_boot_ms));
+                }
+                for link in self.forward_to.values() {
+                    link.send_raw(raw);
+                }
+            }
+            MavMessage::HIGH_LATENCY2(m) => {
+                // the low-rate report of a vehicle that can't stream (an AUV on its acoustic
+                // modem): everything the console and the task layer follow, in one message
+                let mav_type = self.mav_type.unwrap_or(m.mavtype);
+                self.set_mode(mav_type, u32::from(m.custom_mode));
+                let wall = clock::wall();
+                if m.latitude != 0 || m.longitude != 0 {
+                    let (lat, lon) = (f64::from(m.latitude) / 1e7, f64::from(m.longitude) / 1e7);
+                    let alt_msl = f64::from(m.altitude);
+                    let alt_rel = self.home_alt.map(|h| alt_msl - h);
+                    self.set_position(lat, lon, alt_msl, alt_rel, now);
+                }
+                self.heading = Some(f64::from(m.heading) * 2.0);
+                self.groundspeed = Some(f64::from(m.groundspeed) / 5.0);
+                // no velocity components in HIGH_LATENCY2: its heading and ground speed
+                let (h, gs) = (f64::from(m.heading) * 2.0, f64::from(m.groundspeed) / 5.0);
+                let r = h.to_radians();
+                self.vel_en = Some([gs * r.sin(), gs * r.cos()]);
+                self.airspeed = Some(f64::from(m.airspeed) / 5.0);
+                self.mission_seq = Some(m.wp_num);
+                self.battery_pct = (m.battery >= 0).then_some(m.battery);
+                self.seen.battery = self.battery_pct.map(|_| wall);
+                // no fix type in HIGH_LATENCY2: its GPS failure flag says no fix, its absence
+                // counts as a 3D fix (an armed platform on this link alone could otherwise
+                // never show a fresh fix)
+                if m.failure_flags
+                    .contains(apm::HlFailureFlag::HL_FAILURE_FLAG_GPS)
+                {
+                    self.gps_fix = 0;
+                    self.satellites = 0;
+                } else {
+                    self.gps_fix = 3;
+                }
+                self.gps_fix_hl2 = true;
+                self.seen.gps = Some(wall);
+                self.hl_failure = Some(m.failure_flags);
+                self.seen.hl2 = Some(wall);
+                if m.timestamp > 0 {
+                    self.observe_boot(u64::from(m.timestamp));
+                }
+            }
+            MavMessage::PARAM_VALUE(m) => match mav::chars_to_string(&m.param_id).as_str() {
+                "Q_ENABLE" => {
+                    let vtol = m.param_value > 0.0;
+                    self.is_vtol = Some(vtol);
+                    if self.kind == Some(Kind::Plane) && vtol {
+                        self.kind = Some(Kind::Vtol);
+                    }
+                }
+                "WP_LOITER_RAD" => self.loiter_radius_m = Some(f64::from(m.param_value)),
+                "RTL_RADIUS" => self.rtl_radius_m = Some(f64::from(m.param_value)),
+                // rules 30: its GCS failsafe's, whoever asked
+                name => self.lost_link.report(name, Some(f64::from(m.param_value)), self.boot_epoch),
+            },
+            MavMessage::PARAM_ERROR(e) if e.error == apm::MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST => {
+                // rules 30: a failsafe parameter its firmware does not have
+                let name = mav::chars_to_string(&e.param_id);
+                self.lost_link.report(&name, None, self.boot_epoch);
+            }
+            MavMessage::NAV_CONTROLLER_OUTPUT(m) => {
+                self.nav_bearing = Some(m.nav_bearing);
+                self.target_dist = Some(m.wp_dist);
+                self.nav_target = self.pos.map(|(lat, lon)| {
+                    crate::geo::destination(lat, lon, f64::from(m.target_bearing), f64::from(m.wp_dist))
+                });
+                self.seen.nav_target = self.nav_target.map(|_| clock::wall());
+            }
+            MavMessage::SYSTEM_TIME(m) => {
+                if m.time_boot_ms > 0 {
+                    self.observe_boot(u64::from(m.time_boot_ms));
+                }
+            }
+            MavMessage::ATTITUDE(m) => {
+                if m.time_boot_ms > 0 {
+                    self.observe_boot(u64::from(m.time_boot_ms));
+                }
+                self.yaw = Some(f64::from(m.yaw).to_degrees().rem_euclid(360.0));
+                self.roll = Some(f64::from(m.roll).to_degrees());
+                self.pitch = Some(f64::from(m.pitch).to_degrees());
+            }
+            MavMessage::HOME_POSITION(m) => {
+                self.home = Some((f64::from(m.latitude) / 1e7, f64::from(m.longitude) / 1e7));
+                self.home_alt = Some(f64::from(m.altitude) / 1000.0);
+                self.seen.home = Some(clock::wall());
+            }
+            MavMessage::VFR_HUD(m) => {
+                self.groundspeed = Some(f64::from(m.groundspeed));
+                self.airspeed = Some(f64::from(m.airspeed));
+            }
+            MavMessage::SYS_STATUS(m) => {
+                self.battery_pct = (m.battery_remaining >= 0).then_some(m.battery_remaining);
+                self.seen.battery = self.battery_pct.map(|_| clock::wall());
+            }
+            MavMessage::SERVO_OUTPUT_RAW(m) => self.payload_pwm = Some(m.servo9_raw),
+            MavMessage::GPS_RAW_INT(m) => {
+                self.gps_fix = m.fix_type as u8;
+                self.gps_fix_hl2 = false;
+                self.satellites = m.satellites_visible;
+                self.gps_hdop = (m.eph != u16::MAX).then(|| f64::from(m.eph) / 100.0);
+                self.gps_h_acc_m = (m.h_acc > 0).then(|| f64::from(m.h_acc) / 1000.0);
+                self.seen.gps = Some(clock::wall());
+                if self.gps_fix >= 3 && self.fix_since.is_none() {
+                    self.fix_since = Some(now);
+                }
+            }
+            MavMessage::EKF_STATUS_REPORT(m) => {
+                self.ekf_flags = Some(m.flags);
+                self.seen.ekf = Some(clock::wall());
+            }
+            MavMessage::MISSION_CURRENT(m) => self.mission_seq = Some(m.seq),
+            MavMessage::STATUSTEXT(m) => {
+                let text = mav::chars_to_string(&m.text);
+                // rules 25: a damage report: a new kind of damage is a `damage` event, a repeat
+                // only refreshes it
+                if let Some((mobility, payload_loss)) = DamageReport::parse(&text) {
+                    let now = clock::wall();
+                    let d = self.damage.get_or_insert(DamageReport { since: now, ..DamageReport::default() });
+                    let new = (mobility && !d.mobility) || (payload_loss && !d.payload_loss);
+                    d.mobility |= mobility;
+                    d.payload_loss |= payload_loss;
+                    d.last = now;
+                    if !new {
+                        return true;
+                    }
+                    let what = d.describe();
+                    self.push_event("damage", format!("[severity {}] {text}: reports {what}", m.severity as u8));
+                } else {
+                    let kind = if text.to_ascii_lowercase().contains("failsafe") {
+                        "failsafe"
+                    } else {
+                        "statustext"
+                    };
+                    self.push_event(kind, format!("[severity {}] {text}", m.severity as u8));
+                }
+                if self.statustext.len() == STATUSTEXT_KEEP {
+                    self.statustext.pop_front();
+                }
+                self.statustext.push_back(StatusText {
+                    t: clock::wall(),
+                    severity: m.severity as u8,
+                    text,
+                });
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// The payload as the gripper's servo says: neutral is empty (nothing was ever grabbed),
+    /// the grab position is a parcel aboard, the release position a parcel let go.
+    pub fn payload(&self) -> Option<&'static str> {
+        self.payload_pwm.map(|p| match p {
+            0..=1300 => "released",
+            1700.. => "loaded",
+            _ => "empty",
+        })
+    }
+
+    /// Which report of the vehicle's own navigation filter is the latest: HIGH_LATENCY2
+    /// (failure flags) or EKF_STATUS_REPORT. None when it sends neither.
+    fn nav_report(&self) -> Option<NavReport> {
+        let (hl2, ekf) = (self.seen.hl2, self.seen.ekf);
+        match (self.hl_failure, self.ekf_flags) {
+            // Option order: a report that arrived beats one that has no time
+            (Some(f), Some(_)) if hl2 >= ekf => Some(NavReport::HighLatency(f, hl2)),
+            (Some(f), None) => Some(NavReport::HighLatency(f, hl2)),
+            (_, Some(f)) => Some(NavReport::Ekf(f, ekf)),
+            (None, None) => None,
+        }
+    }
+
+    /// What the position rests on. The vehicle's own navigation filter is the authority: a
+    /// submerged AUV has no GPS fix but navigates on inertial + DVL (relative position only,
+    /// EKF_POS_HORIZ_REL; on its acoustic link, HIGH_LATENCY2 with the GPS failure flag).
+    pub fn nav_source(&self, now: f64) -> NavSource {
+        if self.pos.is_none() {
+            return NavSource::None;
+        }
+        match self.nav_report() {
+            Some(NavReport::Ekf(f, _)) => {
+                use apm::EkfStatusFlags as E;
+                if f.contains(E::EKF_CONST_POS_MODE) {
+                    NavSource::None
+                } else if f.contains(E::EKF_POS_HORIZ_ABS) {
+                    NavSource::Gnss
+                } else if f.contains(E::EKF_POS_HORIZ_REL) {
+                    NavSource::DeadReckoning
+                } else {
+                    NavSource::None
+                }
+            }
+            Some(NavReport::HighLatency(f, _)) => {
+                use apm::HlFailureFlag as H;
+                if f.contains(H::HL_FAILURE_FLAG_ESTIMATOR) {
+                    NavSource::None
+                } else if f.contains(H::HL_FAILURE_FLAG_GPS) {
+                    NavSource::DeadReckoning
+                } else {
+                    NavSource::Gnss
+                }
+            }
+            None if self.gps_fix < 3 => NavSource::None,
+            // no EKF report: the fix arrives seconds before the EKF sets its origin
+            None => match self.fix_since {
+                Some(since) if now - since > NO_EKF_GRACE_S => NavSource::Gnss,
+                _ => NavSource::None,
+            },
+        }
+    }
+
+    /// Ready to navigate: the autopilot's EKF trusts its absolute position (GPS), or its
+    /// dead-reckoned one where the vehicle navigates on it: a sub (DVL) and a fixed-wing
+    /// (airspeed; ArduPlane flies on without GNSS, so a plane in a jammer can be tasked out
+    /// of it, and the readiness rule has a human judge the drifting position). A copter,
+    /// rover, boat or blimp without GNSS has no position its autopilot trusts. Tasks wait
+    /// until then.
+    pub fn has_position(&self, now: f64) -> bool {
+        match self.nav_source(now) {
+            NavSource::Gnss => true,
+            NavSource::DeadReckoning => {
+                matches!(self.kind, Some(Kind::Plane | Kind::Vtol))
+            }
+            NavSource::None => false,
+        }
+    }
+
+    fn push_event(&mut self, kind: &'static str, text: String) {
+        if self.events.len() == EVENTS_KEEP {
+            self.events.pop_front();
+        }
+        self.events.push_back(VehicleEvent { kind, text });
+    }
+
+    /// A reported time since boot: the boot instant at first; a reboot when it goes back, or
+    /// when the boot instant it implies jumps later than the recent reports put it (see
+    /// [`BOOT_JUMP_S`]).
+    fn observe_boot(&mut self, boot_ms: u64) {
+        let wall = clock::wall();
+        let mono = clock::mono();
+        let boot_s = boot_ms as f64 / 1000.0;
+        let booted = wall - boot_s;
+        let silent = self.boot_heard_mono.map_or(0.0, |t| (mono - t).max(0.0));
+        self.boot_heard_mono = Some(mono);
+        // the boot instant each report implies at the vehicle clock's own rate: a constant
+        // (plus the link's delay) until it reboots
+        let (rate, drift) = boot_rate(&self.boot_samples);
+        let implied_at = |m: f64, b: f64| m - b / rate;
+        let implied = implied_at(mono, boot_s);
+        let baseline = self
+            .boot_samples
+            .iter()
+            .map(|(m, b)| implied_at(*m, *b))
+            .fold(f64::INFINITY, f64::min);
+        let went_back = self
+            .boot_ms
+            .is_some_and(|before| boot_ms + REBOOT_SLACK_MS < before);
+        let jumped =
+            baseline.is_finite() && implied - baseline > BOOT_JUMP_S + drift * silent;
+        match self.boot_ms {
+            Some(before) if went_back || jumped => {
+                self.boot_epoch += 1;
+                // the boot instant before: as estimated then, or (a jump) the one the recent
+                // reports put it at, by the monotonic clock the jump was measured on
+                let booted_before = if went_back {
+                    self.booted_wall
+                } else {
+                    Some(booted - (implied - baseline))
+                };
+                self.booted_wall = Some(booted);
+                self.boot_ms = Some(boot_ms);
+                self.boot_samples.clear();
+                if self.reboots.len() == EVENTS_KEEP {
+                    self.reboots.pop_front();
+                }
+                self.reboots.push_back(Reboot {
+                    boot_ms_before: before,
+                    boot_ms,
+                    booted_wall: booted,
+                    booted_before_wall: booted_before,
+                });
+            }
+            Some(_) => self.boot_ms = Some(boot_ms),
+            None => {
+                self.boot_ms = Some(boot_ms);
+                self.booted_wall = Some(booted);
+            }
+        }
+        if self.boot_samples.back().is_none_or(|(m, _)| mono - m >= 1.0) {
+            self.boot_samples.push_back((mono, boot_s));
+        }
+        while self.boot_samples.len() > 1
+            && self
+                .boot_samples
+                .front()
+                .is_some_and(|(m, _)| mono - m > BOOT_RATE_WINDOW_S)
+        {
+            self.boot_samples.pop_front();
+        }
+    }
+
+    fn set_mode(&mut self, mav_type: apm::MavType, custom_mode: u32) {
+        self.custom_mode = Some(custom_mode);
+        let mode = mav::mode_name(mav_type, custom_mode);
+        if let Some(prev) = &self.mode
+            && *prev != mode
+        {
+            let text = format!("{prev} -> {mode}");
+            self.push_event("mode", text);
+            self.mode_since = Some(clock::wall());
+        }
+        self.mode = Some(mode);
+    }
+
+    /// A reported position (and the trail, one point a second at most).
+    fn set_position(&mut self, lat: f64, lon: f64, alt_msl: f64, alt_rel: Option<f64>, now: f64) {
+        // the jump check: where the previous position, carried along its velocity, puts this one
+        let wall = clock::wall();
+        self.nav_jump_m = match (self.nav_prev, self.vel_en) {
+            (Some(((plat, plon), pt)), vel) if wall > pt => {
+                let dt = wall - pt;
+                let [ve, vn] = vel.unwrap_or([0.0, 0.0]);
+                let (plat2, plon2) = (
+                    plat + vn * dt / 111_320.0,
+                    plon + ve * dt / (111_320.0 * plat.to_radians().cos().max(0.01)),
+                );
+                Some(crate::geo::haversine_m(plat2, plon2, lat, lon))
+            }
+            _ => self.nav_jump_m,
+        };
+        self.nav_prev = Some(((lat, lon), wall));
+        self.pos = Some((lat, lon));
+        self.seen.position = Some(clock::wall());
+        self.alt_rel = alt_rel.or(self.alt_rel);
+        self.alt_msl = Some(alt_msl);
+        if self.last_trail.is_none_or(|t| now - t > 1.0) {
+            self.last_trail = Some(now);
+            if self.trail.len() == TRAIL_KEEP {
+                self.trail.pop_front();
+            }
+            self.trail
+                .push_back([round(lon, 6), round(lat, 6), round(alt_msl, 1)]);
+            self.trail_count += 1;
+        }
+    }
+
+    /// Navigation readiness as a fact: the value and when the message it rests on arrived
+    /// (the latest navigation filter report when the vehicle sends one, else the GPS report).
+    /// None before either.
+    pub fn nav_ready_fact(&self, now: f64) -> Option<(bool, f64)> {
+        let t = self.nav_report_t()?;
+        Some((self.has_position(now), t))
+    }
+
+    /// The GPS receiver's fix type as a fact (GPS_RAW_INT, or 0 from HIGH_LATENCY2's GPS
+    /// failure flag), stamped when it was reported.
+    pub fn gps_fix_fact(&self) -> Option<(u8, f64)> {
+        self.seen.gps.map(|t| (self.gps_fix, t))
+    }
+
+    /// The circle a fixed wing flies on its own: in LOITER around the point it navigates
+    /// to, in RTL around its navigation target (home, or a rally point) once there. The
+    /// center is NAV_CONTROLLER_OUTPUT's target, reported in this mode and at most
+    /// [`NAV_TARGET_MAX_AGE_S`] ago; the radius WP_LOITER_RAD (RTL: RTL_RADIUS, WP_LOITER_RAD
+    /// when 0), no tighter than the airframe turns, plus the tolerance it is flown to. None
+    /// when not a fixed wing, in another mode, a radius or the center unknown or old, or not
+    /// on its circle yet (still flying to it). The engine trusts it only while the
+    /// position is on it, too.
+    pub fn loiter_circle(&self) -> Option<LoiterCircle> {
+        if !matches!(self.kind, Some(Kind::Plane | Kind::Vtol)) {
+            return None;
+        }
+        let center_t = self.seen.nav_target?;
+        let min_turn = self
+            .identity
+            .as_ref()
+            .and_then(|i| i.num("min_turn_radius_m"))
+            .unwrap_or(0.0);
+        let loiter = self.loiter_radius_m?.abs();
+        let center = self.nav_target?;
+        let (rtl, radius) = match self.mode.as_deref()? {
+            "LOITER" => (false, loiter),
+            "RTL" => {
+                let r = self.rtl_radius_m?;
+                (true, if r == 0.0 { loiter } else { r.abs() })
+            }
+            _ => return None,
+        };
+        let radius = radius.max(min_turn);
+        if radius <= 0.0 {
+            return None;
+        }
+        let r = radius + (radius * 0.4).max(60.0);
+        let (lat, lon) = self.pos?;
+        (crate::geo::haversine_m(lat, lon, center.0, center.1) <= r).then_some(LoiterCircle {
+            center,
+            radius_m: r,
+            rtl,
+            center_t,
+        })
+    }
+
+    /// Whether the navigation filter flags its GPS as glitching (EKF_STATUS_REPORT's
+    /// EKF_GPS_GLITCHING; on HIGH_LATENCY2, its GPS failure flag), stamped with that report.
+    /// ArduPilot keeps its absolute-position flag for seconds after GPS loss and while it
+    /// glitches, so this is the flag to read for a jammed or spoofed fix.
+    pub fn gps_glitch_fact(&self) -> Option<(bool, f64)> {
+        match self.nav_report()? {
+            NavReport::Ekf(f, t) => t.map(|t| (f.contains(apm::EkfStatusFlags::EKF_GPS_GLITCHING), t)),
+            NavReport::HighLatency(f, t) => {
+                t.map(|t| (f.contains(apm::HlFailureFlag::HL_FAILURE_FLAG_GPS), t))
+            }
+        }
+    }
+
+    /// The navigation source as a fact, stamped like [`Self::nav_ready_fact`].
+    pub fn nav_source_fact(&self, now: f64) -> Option<(NavSource, f64)> {
+        let t = self.nav_report_t()?;
+        Some((self.nav_source(now), t))
+    }
+
+    fn nav_report_t(&self) -> Option<f64> {
+        match self.nav_report() {
+            Some(NavReport::Ekf(_, t) | NavReport::HighLatency(_, t)) => t,
+            None => self.seen.gps,
+        }
+    }
+
+    /// The circle a fixed wing flies around home in RTL, m: RTL_RADIUS (its magnitude; the
+    /// sign is only the direction), or WP_LOITER_RAD when that is 0, as ArduPlane does; never
+    /// tighter than the airframe's minimum turn radius from the catalog (the L1 controller
+    /// widens a loiter it can't fly). The catalog figure alone until the parameters are read.
+    pub fn rtl_loiter_radius_m(&self) -> Option<f64> {
+        let min_turn = self
+            .identity
+            .as_ref()
+            .and_then(|i| i.num("min_turn_radius_m"))
+            .filter(|r| *r > 0.0);
+        let param = match (self.rtl_radius_m, self.loiter_radius_m) {
+            (Some(r), _) if r != 0.0 => Some(r.abs()),
+            (_, Some(l)) => Some(l.abs()),
+            _ => None,
+        };
+        match (param, min_turn) {
+            (Some(p), Some(m)) => Some(p.max(m)),
+            (p, m) => p.or(m),
+        }
+    }
+
+    pub fn airborne(&self) -> bool {
+        match (self.kind.and_then(Kind::airborne_alt), self.alt_rel) {
+            (Some(min), Some(alt)) => alt > min,
+            _ => false,
+        }
+    }
+
+    pub fn distance_to(&self, lat: f64, lon: f64) -> Option<f64> {
+        self.pos
+            .map(|(la, lo)| crate::geo::haversine_m(la, lo, lat, lon))
+    }
+
+    pub fn last_statustext(&self) -> Option<&str> {
+        self.statustext.back().map(|s| s.text.as_str())
+    }
+
+    pub fn snapshot(&self, uid: Uid, sysid: u8, link: LinkSnapshot, now: f64) -> VehicleSnapshot {
+        let r = |x: Option<f64>, n| x.map(|v| round(v, n));
+        VehicleSnapshot {
+            uid,
+            sysid,
+            identity: self.identity.clone(),
+            kind: self.kind,
+            mode: self.mode.clone(),
+            armed: self.armed,
+            position: self.pos.map(|(lat, lon)| [round(lon, 6), round(lat, 6)]),
+            alt_rel: r(self.alt_rel, 1),
+            alt_msl: r(self.alt_msl, 1),
+            roll: r(self.roll, 0),
+            pitch: r(self.pitch, 0),
+            heading: r(self.heading, 0),
+            yaw: r(self.yaw, 0),
+            tracking: self.tracking,
+            nav_bearing: self.nav_bearing,
+            nav_ready: self.has_position(now),
+            nav_source: self.nav_source(now),
+            groundspeed: r(self.groundspeed, 1),
+            airspeed: r(self.airspeed, 1),
+            battery_pct: self.battery_pct,
+            payload: self.payload(),
+            gps_fix: self.gps_fix,
+            satellites: self.satellites,
+            mission_seq: self.mission_seq,
+            home: self.home.map(|(lat, lon)| [round(lon, 6), round(lat, 6)]),
+            link,
+            statustext: self
+                .statustext
+                .iter()
+                .rev()
+                .take(3)
+                .rev()
+                .cloned()
+                .collect(),
+            estimate: None,
+        }
+    }
+}
+
+/// One vehicle in the world model. Its link's receive task is the only writer; readers
+/// (the push loop, the API, the task layer, later the rules layer) take the lock briefly
+/// to copy what they need. There is no global lock on the packet path.
+pub struct VehicleCell {
+    pub uid: Uid,
+    pub sysid: u8,
+    pub tx: Arc<dyn Transmit>,
+    stats: Arc<Mutex<LinkStats>>,
+    state: Mutex<Vehicle>,
+    /// every message from the vehicle, for the task layer waiting on ACKs and mission requests
+    events: broadcast::Sender<Arc<MavMessage>>,
+}
+
+impl VehicleCell {
+    pub fn new(
+        uid: Uid,
+        sysid: u8,
+        tx: Arc<dyn Transmit>,
+        stats: Arc<Mutex<LinkStats>>,
+        identity: Option<Arc<Identity>>,
+    ) -> VehicleCell {
+        let state = Vehicle {
+            identity,
+            ..Vehicle::default()
+        };
+        VehicleCell {
+            uid,
+            sysid,
+            tx,
+            stats,
+            state: Mutex::new(state),
+            events: broadcast::channel(256).0,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vehicle> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn read<R>(&self, f: impl FnOnce(&Vehicle) -> R) -> R {
+        f(&self.lock())
+    }
+
+    pub fn write<R>(&self, f: impl FnOnce(&mut Vehicle) -> R) -> R {
+        f(&mut self.lock())
+    }
+
+    /// A message from this vehicle (any component). `raw` is the frame as received.
+    pub fn handle(&self, msg: &MavMessage, raw: &[u8], now: f64) {
+        if let MavMessage::TIMESYNC(m) = msg
+            && m.tc1 != 0
+        {
+            self.stats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pong(m.ts1, now);
+        }
+        let notify = self.write(|v| {
+            v.heard_mono = Some(now);
+            v.apply(msg, raw, now)
+        });
+        if notify && self.events.receiver_count() > 0 {
+            let _ = self.events.send(Arc::new(msg.clone()));
+        }
+    }
+
+    /// Test hook: feed a message to the link statistics (the receive loop does this).
+    #[cfg(test)]
+    pub(crate) fn link_on_message(&self, msg: &MavMessage) {
+        self.stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .on_message(msg, clock::mono());
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<MavMessage>> {
+        self.events.subscribe()
+    }
+
+    pub fn send(&self, msg: &MavMessage) {
+        self.tx.send(msg);
+    }
+
+    pub fn link_snapshot(&self, now: f64) -> LinkSnapshot {
+        self.stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot(now)
+    }
+
+    /// The link emulator's view of this vehicle's link (`crate::emu`): the brief for the
+    /// fleet row and the figures for timing and the telemetry plan.
+    pub fn set_emu(
+        &self,
+        brief: Option<crate::emu::EmuBrief>,
+        figures: Option<crate::link::EmuLink>,
+    ) {
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        stats.emu = brief;
+        stats.emu_link = figures;
+    }
+
+    /// How long the task layer waits for this vehicle's answers (`crate::link::LinkTiming`).
+    pub fn link_timing(&self) -> crate::link::LinkTiming {
+        self.stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .timing()
+    }
+
+    /// Test hook: the link's measured round trip, as TIMESYNC would set it.
+    #[cfg(test)]
+    pub(crate) fn set_link_rtt(&self, rtt_s: f64, var_s: f64) {
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        stats.srtt_s = Some(rtt_s);
+        stats.rttvar_s = var_s;
+    }
+
+    pub fn link_counters(&self) -> LinkCounters {
+        self.stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .counters()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gpi(lat: f64, lon: f64, alt: f64, rel: f64) -> MavMessage {
+        MavMessage::GLOBAL_POSITION_INT(apm::GLOBAL_POSITION_INT_DATA {
+            lat: (lat * 1e7) as i32,
+            lon: (lon * 1e7) as i32,
+            alt: (alt * 1000.0) as i32,
+            relative_alt: (rel * 1000.0) as i32,
+            hdg: 9000,
+            ..Default::default()
+        })
+    }
+
+    /// Rules 30: every report of a GCS failsafe parameter is kept, whoever asked, with its boot:
+    /// a value, or that the vehicle has no such parameter; other parameters are not.
+    #[test]
+    fn failsafe_parameters_are_kept_as_reported() {
+        let value = |name: &str, v: f32| {
+            MavMessage::PARAM_VALUE(apm::PARAM_VALUE_DATA {
+                param_id: mav::char_array(name),
+                param_value: v,
+                ..Default::default()
+            })
+        };
+        let mut v = Vehicle::default();
+        v.apply(&value("FS_LONG_TIMEOUT", 60.0), &[], 0.0);
+        v.apply(&value("WP_LOITER_RAD", 150.0), &[], 0.0);
+        v.boot_epoch = 2;
+        v.apply(
+            &MavMessage::PARAM_ERROR(apm::PARAM_ERROR_DATA {
+                param_id: mav::char_array("Q_OPTIONS"),
+                error: apm::MavParamError::MAV_PARAM_ERROR_DOES_NOT_EXIST,
+                ..Default::default()
+            }),
+            &[],
+            0.0,
+        );
+        v.apply(
+            &MavMessage::PARAM_ERROR(apm::PARAM_ERROR_DATA {
+                param_id: mav::char_array("FS_LONG_ACTN"),
+                error: apm::MavParamError::MAV_PARAM_ERROR_PERMISSION_DENIED,
+                ..Default::default()
+            }),
+            &[],
+            0.0,
+        );
+        let r = &v.lost_link.reported;
+        assert_eq!(r.keys().copied().collect::<Vec<_>>(), ["FS_LONG_TIMEOUT", "Q_OPTIONS"]);
+        assert_eq!((r["FS_LONG_TIMEOUT"].value, r["FS_LONG_TIMEOUT"].epoch), (Some(60.0), 0));
+        assert_eq!((r["Q_OPTIONS"].value, r["Q_OPTIONS"].epoch), (None, 2));
+        assert_eq!(v.loiter_radius_m, Some(150.0));
+    }
+
+    /// Rules 25: a vehicle's own damage report (a stand-in's STATUSTEXT) becomes its damage fact
+    /// and one `damage` event per new kind of damage; a repeat only refreshes it, and an ordinary
+    /// text is an ordinary event.
+    #[test]
+    fn a_damage_report_is_a_fact_and_an_event_once() {
+        let text = |s: &str| {
+            MavMessage::STATUSTEXT(apm::STATUSTEXT_DATA {
+                severity: apm::MavSeverity::MAV_SEVERITY_CRITICAL,
+                text: mav::char_array(s),
+                ..Default::default()
+            })
+        };
+        let mut v = Vehicle::default();
+        v.apply(&text("DAMAGE mobility: propulsion lost"), &[], 0.0);
+        v.apply(&text("DAMAGE mobility: propulsion lost"), &[], 30.0);
+        let d = v.damage.expect("reported");
+        assert!(d.mobility && !d.payload_loss && d.last >= d.since);
+        v.apply(&text("DAMAGE payload_loss: payload out of action"), &[], 31.0);
+        v.apply(&text("PreArm: battery low"), &[], 32.0);
+        let kinds: Vec<(&str, bool)> = v.events.iter().map(|e| (e.kind, e.text.contains("reports"))).collect();
+        assert_eq!(kinds, vec![("damage", true), ("damage", true), ("statustext", false)]);
+        assert!(v.events[1].text.ends_with("reports propulsion lost and payload out of action"), "{}", v.events[1].text);
+        assert_eq!(DamageReport::parse("DAMAGE destroyed"), None);
+    }
+
+    #[test]
+    fn trail_one_point_a_second_capped() {
+        let mut v = Vehicle::default();
+        for i in 0..400 {
+            v.apply(&gpi(37.8, -122.4, 10.0, 5.0), &[], f64::from(i) * 0.5);
+        }
+        assert_eq!(v.trail_count, 134); // a point when more than 1 s has passed: every 1.5 s
+        assert_eq!(v.trail.len(), TRAIL_KEEP);
+        assert_eq!(v.home, Some((37.8, -122.4)));
+        assert_eq!(v.heading, Some(90.0));
+    }
+
+    #[test]
+    fn readiness_trusts_ekf() {
+        let mut v = Vehicle {
+            kind: Some(Kind::Copter),
+            ..Vehicle::default()
+        };
+        v.apply(&gpi(37.8, -122.4, -5.0, -5.0), &[], 0.0);
+        assert!(!v.has_position(0.0));
+        // no GPS fix at all, but the EKF has an absolute position: ready
+        v.ekf_flags = Some(apm::EkfStatusFlags::EKF_POS_HORIZ_ABS);
+        assert!(v.has_position(0.0));
+        v.ekf_flags =
+            Some(apm::EkfStatusFlags::EKF_POS_HORIZ_ABS | apm::EkfStatusFlags::EKF_CONST_POS_MODE);
+        assert!(!v.has_position(0.0));
+        // no EKF report: a grace period after the fix
+        let mut w = Vehicle {
+            kind: Some(Kind::Boat),
+            ..Vehicle::default()
+        };
+        w.apply(&gpi(37.8, -122.4, 0.0, 0.0), &[], 0.0);
+        let fix = MavMessage::GPS_RAW_INT(apm::GPS_RAW_INT_DATA {
+            fix_type: apm::GpsFixType::GPS_FIX_TYPE_3D_FIX,
+            ..Default::default()
+        });
+        w.apply(&fix, &[], 1.0);
+        assert!(!w.has_position(10.0));
+        assert!(w.has_position(16.5));
+    }
+
+    fn ekf(flags: apm::EkfStatusFlags) -> MavMessage {
+        MavMessage::EKF_STATUS_REPORT(apm::EKF_STATUS_REPORT_DATA {
+            flags,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn dead_reckoning_is_ready_for_subs_and_fixed_wing() {
+        use apm::EkfStatusFlags as E;
+        for (kind, ready) in [
+            (Kind::Plane, true),
+            (Kind::Vtol, true),
+            (Kind::Boat, false),
+            (Kind::Copter, false),
+            (Kind::Ugv, false),
+            (Kind::Blimp, false),
+        ] {
+            let mut v = Vehicle {
+                kind: Some(kind),
+                ..Vehicle::default()
+            };
+            v.apply(&gpi(37.8, -122.4, -5.0, -5.0), &[], 0.0);
+            v.apply(&ekf(E::EKF_POS_HORIZ_REL | E::EKF_ATTITUDE), &[], 0.0);
+            assert_eq!(v.nav_source(0.0), NavSource::DeadReckoning, "{kind:?}");
+            assert_eq!(v.has_position(0.0), ready, "{kind:?}");
+            v.apply(&ekf(E::EKF_POS_HORIZ_REL | E::EKF_POS_HORIZ_ABS), &[], 0.0);
+            assert_eq!(v.nav_source(0.0), NavSource::Gnss);
+            assert!(v.has_position(0.0));
+        }
+    }
+
+    #[test]
+    fn high_latency2_without_its_gps_failure_flag_is_a_fresh_3d_fix() {
+        let mut v = Vehicle {
+            kind: Some(Kind::Boat),
+            mav_type: Some(apm::MavType::MAV_TYPE_SURFACE_BOAT),
+            ..Vehicle::default()
+        };
+        let hl2 = |failure_flags| {
+            MavMessage::HIGH_LATENCY2(apm::HIGH_LATENCY2_DATA {
+                latitude: 378_010_000,
+                longitude: -1_224_020_000,
+                custom_mode: 10, // AUTO
+                failure_flags,
+                mavtype: apm::MavType::MAV_TYPE_SURFACE_BOAT,
+                ..Default::default()
+            })
+        };
+        // no fix type in HIGH_LATENCY2: without the failure flag, a 3D fix, said so
+        v.apply(&hl2(apm::HlFailureFlag::empty()), &[], 0.0);
+        assert_eq!(v.gps_fix_fact().map(|f| f.0), Some(3));
+        assert!(v.gps_fix_hl2);
+        // with it, no fix
+        v.apply(&hl2(apm::HlFailureFlag::HL_FAILURE_FLAG_GPS), &[], 5.0);
+        assert_eq!(v.gps_fix_fact().map(|f| f.0), Some(0));
+        // the receiver's own report takes over
+        let fix = MavMessage::GPS_RAW_INT(apm::GPS_RAW_INT_DATA {
+            fix_type: apm::GpsFixType::GPS_FIX_TYPE_3D_FIX,
+            satellites_visible: 9,
+            ..Default::default()
+        });
+        v.apply(&fix, &[], 6.0);
+        assert!(!v.gps_fix_hl2);
+        assert_eq!(v.gps_fix_fact().map(|f| f.0), Some(3));
+    }
+
+
+    #[test]
+    fn rtl_circle_from_params_then_catalog() {
+        let ident = |r: f64| {
+            let m = serde_json::json!({"min_turn_radius_m": r});
+            Some(Arc::new(Identity::from_manifest(
+                m.as_object().expect("object"),
+            )))
+        };
+        let mut v = Vehicle {
+            kind: Some(Kind::Plane),
+            identity: ident(3_000.0),
+            ..Vehicle::default()
+        };
+        assert_eq!(v.rtl_loiter_radius_m(), Some(3_000.0)); // parameters not read yet
+        v.apply(&param("RTL_RADIUS", 0.0), &[], 0.0);
+        assert_eq!(v.rtl_loiter_radius_m(), Some(3_000.0)); // 0: waits for WP_LOITER_RAD
+        v.apply(&param("WP_LOITER_RAD", 3_500.0), &[], 0.0);
+        assert_eq!(v.rtl_loiter_radius_m(), Some(3_500.0));
+        v.apply(&param("RTL_RADIUS", -9_000.0), &[], 0.0); // negative: counter-clockwise
+        assert_eq!(v.rtl_loiter_radius_m(), Some(9_000.0));
+        // never tighter than the airframe can turn
+        v.identity = ident(12_000.0);
+        assert_eq!(v.rtl_loiter_radius_m(), Some(12_000.0));
+        // a SITL plane: no catalog turn figure, plane.parm's 150 m
+        let mut w = Vehicle {
+            kind: Some(Kind::Plane),
+            ..Vehicle::default()
+        };
+        assert_eq!(w.rtl_loiter_radius_m(), None);
+        w.apply(&param("RTL_RADIUS", 0.0), &[], 0.0);
+        w.apply(&param("WP_LOITER_RAD", 150.0), &[], 0.0);
+        assert_eq!(w.rtl_loiter_radius_m(), Some(150.0));
+    }
+
+    fn param(id: &str, value: f32) -> MavMessage {
+        MavMessage::PARAM_VALUE(apm::PARAM_VALUE_DATA {
+            param_value: value,
+            param_id: mav::char_array(id),
+            ..Default::default()
+        })
+    }
+}

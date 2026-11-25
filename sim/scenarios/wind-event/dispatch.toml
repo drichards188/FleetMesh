@@ -1,0 +1,289 @@
+# wind-event: one hub, forty drones, a gust ramp through the drone limits. Illustrative only.
+
+[dispatch]
+tick_s = 10
+max_range_frac = 0.7
+hold_reassign_s = 120
+max_proposals_per_min = 60
+
+[observations.busy]
+doorstep = 0.2
+kerb = 0.1
+
+[demand]
+rate_per_min = 6.0
+from_s = 30
+hubs = ["hub-crissy"]
+zones = ["dz-wind-01", "dz-wind-02", "dz-wind-03", "dz-wind-04", "dz-wind-05", "dz-wind-06", "dz-wind-07", "dz-wind-08", "dz-wind-09", "dz-wind-10", "dz-wind-11", "dz-wind-12", "dz-wind-13", "dz-wind-14", "dz-wind-15", "dz-wind-16", "dz-wind-17", "dz-wind-18", "dz-wind-19", "dz-wind-20", "dz-wind-21", "dz-wind-22", "dz-wind-23", "dz-wind-24", "dz-wind-25", "dz-wind-26", "dz-wind-27", "dz-wind-28", "dz-wind-29", "dz-wind-30", "dz-crissy-pad"]
+mass_kg = [0.2, 2.4]
+priority_mix = [0.05, 0.60, 0.28, 0.07]
+due_s = 1500
+
+[[hub]]
+id = "hub-crissy"
+name = "Crissy Field hub"
+lon = -122.446
+lat = 37.8068
+radius_m = 90
+pads = 40
+packs = 40
+
+[[dropzone]]
+id = "dz-wind-01"
+kind = "doorstep"
+lon = -122.4308
+lat = 37.80011
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-02"
+kind = "kerb"
+lon = -122.47098
+lat = 37.80998
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-03"
+kind = "locker"
+lon = -122.46408
+lat = 37.79989
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-04"
+kind = "doorstep"
+lon = -122.44399
+lat = 37.80247
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-05"
+kind = "kerb"
+lon = -122.43375
+lat = 37.80117
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-06"
+kind = "locker"
+lon = -122.43074
+lat = 37.80217
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-07"
+kind = "doorstep"
+lon = -122.44615
+lat = 37.80922
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-08"
+kind = "kerb"
+lon = -122.44253
+lat = 37.80912
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-09"
+kind = "locker"
+lon = -122.44155
+lat = 37.79906
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-10"
+kind = "doorstep"
+lon = -122.4341
+lat = 37.80528
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-11"
+kind = "kerb"
+lon = -122.45864
+lat = 37.80069
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-12"
+kind = "locker"
+lon = -122.43546
+lat = 37.8052
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-13"
+kind = "doorstep"
+lon = -122.43167
+lat = 37.8074
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-14"
+kind = "kerb"
+lon = -122.43067
+lat = 37.80501
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-15"
+kind = "locker"
+lon = -122.44197
+lat = 37.80554
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-16"
+kind = "doorstep"
+lon = -122.46089
+lat = 37.8095
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-17"
+kind = "kerb"
+lon = -122.45856
+lat = 37.80748
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-18"
+kind = "locker"
+lon = -122.43095
+lat = 37.80599
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-19"
+kind = "doorstep"
+lon = -122.46588
+lat = 37.80799
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-20"
+kind = "kerb"
+lon = -122.4433
+lat = 37.80063
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-21"
+kind = "locker"
+lon = -122.46989
+lat = 37.80462
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-22"
+kind = "doorstep"
+lon = -122.47061
+lat = 37.80914
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-23"
+kind = "kerb"
+lon = -122.45023
+lat = 37.80445
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-24"
+kind = "locker"
+lon = -122.45439
+lat = 37.8061
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-25"
+kind = "doorstep"
+lon = -122.43259
+lat = 37.80203
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-26"
+kind = "kerb"
+lon = -122.45593
+lat = 37.8052
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-27"
+kind = "locker"
+lon = -122.45922
+lat = 37.80535
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-28"
+kind = "doorstep"
+lon = -122.44865
+lat = 37.80348
+radius_m = 4
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-wind-29"
+kind = "kerb"
+lon = -122.44305
+lat = 37.80457
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-wind-30"
+kind = "locker"
+lon = -122.46821
+lat = 37.80996
+radius_m = 4
+surface = "land"
+
+[[dropzone]]
+id = "dz-crissy-pad"
+kind = "pad"
+lon = -122.4462
+lat = 37.807
+radius_m = 3
+surface = "land"
+hub = "hub-crissy"
+

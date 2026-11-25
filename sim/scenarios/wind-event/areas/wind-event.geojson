@@ -1,0 +1,41 @@
+{
+ "type": "FeatureCollection",
+ "name": "wind-event",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "gg-ops",
+    "name": "Golden Gate operating area",
+    "kind": "approved"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.53,
+       37.77
+      ],
+      [
+       -122.39,
+       37.77
+      ],
+      [
+       -122.39,
+       37.88
+      ],
+      [
+       -122.53,
+       37.88
+      ],
+      [
+       -122.53,
+       37.77
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,22 @@
+title = "Coastal boat leg (11 vehicles)"
+
+[[unit]]
+platform = "delivery_boat"
+count = 4
+sim = "standin"
+spacing_m = 30
+spawn = [37.8112, -122.4095, 0, 90]
+
+[[unit]]
+platform = "delivery_drone"
+count = 6
+sim = "standin"
+spacing_m = 5
+spawn = [37.8089, -122.4105, 3, 0]
+
+[[unit]]
+platform = "delivery_plane"
+count = 1
+sim = "standin"
+spacing_m = 40
+spawn = [37.8092, -122.4110, 3, 90]

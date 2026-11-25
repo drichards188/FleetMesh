@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fleetmesh-weather",
+    "crates/fleetmesh-linkemu",
+    "crates/fleetmesh-space",
+    "crates/fleetmesh-standins",
+    "crates/fleetmesh-decide",
+    "crates/fleetmesh-auth",
+    "crates/fleetmesh-bridge",
+    "crates/fleetmesh-headless",
+]
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+# `fleetmesh_headless` is set only by crates/fleetmesh-headless's build script, which compiles the
+# bridge's files by path: the bridge's own build never has it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fleetmesh_headless)'] }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+# Password hashing is deliberately slow; unoptimized it is slower still, and the bridge's
+# and the auth crate's tests hash many passwords.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

@@ -1,0 +1,114 @@
+{
+ "type": "FeatureCollection",
+ "name": "harbour-city",
+ "description": "Illustrative areas for the harbour-city scenario.",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "gg-ops",
+    "name": "Golden Gate operating area",
+    "kind": "approved"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.53,
+       37.77
+      ],
+      [
+       -122.39,
+       37.77
+      ],
+      [
+       -122.39,
+       37.88
+      ],
+      [
+       -122.53,
+       37.88
+      ],
+      [
+       -122.53,
+       37.77
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "alcatraz",
+    "name": "Alcatraz Island",
+    "kind": "no_go"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.42698,
+       37.82356
+      ],
+      [
+       -122.41902,
+       37.82356
+      ],
+      [
+       -122.41902,
+       37.82984
+      ],
+      [
+       -122.42698,
+       37.82984
+      ],
+      [
+       -122.42698,
+       37.82356
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "id": "street-fair",
+    "name": "Street fair on Marina Green",
+    "kind": "restricted",
+    "valid_from": "2026-06-14T17:10:00Z",
+    "valid_until": "2026-06-14T17:40:00Z"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -122.44400134525775,
+       37.80422371541502
+      ],
+      [
+       -122.43899865474226,
+       37.80422371541502
+      ],
+      [
+       -122.43899865474226,
+       37.808176284584974
+      ],
+      [
+       -122.44400134525775,
+       37.808176284584974
+      ],
+      [
+       -122.44400134525775,
+       37.80422371541502
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

@@ -1,0 +1,14 @@
+# A minimal scenario for the scenario loader's tests: one operator, one copter, one orbit order.
+title = "An orbit order"
+invariant = "capability"
+attack = "none: the fixture is a plain orbit order"
+expect = "dispatched"
+end_s = 20
+
+[[operator]]
+id = "op-1"
+
+[[vehicle]]
+uid = "copter-1"
+platform = "delivery_drone"
+at = [-122.4850, 37.8100]

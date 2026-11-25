@@ -1,0 +1,778 @@
+"""One isolated FleetMesh stack for a run: link emulator, bridge, stand-ins (and the
+console in study mode), on a port block of its own, with every log in the run directory.
+
+The fleet manifest is planned with `sim/swarm.py`'s own `plan()` (so callsigns, uids and
+sysids are exactly what `make up` would give) but written into the run directory, not
+`sim/run/`, so stacks never share files. Stand-ins only: a fleet entry that needs SITL is
+refused. Every process is started in its own session and stopped by PID (TERM, then KILL),
+and the PIDs are written to `pids.json` so a crashed runner's processes can be stopped with
+`python -m eval.run kill <run-dir>`.
+
+Every run starts as a fresh station: nothing of an earlier run on the same port block is
+carried into it, neither open intents (`FLEETMESH_RESUME=0`) nor lost-link values owed back
+(the bridge's restore pointer for the port is removed before the bridge starts and after it
+stops; `Stack.last_run_pointer`).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+from typing import Any
+
+from . import REPO
+from .bridge import Bridge
+from .ports import PortBlock
+from .spec import Spec
+
+OPERATORS = ["op-1", "op-planner", "op-auto", "op-study"]
+AGENTS = ["agent-planner", "agent-model"]
+SUPERVISOR = "op-1"
+PROPOSER_OPERATOR = "op-planner"
+AUTO_OPERATOR = "op-auto"
+# the study's participant (eval/proxy.py `Participant`): signs in at the console themselves
+PARTICIPANT_OPERATOR = "op-study"
+
+# How a stack's operators prove who they are (rules 8). `dev`: the bridge believes the ids
+# requests name (FLEETMESH_AUTH=dev, the bridge's default), logged as dev: the proxy batches,
+# where every decider is a script. `credentials`: a run-local credential file, each operator
+# with a fresh random passphrase, each agent with a fresh key; the participant's is a person's
+# (printed for them), every other operator's is marked scripted (harness-held, logged in by the
+# runner: `auth: scripted`, never counted as a person's). The only mode whose decisions count
+# as people's (study mode), and then only the participant's.
+AUTH_MODES = ("dev", "credentials")
+
+
+def study_credentials(participant: str) -> Path:
+    """Where a study participant's own credential file lives by default (outside the
+    repository): `$FLEETMESH_STUDY_DIR/<participant>.json`, else `~/.config/fleetmesh/study/`."""
+    base = os.environ.get("FLEETMESH_STUDY_DIR") or str(Path.home() / ".config" / "fleetmesh" / "study")
+    return Path(base) / f"{participant}.json"
+
+
+def check_participant(path: Path | None, password_step_up: str | None) -> None:
+    """Rules 10: a study needs its participant's passkey (`op-study` in their own credential
+    file, a person's credential, with at least one passkey), unless the explicit override
+    allows password step-ups (`password_step_up`, its reason; logged by the bridge; such a
+    run is never evidence). Refused before anything starts, saying what to do."""
+    if path is None:
+        if password_step_up:
+            return
+        raise StackError(
+            "a study needs the participant's passkey: enroll them first (`python -m eval.run enroll "
+            "--participant <id>`), or allow password step-ups explicitly with --password-step-up "
+            "<reason> (a pilot: never evidence)"
+        )
+    try:
+        f = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as e:
+        raise StackError(f"{path}: {e} (enroll the participant first: python -m eval.run enroll)") from None
+    entry = (f.get("operators") or {}).get(PARTICIPANT_OPERATOR)
+    if not entry:
+        raise StackError(f"{path} holds no {PARTICIPANT_OPERATOR}: enroll the participant first (python -m eval.run enroll)")
+    if entry.get("scripted"):
+        raise StackError(f"{path}: {PARTICIPANT_OPERATOR} is marked scripted, a harness's credential, not a person's")
+    if not entry.get("passkeys") and not password_step_up:
+        raise StackError(
+            f"{path}: {PARTICIPANT_OPERATOR} has no passkey: the study refuses to start (enroll one: "
+            "python -m eval.run enroll; or allow password step-ups explicitly with --password-step-up "
+            "<reason>, a pilot that is never evidence)"
+        )
+
+
+def passphrase() -> str:
+    """A fresh random passphrase someone can type: five groups of five letters and digits
+    (29 characters, about 129 bits)."""
+    alphabet = "abcdefghijkmnpqrstuvwxyz23456789"
+    return "-".join("".join(secrets.choice(alphabet) for _ in range(5)) for _ in range(5))
+
+
+class StackError(RuntimeError):
+    pass
+
+
+def _binary(name: str) -> Path:
+    p = REPO / "target" / "release" / name
+    if not p.exists():
+        raise StackError(f"missing {p}: run `make build` first")
+    return p
+
+
+def _swarm():
+    """`sim/swarm.py` as a module (its planner), without running its CLI."""
+    spec = importlib.util.spec_from_file_location("fleetmesh_swarm", REPO / "sim" / "swarm.py")
+    if spec is None or spec.loader is None:
+        raise StackError("sim/swarm.py not importable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def plan_fleet(fleet_path: Path, vehicle_base: int) -> tuple[list[dict], dict]:
+    """The vehicles of a fleet file as swarm.py plans them, every one a stand-in."""
+    swarm = _swarm()
+    platforms = swarm.load_platforms()
+    vehicles = swarm.plan(swarm.load_fleet(str(fleet_path)), platforms)
+    for i, v in enumerate(vehicles):
+        v["uid"] = i + 1
+        v["sysid"] = i % 250 + 1
+        v["port"] = vehicle_base + i
+    sitl = [v["callsign"] for v in vehicles if v["sim"] != "standin"]
+    if sitl:
+        raise StackError(
+            f"{fleet_path}: {', '.join(sitl)} would need SITL; evaluation fleets are stand-ins "
+            "only (add `sim = \"standin\"` to the unit)"
+        )
+    if len(vehicles) > 90:
+        raise StackError(f"{fleet_path}: {len(vehicles)} vehicles exceed a port block (90)")
+    return vehicles, platforms
+
+
+class Proc:
+    def __init__(self, name: str, popen: subprocess.Popen, log: Path):
+        self.name = name
+        self.popen = popen
+        self.log = log
+
+    @property
+    def pid(self) -> int:
+        return self.popen.pid
+
+    def alive(self) -> bool:
+        return self.popen.poll() is None
+
+
+def toml_value(v: Any) -> str:
+    """A TOML value for the event tables this module writes (strings, numbers, booleans,
+    lists, inline tables)."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{k} = {toml_value(x)}" for k, x in v.items()) + " }"
+    raise TypeError(f"no TOML for {v!r}")
+
+
+def event_toml(e: dict[str, Any]) -> str:
+    return "[[event]]\n" + "".join(f"{k} = {toml_value(v)}\n" for k, v in e.items()) + "\n"
+
+
+class Stack:
+    """The stack's scenario clocks share one origin: `origin = stand-ins start + origin_s`.
+    The spec's GNSS events (`at_s`, read once by the stand-in engine at its start) are
+    written shifted by `origin_s`; its link events (`at_s` on the emulator's clock) are
+    shifted by the emulator's offset to the origin once the stand-ins have started (the
+    emulator re-reads the file); the storyline's `at_s`
+    counts from it. The fleet must be ready before the origin, or the run fails."""
+
+    def __init__(
+        self,
+        spec: Spec,
+        seed: int,
+        block: PortBlock,
+        run_dir: Path,
+        run_id: str,
+        tidewater_url: str | None = None,
+        web: bool = False,
+        auth: str = "dev",
+        participant_credentials: Path | None = None,
+        password_step_up: str | None = None,
+    ):
+        if auth not in AUTH_MODES:
+            raise StackError(f"auth {auth!r}: one of {', '.join(AUTH_MODES)}")
+        self.auth = auth
+        # rules 10, a study: the participant's own credential file (their password hash and
+        # passkeys, `op-study`), copied into this run's file; or the explicit override that
+        # lets them step up with a password (logged by the bridge; the run is then no evidence)
+        self.participant_credentials = participant_credentials
+        self.password_step_up = password_step_up
+        self.study = participant_credentials is not None or password_step_up is not None
+        if self.study:
+            if auth != "credentials":
+                raise StackError("a study authenticates with credentials")
+            check_participant(participant_credentials, password_step_up)
+        # credentials run: each operator's passphrase and each agent's key, in memory only
+        self.passwords: dict[str, str] = {}
+        self.agent_keys: dict[str, str] = {}
+        self.spec = spec
+        self.seed = seed
+        self.block = block
+        self.run_dir = run_dir
+        self.run_id = run_id
+        self.tidewater_url = tidewater_url
+        self.web = web
+        self.procs: list[Proc] = []
+        self.vehicles: list[dict] = []
+        self.bridge = Bridge(f"http://127.0.0.1:{block.http}")
+        self.audit_src = REPO / "logs" / "audit" / f"{run_id}.jsonl"
+        self.started_at: float | None = None
+        self.emu_start: float | None = None
+        self.standins_start: float | None = None
+        self.origin: float | None = None
+        self.notes: list[str] = []
+        self.spec_events: list[dict[str, Any]] = []
+        # what the port's restore pointer named before the bridge started and when it
+        # stopped, each removed (`last_run_pointer`); run.json keeps it
+        self.restore_carry: dict[str, Any] = {}
+
+    # ---- files ---------------------------------------------------------------------------
+
+    @property
+    def fleet_json(self) -> Path:
+        return self.run_dir / "fleet.json"
+
+    @property
+    def bridge_fleet_json(self) -> Path:
+        return self.run_dir / "bridge-fleet.json"
+
+    @property
+    def standins_json(self) -> Path:
+        return self.run_dir / "standins.json"
+
+    @property
+    def last_run_pointer(self) -> Path:
+        """The bridge's rules-6 restore pointer for this stack's HTTP port, beside the audit
+        logs (`Settings::last_run` in crates/fleetmesh-bridge/src/decision/mod.rs:
+        `<FLEETMESH_ROOT>/logs/audit/.last-run-<FLEETMESH_HTTP_PORT>`, kept across clean stops). A
+        bridge names its audit log there at start, and the next bridge on the port carries
+        over the lost-link values that log still owed back, or, if it can't read the log,
+        raises a High `restore:carry` inbox alert for its whole run. Neither belongs in an
+        evaluation run: its vehicles are new stand-ins, owed nothing by an earlier run, and an
+        earlier run's log has been moved into that run's directory, so the pointer names a
+        missing file (murmur-kvb). So no pointer exists for the port when the bridge starts,
+        and the bridge's own is removed when it stops (`clear_last_run`)."""
+        return self.audit_src.parent / f".last-run-{self.block.http}"
+
+    def clear_last_run(self, when: str) -> None:
+        """Remove the port's restore pointer, recording what it named under `when`
+        (`before_start`: what an earlier run, or one whose runner died before its teardown,
+        left; `at_stop`: this run's own, naming the log just moved into the run directory).
+        A pointer that can't be removed before the start fails the run; at the stop it is
+        only recorded (the next run's start removes it or fails)."""
+        p = self.last_run_pointer
+        rec: dict[str, Any] = {"pointer": str(p), "found": p.exists() or p.is_symlink()}
+        if rec["found"]:
+            try:
+                named = p.read_text().strip()
+                rec.update(named=named, ours=named == str(self.audit_src), log_present=Path(named).is_file())
+            except (OSError, ValueError) as e:  # ValueError: not UTF-8 (tampered with)
+                rec["unreadable"] = str(e)
+            try:
+                p.unlink(missing_ok=True)
+                rec["removed"] = True
+            except OSError as e:
+                rec.update(removed=False, error=str(e))
+        self.restore_carry[when] = rec
+        if when == "before_start" and rec.get("removed") is False:
+            raise StackError(
+                f"{p} can't be removed ({rec['error']}): the bridge would read another run's "
+                "restore pointer (rules 6)"
+            )
+
+    @property
+    def credentials_file(self) -> Path:
+        """A credentials run's own credential file (hashes and key digests only; removed when
+        the stack stops)."""
+        return self.run_dir / "credentials.json"
+
+    def write_credentials(self) -> None:
+        """Every operator with a fresh passphrase and every agent with a fresh key, through
+        the `fleetmesh-auth` CLI as a script would (passwords on stdin); kept in memory only.
+        Every operator but the participant is marked scripted: the runner holds their
+        credential, so their sessions are no person's."""
+        tool = str(_binary("fleetmesh-auth"))
+        f = str(self.credentials_file)
+        for op in OPERATORS:
+            if op == PARTICIPANT_OPERATOR and self.participant_credentials is not None:
+                # rules 10: the participant's own credential (their password, their passkeys)
+                r = subprocess.run(
+                    [tool, "--file", f, "import", op, "--from", str(self.participant_credentials)],
+                    capture_output=True,
+                    text=True,
+                )
+                if r.returncode != 0:
+                    raise StackError(f"fleetmesh-auth import {op}: {r.stderr.strip()}")
+                continue
+            pw = passphrase()
+            args = [tool, "--file", f, "add", op] + ([] if op == PARTICIPANT_OPERATOR else ["--scripted"])
+            r = subprocess.run(args, input=pw + "\n", capture_output=True, text=True)
+            if r.returncode != 0:
+                raise StackError(f"fleetmesh-auth add {op}: {r.stderr.strip()}")
+            self.passwords[op] = pw
+        for agent in AGENTS:
+            r = subprocess.run([tool, "--file", f, "agent-add", agent], capture_output=True, text=True)
+            if r.returncode != 0 or not r.stdout.strip():
+                raise StackError(f"fleetmesh-auth agent-add {agent}: {r.stderr.strip()}")
+            self.agent_keys[agent] = r.stdout.strip()
+
+    @property
+    def events_file(self) -> Path:
+        """The run's own scripted events (linkemu `--scenario`, stand-ins `FLEETMESH_EVENTS`),
+        on the run's origin. Storyline `link` steps append to it while the run goes; the
+        emulator re-reads it within a second of a change."""
+        return self.run_dir / "events.toml"
+
+    @property
+    def emu_url(self) -> str:
+        return f"http://127.0.0.1:{self.block.emu}"
+
+    def load_spec_events(self) -> None:
+        if not self.spec.events:
+            return
+        raw = tomllib.loads(self.spec.events.read_text())
+        self.spec_events = [dict(e) for e in raw.get("event", [])]
+
+    def gnss_events(self) -> list[dict[str, Any]]:
+        """The spec's GNSS effects, `at_s` shifted onto the origin (the stand-in engine
+        counts from its own start, `origin_s` before the origin)."""
+        out = []
+        for e in self.spec_events:
+            if "gnss" not in e:
+                continue
+            g = {k: v for k, v in e.items() if k not in ("loss", "cut", "extra_latency_ms", "dir")}
+            if "at_s" in g:
+                g["at_s"] = round(float(g["at_s"]) + self.spec.origin_s, 3)
+            out.append(g)
+        return out
+
+    def link_events(self) -> list[dict[str, Any]]:
+        """The spec's link effects, `at_s` shifted onto the origin on the emulator's clock."""
+        assert self.origin is not None and self.emu_start is not None
+        out = []
+        for e in self.spec_events:
+            if not (e.get("cut") or e.get("loss") is not None or e.get("extra_latency_ms") or ("circle" in e and "gnss" not in e)):
+                continue
+            c = {k: v for k, v in e.items() if k != "gnss"}
+            if "at_s" in c:
+                c["at_s"] = round(float(c["at_s"]) + (self.origin - self.emu_start), 3)
+            out.append(c)
+        return out
+
+    def write_events(self, with_links: bool) -> None:
+        head = (
+            "# The run's scripted events on its origin (eval/stack.py): the spec's GNSS events\n"
+            "# shifted for the stand-in engine, its link events for the emulator, then storyline\n"
+            "# link steps.\n\n"
+        )
+        body = "".join(event_toml(e) for e in self.gnss_events())
+        if with_links:
+            body += "".join(event_toml(e) for e in self.link_events())
+        self.events_file.write_text(head + body)
+
+    def write_manifests(self) -> None:
+        vehicles, platforms = plan_fleet(self.spec.fleet, self.block.vehicle_base)
+        self.vehicles = vehicles
+        self.fleet_json.write_text(json.dumps({"vehicles": vehicles}, indent=1))
+        self.standins_json.write_text(
+            json.dumps(
+                {
+                    "bridge_host": "127.0.0.1",
+                    "vehicles": [{**v, "spec": platforms[v["platform"]]} for v in vehicles],
+                }
+            )
+        )
+
+    def _env(self, **extra: str) -> dict[str, str]:
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("FLEETMESH_") or k in ("FLEETMESH_SPACE_CACHE",)
+        }
+        env.update(
+            {
+                "PYTHONUNBUFFERED": "1",
+                "FLEETMESH_ROOT": str(REPO),
+                "FLEETMESH_AT": self.spec.at,
+                "FLEETMESH_RATE": str(self.spec.rate),
+            }
+        )
+        if self.tidewater_url:
+            env["FLEETMESH_TIDEWATER_URL"] = self.tidewater_url
+        env.update(extra)
+        return env
+
+    def _spawn(self, name: str, cmd: list[str], env: dict[str, str], cwd: Path | None = None) -> Proc:
+        log = self.run_dir / f"{name}.log"
+        f = open(log, "w")
+        try:
+            p = subprocess.Popen(
+                cmd,
+                cwd=str(cwd or REPO),
+                env=env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            f.close()
+        proc = Proc(name, p, log)
+        self.procs.append(proc)
+        self.write_pids()
+        return proc
+
+    def write_pids(self) -> None:
+        (self.run_dir / "pids.json").write_text(
+            json.dumps({p.name: p.pid for p in self.procs if p.alive()}, indent=1)
+        )
+
+    # ---- start ---------------------------------------------------------------------------
+
+    def start(self) -> None:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.started_at = time.time()
+        self.write_manifests()
+        self.load_spec_events()
+        self.write_events(with_links=False)
+        b = self.block
+        # the emulator first: it binds every vehicle port before any vehicle sends
+        emu_cmd = [
+            str(_binary("fleetmesh-linkemu")),
+            "--fleet", str(self.fleet_json),
+            "--config", str(REPO / "sim" / "links.toml"),
+            "--vehicle-base", str(b.vehicle_base),
+            "--bridge-base", str(b.bridge_base),
+            "--manifest-out", str(self.bridge_fleet_json),
+            "--http", f"127.0.0.1:{b.emu}",
+            "--log-interval", "30",
+            "--seed", str(self.seed),
+            "--no-space",
+            "--scenario", str(self.events_file),
+        ]
+        emu = self._spawn("linkemu", emu_cmd, self._env())
+        self._wait_http(f"http://127.0.0.1:{b.emu}/health", emu, 60)
+        summary = Bridge(self.emu_url).try_get("/stats/summary") or {}
+        self.emu_start = time.time() - float(summary.get("uptime_s") or 0.0)
+        if not self.bridge_fleet_json.exists():
+            raise StackError("linkemu wrote no bridge manifest")
+
+        bridge_env = {
+            "FLEETMESH_BASE_PORT": str(b.bridge_base),
+            "FLEETMESH_HTTP_PORT": str(b.http),
+            "FLEETMESH_FLEET_MANIFEST": str(self.bridge_fleet_json),
+            "FLEETMESH_LINKEMU_URL": f"http://127.0.0.1:{b.emu}",
+            "FLEETMESH_POLICY": str(self.spec.policy),
+            "FLEETMESH_AREAS": str(self.spec.areas),
+            "FLEETMESH_RUN_ID": self.run_id,
+            # every run starts clean: never carry another run's open intents over (port blocks
+            # are reused, and with them the bridge's resume pointer)
+            "FLEETMESH_RESUME": "0",
+            # the console's origin (study mode), the only one a browser may change things from
+            "FLEETMESH_WEB_PORT": str(b.web),
+            # the run-time anchors go with the run: the replay checks the log against them
+            "FLEETMESH_ANCHOR_DIR": str(self.run_dir),
+        }
+        if self.auth == "credentials":
+            self.write_credentials()
+            bridge_env["FLEETMESH_AUTH"] = "credentials"
+            bridge_env["FLEETMESH_CREDENTIALS"] = str(self.credentials_file)
+            if self.study:
+                # rules 10: the participant's passkey at every step-up (the bridge refuses to
+                # start without one), unless the explicit override says otherwise
+                bridge_env["FLEETMESH_STUDY"] = PARTICIPANT_OPERATOR
+                if self.password_step_up:
+                    bridge_env["FLEETMESH_STUDY_PASSWORD_STEP_UP"] = self.password_step_up
+        else:
+            # ids asserted by header, logged as dev: never evidence about people
+            bridge_env.update(
+                {
+                    "FLEETMESH_AUTH": "dev",
+                    "FLEETMESH_OPERATORS": ",".join(OPERATORS),
+                    "FLEETMESH_AGENTS": ",".join(AGENTS),
+                }
+            )
+        # nor lost-link values another run owed back (rules 6): no restore pointer for the port
+        self.clear_last_run("before_start")
+        bridge = self._spawn("bridge", [str(_binary("fleetmesh-bridge"))], self._env(**bridge_env))
+        self._wait_http(f"http://127.0.0.1:{b.http}/api/stats", bridge, 60)
+        if self.auth == "credentials":
+            # the scripted operators sign in as anyone would; the participant signs in at the
+            # console with the passphrase printed for them
+            for op, pw in self.passwords.items():
+                if op != PARTICIPANT_OPERATOR:
+                    self.bridge.login(op, pw)
+
+        standins_env = {
+            "FLEETMESH_STANDINS_TRUTH": str(self.run_dir / "standins-truth.jsonl"),
+            "FLEETMESH_STANDINS_STATS": "0",
+            "FLEETMESH_EVENTS": str(self.events_file),
+        }
+        self.standins_start = time.time()
+        self._spawn(
+            "standins",
+            [str(_binary("fleetmesh-standins")), str(self.standins_json)],
+            self._env(**standins_env),
+        )
+        self.origin = self.standins_start + self.spec.origin_s
+        # the emulator re-reads the file within a second; the origin is seconds away
+        self.write_events(with_links=True)
+
+        if self.web:
+            vite = REPO / "web" / "node_modules" / ".bin" / "vite"
+            if not vite.exists():
+                raise StackError(f"missing {vite}: run `make setup` (npm install) for study mode")
+            self._spawn(
+                "web",
+                [str(vite), "--host", "127.0.0.1", "--port", str(b.web), "--strictPort"],
+                self._env(FLEETMESH_BRIDGE_URL=f"http://127.0.0.1:{b.http}"),
+                cwd=REPO / "web",
+            )
+
+    def _wait_http(self, url: str, proc: Proc, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        client = Bridge(url.rsplit("/", 1)[0])
+        path = "/" + url.rsplit("/", 1)[1]
+        while time.monotonic() < deadline:
+            if client.try_get(path) is not None:
+                return
+            if not proc.alive():
+                raise StackError(f"{proc.name} exited with {proc.popen.returncode}; see {proc.log}")
+            time.sleep(0.3)
+        raise StackError(f"{proc.name} did not answer at {url} within {timeout:.0f} s; see {proc.log}")
+
+    def wait_ready(self, timeout: float) -> dict[str, Any]:
+        """Until every vehicle has a position and is navigation-ready (or `timeout`). The
+        result says when, relative to the stand-ins' start, and whether that was before
+        the origin."""
+        assert self.standins_start is not None and self.origin is not None
+        deadline = time.monotonic() + timeout
+        status: dict[str, Any] = {"ready": False, "vehicles": {}, "first_ready_s": {}, "first_seen_s": {}}
+        want = {v["uid"] for v in self.vehicles}
+        while time.monotonic() < deadline:
+            dead = [p.name for p in self.procs if not p.alive()]
+            if dead:
+                raise StackError(f"{', '.join(dead)} exited during startup; see the run directory logs")
+            state = self.bridge.try_get("/api/state") or {}
+            now_s = round(time.time() - self.standins_start, 2)
+            for v in state.get("vehicles", []):
+                status["first_seen_s"].setdefault(str(v["uid"]), now_s)
+            ready = {v["uid"] for v in state.get("vehicles", []) if v.get("nav_ready") and v.get("position")}
+            for u in ready:
+                status["first_ready_s"].setdefault(str(u), now_s)
+            status["vehicles"] = {str(u): (u in ready) for u in sorted(want)}
+            if want <= ready:
+                status["ready"] = True
+                break
+            time.sleep(0.25)
+        status["ready_after_s"] = round(time.time() - self.standins_start, 2)
+        status["before_origin"] = bool(status["ready"] and time.time() <= self.origin)
+        return status
+
+    def wait_for_origin(self) -> dict[str, Any]:
+        """Wait for the origin: the moment every scenario clock counts from."""
+        assert self.origin is not None
+        while time.time() < self.origin:
+            time.sleep(min(0.05, max(0.0, self.origin - time.time())))
+        return {"origin_waited": True}
+
+    def clocks(self) -> dict[str, Any]:
+        """Where each clock started relative to the origin (seconds; negative = before)."""
+        o = self.origin or 0.0
+
+        def rel(t: float | None) -> float | None:
+            return None if t is None else round(t - o, 3)
+
+        return {
+            "origin_unix": self.origin,
+            "origin_s": self.spec.origin_s,
+            "linkemu": rel(self.emu_start),
+            "standins": rel(self.standins_start),
+        }
+
+    # ---- stop ----------------------------------------------------------------------------
+
+    def alive_names(self) -> list[str]:
+        return [p.name for p in self.procs if not p.alive()]
+
+    def stop(self) -> dict[str, Any]:
+        exits: dict[str, Any] = {}
+        for p in reversed(self.procs):
+            if p.alive():
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        deadline = time.monotonic() + 6
+        for p in reversed(self.procs):
+            while p.alive() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if p.alive():
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                p.popen.wait(timeout=5)
+                exits[p.name] = "killed"
+            else:
+                exits[p.name] = p.popen.returncode
+        self.write_pids()
+        # the audit log belongs with the run, and so do its anchors (written there) and the
+        # fleet identity the bridge writes beside it (`<log>.fleet.json`)
+        dst = self.run_dir / "audit.jsonl"
+        if self.audit_src.exists():
+            shutil.move(str(self.audit_src), str(dst))
+        fleet_identity = self.audit_src.with_suffix(".fleet.json")
+        if fleet_identity.exists():
+            shutil.move(str(fleet_identity), str(dst.with_suffix(".fleet.json")))
+        anchors = self.run_dir / f"{self.run_id}.anchors"
+        if anchors.exists():
+            anchors.replace(self.run_dir / "audit.anchors")
+        # the port's restore pointer names the log just moved: the next run must not read it
+        self.clear_last_run("at_stop")
+        # rules 10: the participant's passkey counters went up in this run: back to their own
+        # file (a cloned authenticator stays detectable in the next run)
+        if self.participant_credentials is not None and self.credentials_file.exists():
+            r = subprocess.run(
+                [str(_binary("fleetmesh-auth")), "--file", str(self.participant_credentials), "import", PARTICIPANT_OPERATOR, "--from", str(self.credentials_file)],
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode != 0:
+                self.notes.append(f"the participant's passkey counters were not copied back: {r.stderr.strip()}")
+        # the run's throwaway credentials go with it (hashes only, but no reason to keep them)
+        self.credentials_file.unlink(missing_ok=True)
+        self.passwords.clear()
+        self.agent_keys.clear()
+        return exits
+
+
+def enroll(participant: str, path: Path, block: PortBlock, run_dir: Path, minutes: int = 30, timeout_s: float = 1800.0) -> dict[str, Any]:
+    """Rules 10: register a study participant's passkey before their first session. Their own
+    credential file (`path`, outside the repository) gets `op-study` (a fresh passphrase,
+    printed once for the person running the session, if it has none yet) and a one-time
+    invitation (`fleetmesh-auth passkey-invite`); a bridge on this block (credentials, no fleet)
+    and the console serve the link at http://localhost:<console port> (WebAuthn takes no IP
+    address), where the participant registers a passkey with their own authenticator. Waits
+    until the file holds one (or `timeout_s`), then stops both; the bridge's audit log (the
+    `passkey.registered` event) goes to `run_dir`."""
+    tool = str(_binary("fleetmesh-auth"))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def entry() -> dict[str, Any] | None:
+        try:
+            return (json.loads(path.read_text()).get("operators") or {}).get(PARTICIPANT_OPERATOR)
+        except (OSError, ValueError):
+            return None
+
+    out: dict[str, Any] = {"participant": participant, "credentials": str(path)}
+    before = entry()
+    if before is None:
+        pw = passphrase()
+        r = subprocess.run([tool, "--file", str(path), "add", PARTICIPANT_OPERATOR], input=pw + "\n", capture_output=True, text=True)
+        if r.returncode != 0:
+            raise StackError(f"fleetmesh-auth add {PARTICIPANT_OPERATOR}: {r.stderr.strip()}")
+        print(f"the participant's password ({PARTICIPANT_OPERATOR}), shown once: {pw}", flush=True)
+    had = len((before or {}).get("passkeys") or [])
+    r = subprocess.run(
+        [tool, "--file", str(path), "passkey-invite", PARTICIPANT_OPERATOR, "--minutes", str(minutes), "--url", f"http://localhost:{block.web}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise StackError(f"fleetmesh-auth passkey-invite: {r.stderr.strip()}")
+    link = r.stdout.strip()
+    run_id = f"enroll-{participant}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+    pointer = REPO / "logs" / "audit" / f".last-run-{block.http}"
+    pointer.unlink(missing_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FLEETMESH_")}
+    env.update(
+        {
+            "FLEETMESH_ROOT": str(REPO),
+            "FLEETMESH_AUTH": "credentials",
+            "FLEETMESH_CREDENTIALS": str(path),
+            "FLEETMESH_BASE_PORT": str(block.bridge_base),
+            "FLEETMESH_HTTP_PORT": str(block.http),
+            "FLEETMESH_WEB_PORT": str(block.web),
+            "FLEETMESH_RUN_ID": run_id,
+            "FLEETMESH_RESUME": "0",
+            "FLEETMESH_ANCHOR_DIR": str(run_dir),
+            "FLEETMESH_FLEET_MANIFEST": str(run_dir / "no-fleet.json"),
+        }
+    )
+    procs: list[subprocess.Popen] = []
+    try:
+        with open(run_dir / "bridge.log", "w") as log:
+            procs.append(subprocess.Popen([str(_binary("fleetmesh-bridge"))], cwd=str(REPO), env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
+        client = Bridge(f"http://127.0.0.1:{block.http}")
+        deadline = time.monotonic() + 60
+        while client.try_get("/api/stats") is None:
+            if procs[0].poll() is not None or time.monotonic() > deadline:
+                raise StackError(f"the bridge did not start; see {run_dir / 'bridge.log'}")
+            time.sleep(0.3)
+        vite = REPO / "web" / "node_modules" / ".bin" / "vite"
+        if not vite.exists():
+            raise StackError(f"missing {vite}: run `make setup` (npm install)")
+        with open(run_dir / "web.log", "w") as log:
+            procs.append(
+                subprocess.Popen(
+                    [str(vite), "--host", "127.0.0.1", "--port", str(block.web), "--strictPort"],
+                    cwd=str(REPO / "web"),
+                    env={**env, "FLEETMESH_BRIDGE_URL": f"http://127.0.0.1:{block.http}"},
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            )
+        print(f"the participant opens, in the browser that holds their authenticator:\n  {link}", flush=True)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if len((entry() or {}).get("passkeys") or []) > had:
+                out["registered"] = True
+                break
+            time.sleep(1.0)
+        else:
+            out["registered"] = False
+    finally:
+        for p in reversed(procs):
+            if p.poll() is None:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        for p in procs:
+            try:
+                p.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        src = REPO / "logs" / "audit" / f"{run_id}.jsonl"
+        if src.exists():
+            shutil.move(str(src), str(run_dir / "audit.jsonl"))
+        a = run_dir / f"{run_id}.anchors"
+        if a.exists():
+            a.replace(run_dir / "audit.anchors")
+        pointer.unlink(missing_ok=True)
+    out["passkeys"] = len((entry() or {}).get("passkeys") or [])
+    return out
+
+
+def kill_from_pids(run_dir: Path) -> list[str]:
+    """Stop whatever `pids.json` in a run directory still names (crash recovery)."""
+    p = run_dir / "pids.json"
+    if not p.exists():
+        return []
+    stopped = []
+    for name, pid in json.loads(p.read_text()).items():
+        try:
+            os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
+            stopped.append(f"{name} ({pid})")
+        except (ProcessLookupError, PermissionError, ValueError):
+            continue
+    return stopped
+
+
+if __name__ == "__main__":
+    print("use: python -m eval.run", file=sys.stderr)

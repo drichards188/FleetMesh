@@ -1,0 +1,13 @@
+[[item]]
+id = "r-01"
+when = { at_s = 1850, window_s = 300 }
+match = { kind = "land_now", reason = "NAV_NO_FIX" }
+reference = "reject"
+note = "landing over water or a street is a bad place: hold instead"
+
+[[item]]
+id = "r-02"
+when = { at_s = 4300, window_s = 600 }
+match = { kind = "hold", reason = "NAV_RANGE_MISMATCH" }
+reference = "approve"
+note = "boat 2's position is suspect: hold it and ask for recovery"

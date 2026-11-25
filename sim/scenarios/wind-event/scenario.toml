@@ -1,0 +1,13 @@
+name = "wind-event"
+title = "Drone hub during a wind event"
+tidewater = "golden-gate-weather"
+at = "2026-06-14T17:00:00Z"
+rate = 1
+duration_s = 4200
+seed = 22
+fleet = "fleet.toml"
+dispatch = "dispatch.toml"
+events = "events.toml"
+areas = "areas"
+reference = "reference.toml"
+policy = "sim/policy.toml"

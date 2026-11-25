@@ -1,0 +1,73 @@
+# FleetMesh DRAFT hubs and drop zones around the Golden Gate: named points with kinds, read by the
+# decision engine (crates/fleetmesh-decide `delivery::Places`) and the bridge. Illustrative only, not
+# real places; positions are rough and to be checked against tidewater's terrain (a dock in
+# water, a kerb on land). Parcels and dispatch come in a later step.
+#
+# [[hub]]       id, lon, lat, radius_m (its landing zone), pads, packs (charged batteries), open
+# [[dropzone]]  id, kind (pad | doorstep | locker | dock | kerb), lon, lat, radius_m, surface
+#               (land | water), populated, hub (a pad's hub: no confirmation needed), closed,
+#               elevation_m, slope_deg, dock_level_m (a dock's deck above the tide datum)
+
+[[hub]]
+id = "hub-presidio"
+name = "Crissy Field hub"
+lon = -122.4650
+lat = 37.8040
+radius_m = 60
+pads = 4
+packs = 6
+
+[[hub]]
+id = "hub-marina"
+name = "Marina car hub"
+lon = -122.4370
+lat = 37.8057
+radius_m = 40
+pads = 3
+packs = 4
+
+[[hub]]
+id = "hub-pier"
+name = "Pier dock hub"
+lon = -122.4150
+lat = 37.8170
+radius_m = 40
+pads = 2
+packs = 2
+
+[[dropzone]]
+id = "dz-crissy-pad"
+kind = "pad"
+lon = -122.4652
+lat = 37.8042
+radius_m = 3
+surface = "land"
+hub = "hub-presidio"
+
+[[dropzone]]
+id = "dz-harbour-17"
+kind = "doorstep"
+lon = -122.4119
+lat = 37.8087
+radius_m = 4
+surface = "land"
+populated = true
+elevation_m = 3.1
+
+[[dropzone]]
+id = "dz-marina-kerb"
+kind = "kerb"
+lon = -122.4405
+lat = 37.8015
+radius_m = 5
+surface = "land"
+populated = true
+
+[[dropzone]]
+id = "dz-pier-dock"
+kind = "dock"
+lon = -122.4152
+lat = 37.8172
+radius_m = 6
+surface = "water"
+dock_level_m = 2.4

@@ -1,0 +1,13 @@
+name = "coastal-boat"
+title = "Coastal boat leg"
+tidewater = "golden-gate-weather"
+at = "2026-06-14T17:00:00Z"
+rate = 1
+duration_s = 7200
+seed = 33
+fleet = "fleet.toml"
+dispatch = "dispatch.toml"
+events = "events.toml"
+areas = "areas"
+reference = "reference.toml"
+policy = "sim/policy.toml"

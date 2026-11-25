@@ -1,0 +1,35 @@
+[package]
+name = "fleetmesh-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "FleetMesh's operator and agent credentials: argon2id password hashes, per-agent API keys, login sessions, failed-attempt limits, and the fleetmesh-auth CLI"
+
+[dependencies]
+# Password hashing: argon2id (RustCrypto), PHC strings with a random salt per password.
+argon2 = { version = "0.6", features = ["zeroize"] }
+base64 = "0.22"
+getrandom = "0.3"
+# The CLI's interactive prompt (no echo); non-interactive use reads stdin.
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "2"
+# Passkeys (rules 10): the WebAuthn relying party (kanidm's webauthn-rs, maintained, audited):
+# registration (attestation parsing, user verification required) and each assertion's check.
+# `danger-allow-state-serialisation` only lets the bridge put the challenge it derives from the
+# act into a ceremony's state (the state never leaves the bridge's memory).
+webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation"] }
+
+[dev-dependencies]
+# The software authenticator the tests register and sign with.
+fleetmesh-decide = { path = "../fleetmesh-decide", features = ["soft-authenticator"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for the credential file's temporary file.
+libc = "0.2"
+
+[lints]
+workspace = true

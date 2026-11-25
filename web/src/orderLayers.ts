@@ -1,0 +1,239 @@
+import { PathLayer, TextLayer } from '@deck.gl/layers'
+import type { MapScreen } from './aloft'
+import { ALL_FULL, centred, textWidth, type LabelCandidate, type LabelPlan, type Priority } from './declutter'
+import type { Intent } from './decisions'
+import { leadingAt } from './estimate'
+import { drawnPositionOf, drawnTick } from './drawn'
+import { circle, distanceM } from './geo'
+import { mayBeRunningWords, queuedWords, resumedWords } from './mapWords'
+import type { LngLat, Tasking, Vehicle } from './types'
+import { isStale } from './types'
+
+/** Ordered versus confirmed on the map (rules 5, murmur-5p4), through MapView's `layers`
+ *  prop:
+ *
+ *  - an order held in the queue (approved, its vehicle unreachable now): its path dashed in
+ *    amber, "queued orbit: link down, 2 min left", and a QUEUED badge under the vehicle (under
+ *    its dead-reckoning estimate while it is silent and has one);
+ *  - an order carried over a bridge restart that a vehicle had started, waiting for its
+ *    vehicles to connect: "resumed patrol: waiting for the vehicle";
+ *  - an order whose start went out before the link was lost, unconfirmed, and no longer in
+ *    force (voided, queued, in the inbox): "MAY BE RUNNING orbit: ...", its tasking line kept.
+ *
+ *  An order sent and not yet confirmed has no label: MapView's tasking line is dashed until the
+ *  vehicle is seen executing it, solid after, and says so (ledger 1: a normal transition). No
+ *  label carries the order's raw id (mapWords.ts).
+ *
+ *  Drawn at sea level, over the terrain and the water (never hidden by either). Their labels go
+ *  through the one label budget (declutter.ts, R2): the kind short ("queued orbit"), the full line
+ *  where it fits; a MAY BE RUNNING (a human decides) first, the rest as our vehicles with an
+ *  alert. */
+
+type RGBA = [number, number, number, number]
+const QUEUED: RGBA = [242, 193, 78, 235]
+const RESUMED: RGBA = [127, 184, 255, 235]
+const MAYBE: RGBA = [255, 128, 96, 240]
+const TEXT: RGBA = [235, 239, 244, 255]
+const OUTLINE: RGBA = [11, 15, 20, 255]
+const FONT = 'IBM Plex Mono, ui-monospace, monospace'
+
+interface Dash {
+  path: LngLat[]
+  color: RGBA
+}
+
+interface Label {
+  /** the label budget's key (`o:...`) */
+  key: string
+  at: LngLat
+  text: string
+  /** the short form ("queued orbit") */
+  short: string
+  priority: Priority
+  color: RGBA
+  /** under a vehicle symbol rather than beside a path */
+  badge?: boolean
+  /** the vehicle it is drawn at, if any: follows the vehicle's drawn position (display smoothing) */
+  uid?: number
+}
+
+/** Ids of the layers here whose positions follow a vehicle's glide (display smoothing, drawn.ts).
+ *  The contract: a layer listed here reads its positions from drawn.ts per item (by uid), and
+ *  MapView re-triggers its `getPosition` on every animation frame by cloning it with a new
+ *  `updateTriggers.getPosition`, reusing the rest of the extension layers as they were. A layer
+ *  added here must accept that clone (positions through the accessor, nothing baked into data).
+ *  Layers not listed keep the positions they were built with until the next full rebuild. */
+export const GLIDE_LAYER_IDS = ['order-labels']
+
+/** The intent's path: an orbit's ring, a patrol's closed route; none for a mode. */
+function pathOf(i: Intent): LngLat[] | null {
+  const p = i.params
+  if (i.kind === 'orbit' && p.center) return circle(p.center, p.radius_m ?? 200, 72)
+  if (i.kind === 'patrol' && p.route && p.route.length > 1) return [...p.route, p.route[0]]
+  // rules 34: a transit's route, open
+  if (i.kind === 'transit' && p.route && p.route.length > 1) return p.route
+  return null
+}
+
+/** A path cut into dashes (deck.gl's PathLayer draws solid lines; this keeps the console free
+ *  of the extensions package): about 36 dashes along it, each half drawn. */
+function dashes(path: LngLat[]): LngLat[][] {
+  const seg: number[] = []
+  let total = 0
+  for (let k = 1; k < path.length; k++) {
+    const d = distanceM(path[k - 1], path[k])
+    seg.push(d)
+    total += d
+  }
+  if (total <= 0) return []
+  const step = total / 72
+  const out: LngLat[][] = []
+  let cur: LngLat[] = []
+  let draw = true
+  let left = step
+  for (let k = 1; k < path.length; k++) {
+    let a = path[k - 1]
+    const b = path[k]
+    let d = seg[k - 1]
+    if (draw && cur.length === 0) cur.push(a)
+    while (d > left) {
+      const f = left / d
+      const m: LngLat = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+      if (draw) {
+        cur.push(m)
+        out.push(cur)
+        cur = []
+      } else cur = [m]
+      draw = !draw
+      d -= left
+      a = m
+      left = step
+    }
+    left -= d
+    if (draw) cur.push(b)
+  }
+  if (draw && cur.length > 1) out.push(cur)
+  return out
+}
+
+/** Where a label for the intent goes: its orbit's center, its patrol's first point, or the
+ *  first vehicle (a mode). */
+function anchorOf(i: Intent, vehicles: Vehicle[]): { at: LngLat; uid?: number } | null {
+  const p = i.params
+  if (i.kind === 'orbit' && p.center) return { at: p.center }
+  if (i.kind === 'patrol' && p.route?.length) return { at: p.route[0] }
+  if (i.kind === 'transit' && p.route?.length) return { at: p.route[p.route.length - 1] }
+  const v = vehicles.find((x) => i.uids.includes(String(x.uid)))
+  return v?.position ? { at: v.position, uid: v.uid } : null
+}
+
+/** Where a vehicle is drawn now: its estimate's leading position while it is silent and the
+ *  bridge sent a motion model, else its last report. */
+function shownAt(v: Vehicle, nowMs: number): { at: LngLat; uid?: number } | null {
+  if (v.estimate && v.position && isStale(v)) return { at: leadingAt(v.estimate, nowMs).at.position }
+  return v.position ? { at: v.position, uid: v.uid } : null
+}
+
+function shortReason(i: Intent): string {
+  const r = (i.reach_now ?? i.queue?.reach ?? []).find((x) => !x.reachable)
+  if (!r) return 'reachable: re-checking'
+  // "silent for 12.3 s (its link ...)" -> "silent for 12.3 s"
+  return r.detail.replace(/ \(.*$/, '').replace(/:.*$/, '')
+}
+
+export interface OrderInput {
+  /** the queue (inbox.queued) and the latest intents */
+  queued: Intent[]
+  intents: Intent[]
+  taskings: Tasking[]
+  vehicles: Vehicle[]
+  nowMs: number
+}
+
+/** The queued orders' dashed paths and every label, before the budget. */
+function orderShapes(input: OrderInput): { dashed: Dash[]; labels: Label[] } {
+  const dashed: Dash[] = []
+  const labels: Label[] = []
+  const badged = new Set<string>()
+  for (const i of input.queued) {
+    const path = pathOf(i)
+    if (path) for (const d of dashes(path)) dashed.push({ path: d, color: QUEUED })
+    const left = i.queue ? (i.queue.expires_t - input.nowMs) / 1000 : null
+    const at = anchorOf(i, input.vehicles)
+    if (at) labels.push({ ...at, key: `o:q:${i.id}`, text: queuedWords(i.kind, shortReason(i), left), short: `queued ${i.kind}`, priority: 3, color: QUEUED })
+    for (const u of i.uids) badged.add(u)
+  }
+  for (const v of input.vehicles) {
+    const at = badged.has(String(v.uid)) ? shownAt(v, input.nowMs) : null
+    if (at) labels.push({ ...at, key: `o:b:${v.uid}`, text: 'QUEUED', short: 'QUEUED', priority: 3, color: QUEUED, badge: true })
+  }
+  // resumed under way after a bridge restart: followed once its vehicles connect
+  for (const i of input.intents) {
+    if (!i.follow_pending) continue
+    const at = anchorOf(i, input.vehicles)
+    if (at) labels.push({ ...at, key: `o:r:${i.id}`, text: resumedWords(i.kind), short: `resumed ${i.kind}`, priority: 3, color: RESUMED })
+  }
+  const byId = new Map(input.taskings.map((t) => [t.id, t]))
+  // its start went out and nothing confirmed it, and its intent is no longer dispatched
+  // (voided, back to the queue or the inbox): it may be running all the same
+  for (const i of input.intents) {
+    if (i.state === 'dispatched' || i.tasking_id == null) continue
+    const t = byId.get(i.tasking_id)
+    if (!t || !t.ops.some((o) => o.state === 'unconfirmed' && !o.detail.includes('does not run it now'))) continue
+    const at = anchorOf(i, input.vehicles)
+    if (at) labels.push({ ...at, key: `o:m:${i.id}`, text: mayBeRunningWords(i.kind, i.state), short: `MAY BE RUNNING ${i.kind}`, priority: 1, color: MAYBE })
+  }
+  return { dashed, labels }
+}
+
+/** A label's box: beside its path (10 px right, 24 px up, its bottom there), or under a vehicle. */
+function boxOf(l: Label, text: string): [number, number, number, number] {
+  if (l.badge) return centred(text, 10, 18)
+  return [10, -24 - 11, 10 + textWidth(text, 11), -24]
+}
+
+/** This layer's labels for the budget, at sea level where they are drawn. */
+export function orderLabelCandidates(input: OrderInput, screen: MapScreen): LabelCandidate[] {
+  return orderShapes(input).labels.map((l) => {
+    const at = l.uid == null ? l.at : (drawnPositionOf(l.uid, l.at) ?? l.at)
+    return { key: l.key, at: screen.at(at[0], at[1], 0), short: boxOf(l, l.short), full: boxOf(l, l.text), priority: l.priority }
+  })
+}
+
+export function buildOrderLayers(input: OrderInput, plan: LabelPlan = ALL_FULL) {
+  const onTop = { depthCompare: 'always' as const, depthWriteEnabled: false }
+  const { dashed, labels: all } = orderShapes(input)
+  const labels = all.filter((l) => plan.level(l.key) !== 'none')
+  const tick = Math.floor(input.nowMs / 1000)
+  return [
+    new PathLayer<Dash>({
+      id: 'order-queued-paths',
+      data: dashed,
+      getPath: (d) => d.path,
+      getColor: (d) => d.color,
+      getWidth: 2.5,
+      widthUnits: 'pixels',
+      capRounded: false,
+      parameters: onTop,
+    }),
+    new TextLayer<Label>({
+      id: 'order-labels',
+      data: labels,
+      getPosition: (l) => (l.uid == null ? l.at : (drawnPositionOf(l.uid, l.at) ?? l.at)),
+      getText: (l) => (plan.level(l.key) === 'full' ? l.text : l.short),
+      getSize: (l) => (l.badge ? 10 : 11),
+      getColor: (l) => l.color ?? TEXT,
+      getTextAnchor: (l) => (l.badge ? 'middle' : 'start'),
+      getAlignmentBaseline: (l) => (l.badge ? 'top' : 'bottom'),
+      getPixelOffset: (l) => (l.badge ? [0, 18] : [10, -24]),
+      fontFamily: FONT,
+      fontWeight: 600,
+      outlineWidth: 3,
+      outlineColor: OUTLINE,
+      fontSettings: { sdf: true, fontSize: 48, buffer: 6 },
+      characterSet: 'auto',
+      updateTriggers: { getText: tick, getPosition: drawnTick() },
+      parameters: onTop,
+    }),
+  ]
+}
