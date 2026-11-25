@@ -361,6 +361,135 @@ pub struct TrafficFact {
     pub domain: crate::catalog::Domain,
 }
 
+/// Rules 3 ([`crate::rules::TRAFFIC_SEPARATION_SINCE`]): the company's picture of the traffic it
+/// does not control (docs/design/traffic.md), as one decision read it: the tracks near the order's
+/// vehicles and route, each with the tracker's prediction, and the receivers the picture was built
+/// from with whether each is heard. The bridge builds it from the tracker (`fleetmesh-tracker`)
+/// and never from the simulator's truth; the engine keeps only what the order's checks read
+/// ([`crate::traffic::trim`]) and logs that by value, so replay decides on the same picture with
+/// no simulator and no tracker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrafficPicture {
+    /// The picture's time (the engine's clock): every track is predicted to it.
+    pub t: Time,
+    pub state: PictureState,
+    /// Why it is degraded (a feed silent, a receiver not heard), one line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    /// The QNH, hPa, pressure altitudes were brought to mean sea level with. Absent: not known,
+    /// standard pressure was used and each such track's vertical sigma carries the difference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qnh_hpa: Option<f64>,
+    /// The sha256 of the tracker's configuration the picture was made with (logged in full once,
+    /// the `traffic_config` delivery event): a changed default is a changed picture.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config_sha256: String,
+    /// The ADS-B and AIS receivers and feeds the picture comes from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receivers: Vec<ReceiverFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<TrackFact>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureState {
+    Ok,
+    Degraded,
+}
+
+/// A receiver (one of the company's at a hub) or a commercial feed, and whether it is heard: a
+/// receiver that delivered and has gone quiet longer than its kind allows is not.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReceiverFact {
+    pub id: String,
+    /// `adsb_1090` or `ais`
+    pub kind: String,
+    /// A commercial aggregated feed: no position of its own, coverage of the whole region.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<LonLat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_m: Option<f64>,
+    pub up: bool,
+}
+
+/// One track of the picture, at the picture's time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrackFact {
+    pub id: String,
+    /// `air` or `surface`
+    pub domain: crate::catalog::Domain,
+    /// The tracker's class (`airliner`, `helicopter`, `drone`, `unknown_air`, `cargo`, `ferry`, ...).
+    pub class: String,
+    /// It broadcasts (ADS-B, AIS, Remote ID); else only the company's own sensors see it.
+    pub cooperative: bool,
+    /// A callsign, a vessel's name or an address, for the words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    pub at: LonLat,
+    /// Altitude above mean sea level, m: geometric as reported, or a pressure altitude brought to
+    /// sea level with the picture's QNH. Absent for surface traffic and when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_m: Option<f64>,
+    /// `geo` (geometric, MSL), `baro` (pressure altitude, converted) or `none`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub alt_ref: String,
+    /// Horizontal 1-sigma, m (the semi-major axis of the tracker's ellipse).
+    pub h_sigma_m: f64,
+    /// Vertical 1-sigma, m, the altitude reference's conversion included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v_sigma_m: Option<f64>,
+    /// Velocity over ground [east, north], m/s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vel_mps: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vs_mps: Option<f64>,
+    /// The tracker's flags (`stale`, `bearing_only`, `sensor_disagree`, `moored`, `on_ground`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    /// A bearing-only track: the line it lies on (it is not a point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<BearingFact>,
+    /// The tracker's prediction from the picture's time on, with its growing uncertainty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<PathPoint>,
+}
+
+impl TrackFact {
+    pub fn has_flag(&self, f: &str) -> bool {
+        self.flags.iter().any(|x| x == f)
+    }
+}
+
+/// Where a track is predicted `dt_s` after the picture's time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PathPoint {
+    pub dt_s: f64,
+    pub at: LonLat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_m: Option<f64>,
+    pub h_sigma_m: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v_sigma_m: Option<f64>,
+}
+
+/// The line a bearing-only track lies on: from the sensor, along `bearing_deg`, between
+/// `range_m[0]` and `range_m[1]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BearingFact {
+    pub from: LonLat,
+    pub from_alt_m: f64,
+    pub bearing_deg: f64,
+    pub sigma_deg: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elev_deg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sigma_elev_deg: Option<f64>,
+    pub range_m: [f64; 2],
+}
+
 /// A vehicle's navigation fix as the bridge reads it from the GNSS state the vehicle reports
 /// (the stand-ins' receiver: satellites tracked, HDOP, horizontal accuracy) and from the
 /// consistency checks the bridge makes on its track (delivery-rules.md section 9).
@@ -494,6 +623,11 @@ pub struct DeliveryInputs {
     /// Engine-filled for a `confirm_drop_zone`: the `deliver` waiting on that zone and parcel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_deliver: Option<IntentId>,
+    /// Rules 3 ([`crate::rules::TRAFFIC_SEPARATION_SINCE`]): the picture of the traffic the fleet
+    /// does not control, cut to what the order's checks read. Absent: the run has no picture
+    /// (no traffic source), and the separation rule says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<TrafficPicture>,
 }
 
 // ---- knobs ------------------------------------------------------------------------------------
@@ -735,6 +869,124 @@ pub struct SeparationKnobs {
     pub air_over_ground_m: f64,
     /// A traffic fact older than this is unknown.
     pub max_age_s: f64,
+    /// Rules 3 (policy schema 3, [`crate::rules::TRAFFIC_SEPARATION_SINCE`]):
+    /// `[rules.delivery.separation.traffic]`, the figures for traffic the fleet does not control;
+    /// [`TrafficKnobs::default`] when absent. Never logged under older rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<TrafficKnobs>,
+}
+
+impl SeparationKnobs {
+    /// `[rules.delivery.separation.traffic]`, or its defaults.
+    pub fn traffic_knobs(&self) -> TrafficKnobs {
+        self.traffic.clone().unwrap_or_default()
+    }
+}
+
+/// Rules 3: separation from the traffic the company's picture shows (docs/design/traffic.md
+/// section 6, delivery-rules.md section 8.1). Every distance is a draft figure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrafficKnobs {
+    /// How far ahead aircraft and small vessels are predicted, s (the tracker's prediction).
+    pub horizon_s: f64,
+    /// How far ahead ships are predicted for a boat, s (they are slow and predictable).
+    pub surface_horizon_s: f64,
+    /// Each minimum is widened by the prediction's 1-sigma times this.
+    pub sigma_factor: f64,
+    /// A track's vertical uncertainty grows at most this fast, m/s: an aircraft holding its
+    /// altitude does not wander up and down as a random walk would (its reported vertical rate
+    /// is in the prediction).
+    pub vrate_mps: f64,
+    /// Well clear of a manned aircraft: 2,000 ft horizontally and 250 ft vertically (the ASTM
+    /// F3442 small-UAS well-clear volume). Manned aircraft have the right of way (14 CFR 107.37).
+    pub manned_h_m: f64,
+    pub manned_v_m: f64,
+    /// Another operator's drone (Remote ID).
+    pub drone_h_m: f64,
+    pub drone_v_m: f64,
+    /// An air track that broadcasts nothing: what it is is not known.
+    pub noncoop_h_m: f64,
+    pub noncoop_v_m: f64,
+    /// A bearing-only track (a line, not a point) is checked this far ahead, s ...
+    pub bearing_horizon_s: f64,
+    /// ... and, like a non-cooperative track with no velocity, may have moved this fast, m/s.
+    pub noncoop_speed_mps: f64,
+    /// A delivery boat keeps at least this closest point of approach from a ship under way:
+    /// 0.25 nm.
+    pub ship_cpa_m: f64,
+    /// ... and stays out of its way (COLREGs rule 9): it does not cross the course line a ship
+    /// under way reaches within this, s, ahead of it.
+    pub ship_cross_ahead_s: f64,
+    /// The classes that are ships for that (others keep `surface_surface_m`).
+    pub ship_classes: Vec<String>,
+    /// A vessel slower than this is not under way, m/s.
+    pub underway_mps: f64,
+    /// The picture older than this is unknown, s.
+    pub max_age_s: f64,
+}
+
+impl Default for TrafficKnobs {
+    fn default() -> Self {
+        TrafficKnobs {
+            horizon_s: 60.0,
+            surface_horizon_s: 300.0,
+            sigma_factor: 1.0,
+            vrate_mps: 1.0,
+            manned_h_m: 610.0,
+            manned_v_m: 76.0,
+            drone_h_m: 100.0,
+            drone_v_m: 30.0,
+            noncoop_h_m: 300.0,
+            noncoop_v_m: 60.0,
+            bearing_horizon_s: 20.0,
+            noncoop_speed_mps: 20.0,
+            ship_cpa_m: 463.0,
+            ship_cross_ahead_s: 300.0,
+            ship_classes: ["cargo", "tanker", "passenger", "ferry"].map(String::from).to_vec(),
+            underway_mps: 0.5,
+            max_age_s: 10.0,
+        }
+    }
+}
+
+impl TrafficKnobs {
+    pub fn validate(&self) -> Result<(), String> {
+        let pos = [
+            ("horizon_s", self.horizon_s),
+            ("surface_horizon_s", self.surface_horizon_s),
+            ("manned_h_m", self.manned_h_m),
+            ("manned_v_m", self.manned_v_m),
+            ("drone_h_m", self.drone_h_m),
+            ("drone_v_m", self.drone_v_m),
+            ("noncoop_h_m", self.noncoop_h_m),
+            ("noncoop_v_m", self.noncoop_v_m),
+            ("bearing_horizon_s", self.bearing_horizon_s),
+            ("ship_cpa_m", self.ship_cpa_m),
+            ("max_age_s", self.max_age_s),
+        ];
+        for (name, x) in pos {
+            if !(x.is_finite() && x > 0.0) {
+                return Err(format!("rules.delivery.separation.traffic.{name} must be above 0"));
+            }
+        }
+        let nonneg = [
+            ("sigma_factor", self.sigma_factor),
+            ("vrate_mps", self.vrate_mps),
+            ("noncoop_speed_mps", self.noncoop_speed_mps),
+            ("ship_cross_ahead_s", self.ship_cross_ahead_s),
+            ("underway_mps", self.underway_mps),
+        ];
+        for (name, x) in nonneg {
+            if !(x.is_finite() && x >= 0.0) {
+                return Err(format!("rules.delivery.separation.traffic.{name} must not be negative"));
+            }
+        }
+        if self.horizon_s > 1800.0 || self.surface_horizon_s > 3600.0 {
+            return Err("rules.delivery.separation.traffic horizons must be within 30 min (air) and 60 min (surface)".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for SeparationKnobs {
@@ -754,6 +1006,7 @@ impl Default for SeparationKnobs {
             surface_surface_m: 30.0,
             air_over_ground_m: 20.0,
             max_age_s: 10.0,
+            traffic: None,
         }
     }
 }
@@ -931,6 +1184,9 @@ impl DeliveryRules {
         }
         if self.weather.keel_hard_m > self.weather.keel_clear_m {
             return Err("rules.delivery.weather.keel_hard_m must not exceed keel_clear_m".into());
+        }
+        if let Some(t) = &self.separation.traffic {
+            t.validate()?;
         }
         Ok(())
     }

@@ -1277,6 +1277,19 @@ fn replay_inner<S: AsRef<str>>(
                         format!("absent before rules {}", crate::rules::STANDING_APPROVALS_SINCE),
                     );
                 }
+                // rules 3: the traffic figures, a key rules 2 did not have
+                if !p.rules.at_least(crate::rules::TRAFFIC_SEPARATION_SINCE)
+                    && p.rules.delivery.as_ref().is_some_and(|d| d.separation.traffic.is_some())
+                {
+                    bad(
+                        &mut r,
+                        e,
+                        None,
+                        "a field newer than the log's rules version (rules markers)",
+                        "policy.rules.delivery.separation.traffic".into(),
+                        format!("absent before rules {}", crate::rules::TRAFFIC_SEPARATION_SINCE),
+                    );
+                }
                 // rules 10: the relying party and the passkeys the run started with
                 if let Some(pk) = listed.as_ref().and_then(|ro| ro.passkeys.as_ref())
                 {
@@ -5274,8 +5287,21 @@ fn check_waiting(
 }
 
 /// The fields a decision's inputs carry that its rules version did not have
-/// ([`crate::rules::RULES_MARKERS`]): from rules 2 a drop zone's standing `approval`.
+/// ([`crate::rules::RULES_MARKERS`]): from rules 2 a drop zone's standing `approval`, from rules
+/// 3 the traffic picture.
 fn check_markers(r: &mut ReplayReport, e: &Event, id: IntentId, w: &WorldSnapshot, rules: &crate::rules::RulesConfig) {
+    if !rules.at_least(crate::rules::TRAFFIC_SEPARATION_SINCE)
+        && w.delivery.as_ref().is_some_and(|d| d.picture.is_some())
+    {
+        bad(
+            r,
+            e,
+            Some(id),
+            "a field newer than the log's rules version (rules markers)",
+            "check.result.inputs.delivery.picture".into(),
+            format!("absent before rules {}", crate::rules::TRAFFIC_SEPARATION_SINCE),
+        );
+    }
     if rules.at_least(crate::rules::STANDING_APPROVALS_SINCE) {
         return;
     }

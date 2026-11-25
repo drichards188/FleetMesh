@@ -94,6 +94,9 @@ pub fn router(app: App) -> Router {
         .route("/api/hubs", get(hubs))
         .route("/api/places", get(places))
         .route("/api/nav", get(nav))
+        .route("/api/traffic", get(traffic))
+        .route("/api/traffic/sensors", get(traffic_sensors))
+        .route("/api/traffic/truth", get(traffic_truth))
         .route("/api/groups", get(groups_list).post(groups_create))
         .route("/api/tasking", get(tasking_list).post(tasking_post))
         .route("/api/tasking/{id}/deactivate", post(tasking_deactivate))
@@ -156,6 +159,50 @@ async fn nav(State(app): State<App>) -> Response {
 }
 
 /// Full state, the same message a WebSocket client gets first.
+/// `?bbox=west,south,east,north`: only the tracks in (or near) that view.
+#[derive(Deserialize)]
+struct TrafficQuery {
+    #[serde(default)]
+    bbox: Option<String>,
+}
+
+fn bbox(q: Option<&str>) -> Result<Option<[f64; 4]>, Box<Response>> {
+    let Some(b) = q else { return Ok(None) };
+    let v: Result<Vec<f64>, _> = b.split(',').map(|x| x.trim().parse::<f64>()).collect();
+    match v.ok().and_then(|v| <[f64; 4]>::try_from(v).ok()) {
+        Some([w, s, e, n]) if [w, s, e, n].iter().all(|x| x.is_finite()) && s <= n => Ok(Some([w, s, e, n])),
+        _ => Err(Box::new((StatusCode::BAD_REQUEST, Json(json!({"error": "bbox must be west,south,east,north"}))).into_response())),
+    }
+}
+
+/// `GET /api/traffic` (docs/design/traffic.md section 5): the company's picture of the traffic
+/// the fleet does not control, `{"t", "tracks": [...], "disagreements": [...], "picture":
+/// {"state", "reasons", "feeds", ...}, "automation": [...]}`. Read-only; 404 when the run has no
+/// picture (no traffic source, or none delivered yet).
+async fn traffic(State(app): State<App>, Query(q): Query<TrafficQuery>) -> Response {
+    if !app.decision.traffic().active() || app.decision.traffic().built().is_none() {
+        return error(StatusCode::NOT_FOUND, "no traffic picture in this run (no traffic source, FLEETMESH_TRAFFIC_URL, or it has delivered nothing yet)");
+    }
+    match bbox(q.bbox.as_deref()) {
+        Ok(b) => Json(app.decision.traffic_json(b)).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `GET /api/traffic/sensors`: the receivers and sites the picture is built from.
+async fn traffic_sensors(State(app): State<App>) -> Response {
+    Json(app.decision.traffic().sensors_json()).into_response()
+}
+
+/// `GET /api/traffic/truth`: the simulator's truth, for evaluation and a debug overlay, in a dev
+/// run only (404 in a credentials run, and when the run has no simulator).
+async fn traffic_truth(State(app): State<App>) -> Response {
+    match app.decision.traffic_truth_json().await {
+        Some(v) => Json(v).into_response(),
+        None => error(StatusCode::NOT_FOUND, "no simulator truth here: it is served in a dev run with a traffic simulator only"),
+    }
+}
+
 async fn state(State(app): State<App>) -> Response {
     raw_json(push::state_json(&push::build_frame(
         &app.world,
@@ -553,8 +600,27 @@ async fn client(mut socket: WebSocket, app: App, lod: bool) {
     {
         return;
     }
+    // the traffic picture, about once a second, cut to the client's view when it sends one
+    let mut traffic = app.decision.traffic().subscribe();
+    let mut traffic_bounds: Option<[f64; 4]> = None;
     loop {
         tokio::select! {
+            changed = traffic.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let has = traffic.borrow_and_update().is_some();
+                if !has {
+                    continue;
+                }
+                let mut msg = app.decision.traffic_json(traffic_bounds);
+                if let Some(o) = msg.as_object_mut() {
+                    o.insert("type".into(), json!("traffic"));
+                }
+                if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                    break;
+                }
+            }
             changed = decisions.changed() => {
                 if changed.is_err() {
                     break;
@@ -580,6 +646,7 @@ async fn client(mut socket: WebSocket, app: App, lod: bool) {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 Some(Ok(Message::Text(text))) => {
                     if let Some(sub) = Subscription::parse(&text) {
+                        traffic_bounds = sub.bounds.filter(|b| b.iter().all(|x| x.is_finite()));
                         view.subscribe(sub);
                         let frame = frames.borrow().clone();
                         if let Some(frame) = frame

@@ -24,7 +24,8 @@ reproduce that behaviour exactly.
 3. The delivery behaviour built before the first commit is version 1, with no `*_SINCE`
    constant, because there was no older behaviour to reproduce. The first gated change is rules
    2, `STANDING_APPROVALS_SINCE` (standing approved delivery points, docs/DECISIONS.md
-   2026-11-25).
+   2026-11-25); rules 3 is `TRAFFIC_SEPARATION_SINCE` (separation from the traffic the fleet does
+   not control, the picture of it logged by value; policy schema 3).
 4. **After the first commit, any change that can alter a decision's outcome, a check's inputs, an
    event's shape or a replay check is gated.** The change adds a named constant
    `<NAME>_SINCE: u32 = N`, where `N` is the new `RULES_VERSION`, and code branches on
@@ -112,7 +113,10 @@ let hover_s = if cfg.at_least(DROP_HOVER_SINCE) { cfg.energy.drop_hover_s } else
 **Markers.** Each version that adds an event type or field records it in `RULES_MARKERS`: a list of
 (since, name). Rules 2 marks `[rules.delivery.dropzone] standing_approvals` in the logged policy
 and a drop zone's `approval` in a decision's delivery inputs; replay's `check_markers` and the
-`run.started` check flag either in a log that claims rules 1. Replay flags a log whose version is older than a marker it contains (an event that
+`run.started` check flag either in a log that claims rules 1. Rules 3 marks
+`[rules.delivery.separation.traffic]` in the policy and `delivery.picture` in a decision's inputs,
+flagged in a log that claims rules 2 or older. Replay flags a log whose version is older than a
+marker it contains (an event that
 cannot have existed then), which catches a log edited to include newer events under an older
 version number, and a log of a newer version that is missing an event the version requires.
 

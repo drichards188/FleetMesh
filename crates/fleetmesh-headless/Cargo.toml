@@ -27,6 +27,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 fleetmesh-space = { path = "../fleetmesh-space" }
 fleetmesh-decide = { path = "../fleetmesh-decide" }
 fleetmesh-auth = { path = "../fleetmesh-auth" }
+fleetmesh-tracker = { path = "../fleetmesh-tracker" }
 mavlink = { version = "0.18", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-extensions"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
@@ -43,6 +44,9 @@ rayon = "1.12"
 # paused clock (tokio test-util, on top of the bridge's features)
 fleetmesh-standins = { path = "../fleetmesh-standins" }
 fleetmesh-linkemu = { path = "../fleetmesh-linkemu" }
+# the traffic simulator in process (docs/design/traffic.md): its emissions go to the bridge's
+# tracker with no sockets
+fleetmesh-traffic = { path = "../fleetmesh-traffic" }
 flate2 = "1"
 sha2 = "0.10"
 

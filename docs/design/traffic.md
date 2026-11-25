@@ -170,8 +170,11 @@ As built in fleetmesh-traffic (2026-11-25; its README has the detail):
 - Privacy ICAO Addresses come from one block, `[addresses] pia_block` in sim/traffic.toml
   (ADF800 to ADFBFF, illustrative), a fresh address each flight, with a third-party callsign;
   that block is what the bridge gives the tracker as `anonymous_icao_ranges`.
+- (Phase 3.) A network feed is the kind of what it delivers (`adsb_1090`, `adsb_uat`, `ais`) with
+  `owner` `network`, as `/sensors` lists it; the tracker's `SiteKind` lost its `adsb_feed` and
+  `ais_feed`, which nothing emitted (`SensorSite::is_network` reads the owner).
 
-## 6. How the fleet uses the picture (phase 2)
+## 6. How the fleet uses the picture (built in phase 3: section 10)
 
 - **Separation.** The separation rule reads the picture as well as the fleet. Manned aircraft
   have the right of way (14 CFR 107.37): a drone keeps well clear (draft: 2,000 ft horizontally and
@@ -201,5 +204,180 @@ the operator-load numbers.
 2. fleetmesh-tracker: decoders, fusion, flags, prediction (no bridge change).
 3. Bridge and engine: ingest the feeds, `/api/traffic`, log the picture, the separation rule and the
    automatic responses, issue alerts; `scripts/up.sh` starts the simulator; headless links both.
+   **Built 2026-11-25 (rules 3): section 10.**
 4. Console: a traffic layer (icons by class, altitude labels, source and age, a coasting fade,
    receiver coverage) and the issue alerts.
+
+## 9. The console (as built, 2026-11-25)
+
+`web/src`: `traffic.ts` (types, declutter, fade, the bearing-only wedge, prediction, truth
+matching, feed health; checked by `traffic.check.ts`), `trafficText.ts` (words), `trafficSymbols.ts`
+(icons), `trafficLayers.ts` (deck.gl layers and label candidates), `useTraffic.ts` (the store),
+`TrafficBar.tsx` (toggles, counts, picture health, coverage, truth), `TrafficDetails.tsx` (a
+selected track), the four alert kinds in `decisions.ts`, `bluf.ts` and `InboxPanel.tsx`.
+
+What it expects of the bridge:
+
+- `GET /api/traffic` is `{t, tracks, picture}`; a 404 means the run has no traffic picture (the bar
+  says so). The WebSocket push `{"type": "traffic", t, tracks, picture}` is the live path; the GET
+  is asked every 2 s only while no push has come for 3 s. Ages are measured against the picture's
+  `t`, never the browser's clock.
+- `picture.feeds` may have any keys (shown as given); each is `{connected, last_t, lines_per_s}`,
+  `last_t` Unix ms or null. A feed is shown amber after 15 s without a line, red after 60 s or
+  when not connected.
+- Optional: `disagreements` beside `tracks`, the tracker's `disagreements()` (`track`, `sensed`,
+  `offset_m`, `sensor`). Without it the console pairs each flagged cooperative track with the
+  nearest flagged non-cooperative one within 3 km.
+- `GET /api/traffic/sensors` is a list of `/sensors` entries (or `{sensors: [...]}`). Rings are
+  drawn only for company receivers with a position and a nominal range up to 30 km.
+- `GET /api/traffic/truth` is asked only in a dev run (`/api/auth/session` says `auth: dev`) with
+  the overlay on: a list of the simulator's truth objects (or `{truth: [...]}`); 404 or 403 means
+  none. A credentials run never shows the control and never asks.
+- A traffic alert carries `track_id` (and `track_ids` for a broadcast and what the sensors see
+  instead), `uid` the vehicle it is about (absent, null or a uid not in the fleet for
+  `traffic_picture_degraded`), and `issue` as the other issues do; the console has plain fallback
+  words for an alert without one.
+- An onboard sensor's `sources[].rx` is the vehicle's uid, named by its callsign.
+
+Declutter: a track is near (full-size icon, speed leader, a label candidate) within 3 km and 600 m
+vertically of one of our aircraft or their routes (aircraft) or within 1.5 km of our boats or their
+routes (vessels), mid (smaller, fainter, no label) within 8 km and below 1,500 m or within 5 km,
+far (small and faint) otherwise; an airliner above 3,000 m is always far. Flagged tracks
+(`sensor_disagree`, `position_jump`, `emergency`), the selected one and those an alert names are
+near wherever they are. At most 40 are drawn in full, the nearest. Coasting tracks draw at half
+strength, stale ones at two thirds, tentative ones dashed and unfilled. Traffic labels never
+displace our vehicles' (lowest priority in the one label budget). Aircraft labels give metres, as
+the fleet's do, with the reference (`baro` for pressure altitude, `MSL` for geometric); the details
+give feet too. A bearing-only track is a sector on the surface (its range interval, two bearing
+sigmas either side) with its line of sight in 3D when selected or hovered, never a point.
+
+## 10. The bridge and the engine (phase 3, as built 2026-11-25)
+
+**Launch.** Each scenario.toml names `traffic = "traffic.toml"`; scripts/scenario_env.py exports
+`FLEETMESH_TRAFFIC_SCENARIO`, and scripts/up.sh starts `fleetmesh-traffic` before the bridge on the
+scenario clock (`FLEETMESH_AT`, `FLEETMESH_RATE`), logs in logs/traffic.log, and sets
+`FLEETMESH_TRAFFIC_URL` for the bridge; `make down` stops it with the rest. `FLEETMESH_TRAFFIC=0`
+starts no simulator and leaves the bridge with no picture. A scenario's traffic.toml may set the
+world's `qnh_hpa` for its hour (all three: 1014.5 hPa, the weather archive's sea-level pressure at
+2026-06-14 17:00Z), switch on ground radars (`ground_radar = ["radar-pier"]`: harbour-city and
+wind-event, so a wrong broadcast near the waterfront is seen for what it is) and script a
+`flight` (an aircraft of a stream's kind along its own route: harbour-city's medical helicopter
+crossing the drones' routes at 400 ft at 600 s).
+
+**Ingest** (crates/fleetmesh-bridge/src/decision/traffic.rs). The bridge connects to the SBS, AIS
+and JSON ports as a client, as it would to a receiver's feed, and reconnects every 2 s when one
+drops. It reads `/sensors` at start (again each ten minutes) and gives the tracker the fixed sites
+only: an onboard sensor (`daa`, `marine_radar`, or any entry on one of our vehicles) carries its
+vehicle's last position, which a detection gives anyway, so it is listed apart and never a site.
+The simulator's own `up` and `enabled` flags are dropped: whether a receiver works is what the
+bridge hears. Every line gets its receipt time on the scenario clock (`FLEETMESH_AT` plus elapsed
+times `FLEETMESH_RATE`, set to the simulator's own clock from its `/health` each minute). Once a
+second the tracker is told our vehicles' positions (`set_own_vehicles`) and broadcast identities
+(`set_own_fleet`, from the manifest's `icao24`, `mmsi`, `uas_id` where it names them: the fleet
+broadcasts nothing today), the QNH (`set_qnh`: the scenario's weather archive's pressure at the
+hubs, which stand a few metres above the sea; none without an archive, and the picture says
+standard pressure was used), and brought to now. The tracker's configuration is its default with
+the Bay's geoid height (-32 m, held to sim/traffic.toml's `[world] geoid_n_m` by a test) and the
+Privacy ICAO Address block of sim/traffic.toml as `anonymous_icao_ranges`; the first picture logs
+it whole (a `traffic_config` delivery event, with the sensors), and every decision's picture names
+its sha256. The headless simulator steps `fleetmesh-traffic` in process on the episode's clock and
+hands each emission to the same ingest with no sockets (crates/fleetmesh-headless/src/sim/traffic.rs).
+
+**Degraded.** The picture is `degraded` while a live feed is not connected, a feed has delivered
+nothing for 30 s, the receivers' list has not been read, or an ADS-B or AIS receiver that should be
+heard is not: a hub's 1090 receiver quiet for 20 s (the network's 30 s), a hub's AIS receiver for
+90 s (the network's 60 s), or one not heard 45 s after the first line. Remote ID and UAT receivers
+are not judged (a quiet one cannot be told from an empty sky). A change between ok and degraded,
+or in what is not heard, is a `traffic_picture` delivery event.
+
+**Altitudes.** A track keeps the tracker's reference. For the rules, a pressure altitude (`baro`)
+is brought to mean sea level with the QNH (8.32 m per hPa) and its vertical sigma carries the
+conversion (the tracker's 15 m with a QNH, 120 m without); a geometric one (`geo`) is above mean
+sea level already (Remote ID's ellipsoid heights converted with the geoid). Our vehicles' altitude
+is their cruise height above home plus home's height above sea level (their own MSL and relative
+altitudes). The rules compare MSL with MSL.
+
+**API** (read-only; times are the scenario clock's Unix ms, ages are `t - last_t`):
+
+- `GET /api/traffic[?bbox=w,s,e,n]`: `{"t", "tracks": [Track...], "disagreements": [{"track",
+  "sensed", "offset_m", "sensor", "since_t"}], "picture": {"state": "ok"|"degraded", "reasons":
+  [...], "not_heard": [...], "feeds": {"sbs"|"ais"|"json": {"connected", "last_t", "lines_per_s",
+  "lines"}}, "receivers": [{"id", "kind", "network", "up", "last_t", "silent_s", "lines"}],
+  "qnh": {"hpa", "source": "weather"|"standard"}, "source": "live"|"in_process", "enabled",
+  "counts": {"tracks", "by_class", "by_source", "in_rules"}, "tracker": {"config_sha256", "stats"},
+  "clock"}, "automation": [{"uid", "since_s", "codes", "why", "did", "under_way", "parcel"}]}`.
+  Tracks are section 5's, every one the tracker holds (tentative ones too; the rules read only
+  confirmed and coasting ones within 10 km of the fleet and its hubs). `automation` is what
+  automation is doing for other traffic now: each vehicle it keeps on the ground or holds, why,
+  since when. 404 when the run has no picture (no source, or nothing delivered yet).
+- `GET /api/traffic/sensors`: `{"read", "sensors": [/sensors entries without `up` and `enabled`,
+  with `heard` ("up"|"silent") and `last_t`], "onboard": [entries by vehicle, without position]}`.
+- `GET /api/traffic/truth`: a dev run only (404 in a credentials run and with no simulator):
+  `{"simulator_truth": true, "note", "t", "truth": [TruthObject...]}`, labelled as the simulator's
+  truth a real operator does not have; no decision and no tracker reads it.
+- WebSocket: `{"type": "traffic", ...}` with `/api/traffic`'s body, once a second when the picture
+  is rebuilt, cut to the bounds of the client's last `view` message (grown by a quarter).
+
+**The rule** (rules 3, `TRAFFIC_SEPARATION_SINCE`; delivery-rules.md section 8.1). A decision's
+inputs carry `delivery.picture`, cut by the engine to what the order's checks read
+(`fleetmesh_decide::traffic::trim`: tracks of its vehicles' domains within `relevant_km` of their
+positions and the order's points, and the receivers of those domains; nothing for a hold, a swap,
+a car's order) and logged by value, so replay decides on the same picture with no simulator and no
+tracker. The separation rule checks each air or surface order's route ahead against each track's
+prediction (the tracker's path, every 10 s for aircraft and 30 s for vessels) widened by its 1-sigma
+times `sigma_factor`, vertically capped at `vrate_mps` of growth: well clear of a manned aircraft
+(2,000 ft, 250 ft), 100 m and 30 m of another drone, 300 m and 60 m of an air track that broadcasts
+nothing (a bearing-only one along its whole line, for `bearing_horizon_s`, moving at
+`noncoop_speed_mps`), a ship under way's closest approach of 0.25 nm and its course ahead (not
+crossed within `ship_cross_ahead_s` of its arrival), other vessels' `surface_surface_m`. A
+non-cooperative track flagged `sensor_disagree` counts as manned (it is where the aircraft is). A
+vehicle under way that is inside a minimum now and leaving it is clear; one on the ground is not.
+Holds: `SEP_TRAFFIC_CONFLICT`, `SEP_TRAFFIC_NONCOOP`, `SEP_SHIP_CPA`, `SEP_SHIP_AHEAD`,
+`SEP_PICTURE_DEGRADED` (no ADS-B receiver heard covers an air route, no AIS one a boat's; a network
+feed covers the region) and `SEP_TRAFFIC_UNKNOWN` (a picture older than `max_age_s`). A run with no
+picture says so in the separation result and checks nothing else; a car has no traffic model.
+
+**Automation** (crates/fleetmesh-bridge/src/decision/delivery_rt.rs). The traffic holds are in
+`WAIT_OUT` and never reach the inbox (an order a person must decide for another reason still
+shows them):
+
+- *On the ground.* The dispatcher's dry run holds a departure: the vehicle waits at its hub and the
+  order is tried every `hold_retry_s` (15 s). After `traffic_replan_after_s` (30 s, `[automation]`)
+  a delivery is offered once a route round the conflict (`fleetmesh_decide::traffic::detour`: a
+  waypoint beside the first conflict, away from the track first, within the reroute's
+  `auto_added_pct`); it goes when the rules pass it.
+- *Under way* (every 2 s). A delivery or return whose route ahead the picture predicts a conflict
+  on is held where it is (`hold`, a safe order that goes at once: a drone hovers, a boat stops and
+  stands off) and its order is proposed again as soon as the rules pass it; when the traffic comes
+  at it where it is, a delivery takes a route round it (the deliver again, with waypoints), else it
+  holds. Each response is a `traffic` delivery event with the conflict.
+- *The person* hears only of issues, each with what happened, what automation did and what is
+  recommended (the alert's `issue`), its `track_id` and, for a broadcast fault, `track_ids` (the
+  broadcast's, then the sensed one):
+  - `traffic_conflict` (high): a vehicle's conflict has lasted `hold_retry_max_s` (300 s) through
+    automation's responses; automation goes on holding it;
+  - `traffic_noncooperative_near` (high): an air track that broadcasts nothing (or a bearing-only
+    one) within `2 x noncoop_h_m` of one of our drones for 10 s, one issue per object (a track that
+    reappears within 500 m of one is the same);
+  - `traffic_broadcast_disagrees` (high): the tracker's `sensor_disagree` on an aircraft within
+    `relevant_km` of the fleet or a hub (vessels' are not raised: see the tracker below);
+  - `traffic_picture_degraded` (medium, `uid` 0): a feed silent or a receiver not heard, saying
+    which departures automation holds for it (`SEP_PICTURE_DEGRADED`), or that other receivers still
+    cover the routes.
+
+**The tracker, changed for phase 3** (crates/fleetmesh-tracker/README.md has the detail): a ground
+radar whose site names no domain takes a return that may be at the surface for a vessel; the
+detect-and-avoid's ranges by size are its reach (600 m, 3 km, 9 km); and the integrity check ties a
+broadcast to a sensed track by motion only for a fast mover (25 m/s and more: an aircraft), by a
+split for a slow one (the sensor saw the broadcast's object, and the track it sees instead began
+there and then), compares a marine radar only within half its range for the vessel's class, needs an
+offset of 500 m (1 km for a slow mover), and now also compares tracks bearing lines fixed. In a
+normal harbour-city or coastal-boat run no ordinary vessel or aircraft is flagged; the scripted
+broadcast faults are (crates/fleetmesh-headless/tests/traffic_picture.rs).
+
+**Limits.** At a `FLEETMESH_RATE` other than 1 the picture's velocities are per scenario second
+while the fleet's are per wall second. A broadcast fault on a slow mover that begins outside our
+sensors' view is not detected (no split to see); one only bearing lines see, and no fix, is not
+either. The vertical growth cap is a draft. The rule predicts the fleet's own vehicles as before
+(their routes are not in the bridge's facts); other traffic's predicted paths are the tracker's
+constant-velocity ones, so a turning aircraft is wide.

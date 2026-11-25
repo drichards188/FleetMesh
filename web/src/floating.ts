@@ -17,7 +17,7 @@ const NOTHING: FloatGeometry = { layer: { w: 0, h: 0 }, area: { x: 0, y: 0, w: 0
 
 /** What is fixed on the map that an opening panel keeps clear of: the map's toolbar (top left), the
  *  banners (top centre), the zoom buttons, compass, attribution and scale (maplibre's corners), the
- *  weather bar (bottom), the perf overlay. */
+ *  weather and traffic bars (bottom left), the perf overlay. */
 const MAP_FIXED = [
   '.viewtoggle',
   ':scope > .banner',
@@ -25,6 +25,8 @@ const MAP_FIXED = [
   '.maplibregl-ctrl-bottom-right > *',
   '.maplibregl-ctrl-bottom-left > *',
   '.weather-legend',
+  '.traffic-bar',
+  '.truth-banner',
   '.perf',
 ].join(', ')
 

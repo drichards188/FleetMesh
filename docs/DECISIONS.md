@@ -224,3 +224,59 @@ The version moves from 1 to 2 and the policy schema from 1 to 2 (the new key). R
 rules 1 log under rules 1 (it needs `--rules 1` or `--min-rules 1`, as any older log does) and a
 rules 2 log under rules 2; `RULES_MARKERS` flags a log that claims rules 1 but carries a field rules
 2 added.
+
+## 2026-11-25: Other traffic: automation keeps clear, a person hears of issues (rules 3)
+
+The fleet shares the airspace and the water with traffic it does not control, and knows it only as
+a private company could: what its receivers hear and its own sensors see (docs/design/traffic.md).
+The maintainer's direction: the fleet should keep track of that traffic "as well as a private
+company would be able to", and "a human only intervenes for when an issue comes up".
+
+What changed, as rules 3 (`TRAFFIC_SEPARATION_SINCE`, policy schema 3):
+
+- **The picture is a decision input.** The bridge runs the tracker on the simulator's feeds (or a
+  real receiver's) and every delivery decision reads the picture, cut by the engine to the tracks
+  and receivers its checks read and logged by value, so replay decides on the same picture with no
+  simulator and no tracker. The picture is never the simulator's truth.
+- **The separation rule keeps clear of it** (delivery-rules.md section 8.1): well clear of manned
+  aircraft (draft 2,000 ft and 250 ft, ASTM F3442; they have the right of way, 14 CFR 107.37),
+  clear of other drones and of anything that broadcasts nothing (a bearing-only line as the line it
+  is), a boat's 0.25 nm closest approach to a ship under way and out of its way ahead (COLREGs rule
+  9), along the tracker's prediction widened by its uncertainty. Every conflict is a hold, never a
+  refusal: waiting or another route clears it, and a person may judge their own order.
+- **Automation handles it.** The traffic holds are waited out and never sent to the inbox: a
+  departure waits on the ground and is offered a route round the conflict after 30 s; a delivery or
+  return under way is held where it is (a drone hovers, a boat stands off) or, when the traffic
+  comes at it, re-planned round it. Each response is logged.
+- **A person only for issues**, each saying what happened, what automation did and what to do: a
+  conflict that outlasts automation's five minutes (`traffic_conflict`), an aircraft that broadcasts
+  nothing near a drone (`traffic_noncooperative_near`), a broadcast the company's own sensors
+  contradict (`traffic_broadcast_disagrees`), the picture degraded (`traffic_picture_degraded`, a
+  feed or receiver not heard; automation holds the departures that depended on it).
+
+Why holds and not refusals: a predicted conflict minutes or a minute ahead is uncertain and is
+cleared by time or a detour; a refusal would make the dispatcher re-propose (an intent each time)
+and would leave a person no way to judge their own order. Why the vertical cap and the 60 s horizon:
+the tracker's constant-velocity prediction grows as a random walk (1.5 km horizontally and 0.8 km
+vertically after two minutes for ADS-B), which would ground every drone under any aircraft; real
+detect-and-avoid looks about a minute ahead. Why under-way vehicles may leave a minimum: holding a
+drone next to the thing it should leave is the worst response.
+
+Found and fixed on the way (the tracker's integrity check flagged about 15 ordinary vessels in every
+harbour-city frame against a boat's radar: vessels moving alike, ferries on one route, sailboats in
+one wind): a broadcast is tied to what a sensor sees by motion only when it moves fast (an
+aircraft), else only when the sensor's view split off from it; a marine radar is compared only
+within half its range for the vessel's class; offsets under 500 m (1 km for a slow mover) are the
+sensors' own errors. The detect-and-avoid's ranges by target size were shorter than its reach, so
+aircraft it saw became bearing lines of their own. To make a wrong broadcast near the waterfront
+visible for what it is, harbour-city and wind-event switch on the Pier hub's ground radar (a
+bearing alone cannot contradict a position); its returns at the surface are vessels.
+
+Scenario data, fixed rather than any threshold: harbour-city's cars load at their own kerb on
+Marina Boulevard (routed to the drones' hub point they drove through landed drones and the
+separation rule refused them), and both Pier 39 scenarios' boats at a dock in the marina basin (the
+hub point is on the pier, and the domain rule refused a boat's pickup on land). A scenario's demand
+may give a hub its own zones (`zones_by_hub`).
+
+Rules 1 and 2 logs replay under their own rules; `RULES_MARKERS` flags a log that claims rules 2 but
+carries the picture or the traffic figures.

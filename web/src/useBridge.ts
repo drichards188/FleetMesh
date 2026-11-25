@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { operatorFetch, operatorHeaders } from './auth'
 import { getOperator, setBridgeOperators, type Decisions, type Intent, type Authorization } from './decisions'
 import { perfPush, perfUpdateStart } from './perf'
+import { pushTraffic } from './useTraffic'
 import type { BridgeState, Clusters, LngLat, TaskKind, Tasking, Vehicle, ViewSubscription } from './types'
 import type { GroupSpec } from './groupOrders'
 import type { ComposeKind } from './deliveryCompose'
@@ -117,6 +118,10 @@ export function useBridge() {
         } else if (msg.type === 'decisions') {
           setDecisions({ inbox: msg.inbox, intents: msg.intents, operators: msg.operators })
           setBridgeOperators(msg.operators)
+        } else if (msg.type === 'traffic') {
+          // the traffic picture (docs/design/traffic.md), about once a second: its own store,
+          // so it does not ride on the vehicles' state
+          pushTraffic(msg)
         } else if (msg.type === 'delta' && current) {
           const t0 = performance.now()
           current = withAges(applyDelta(current, msg as Delta))

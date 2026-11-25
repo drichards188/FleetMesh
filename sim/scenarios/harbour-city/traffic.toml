@@ -5,6 +5,16 @@ seed = 11
 at = "2026-06-14T17:00:00Z"
 duration_s = 3600
 
+# The world's QNH at the scenario's hour: the weather archive's sea-level pressure
+# (tidewater/data/cache/golden-gate-2026-06/weather.json, 2026-06-14 17:00Z), the QNH the bridge
+# reads from the same archive, so the pressure altitudes the receivers hear agree with it.
+qnh_hpa = 1014.5
+
+# The Pier hub's ground radar is on: it sees the aircraft round the waterfront where they are,
+# which is what shows a broadcast position to be wrong (the drones' detect-and-avoid gives bearings
+# only).
+ground_radar = ["radar-pier"]
+
 # a normal hour: the world's rates as they are
 [rates]
 
@@ -19,6 +29,17 @@ lat = 37.8063
 lon = -122.4385
 ground_m = 3
 agl_m = 70
+
+# A medical helicopter crossing the waterfront low (400 ft) from the city out over the Bay, across
+# the drones' routes east of the Marina hub: automation keeps the drones its path will reach on the
+# ground or holds them where they are until it has passed, and no person is asked.
+[[issue]]
+kind = "flight"
+name = "medical helicopter crossing the waterfront low"
+at_s = 600
+stream = "medevac"
+class = "helicopter"
+route = [[37.7900, -122.4320, 400, 70], [37.8250, -122.4320, 400, 70], [37.8600, -122.4000, 1500, 110]]
 
 # A container ship for Oakland passing under the Golden Gate Bridge, then along the Cityfront.
 [[issue]]

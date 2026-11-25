@@ -47,7 +47,10 @@ priority = 1
 [demand]
 rate_per_min = 3.0
 from_s = 30
-hubs = ["hub-marina", "hub-marina", "hub-marina", "hub-pier"]
+# the Marina's drone pads and the Pier's take most; the Marina's car kerb and the Pier's boat dock
+# a tenth each, each to the zones its vehicles reach
+hubs = ["hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-pier", "hub-pier", "hub-marina-kerb", "hub-pier-dock"]
+zones_by_hub = { "hub-marina-kerb" = ["dz-fort-mason-3", "dz-city-02", "dz-city-04", "dz-city-05", "dz-city-06", "dz-city-08", "dz-city-11", "dz-city-13", "dz-city-14", "dz-city-20"], "hub-pier-dock" = ["dz-sausalito-dock", "dz-angel-dock"] }
 zones = ["dz-fort-mason-3", "dz-city-02", "dz-city-03", "dz-city-04", "dz-city-05", "dz-city-06", "dz-city-07", "dz-city-08", "dz-city-09", "dz-city-10", "dz-city-11", "dz-city-12", "dz-city-13", "dz-city-14", "dz-city-15", "dz-city-16", "dz-city-17", "dz-city-18", "dz-city-19", "dz-city-20", "dz-city-21", "dz-city-22", "dz-sausalito-pad", "dz-sausalito-dock", "dz-angel-dock"]
 mass_kg = [0.2, 4.0]
 priority_mix = [0.02, 0.60, 0.30, 0.08]
@@ -70,6 +73,28 @@ lat = 37.8089
 radius_m = 80
 pads = 8
 packs = 10
+
+# The Marina's cars load at their own kerb on Marina Boulevard, clear of the drone pads (a car
+# routed to the drones' hub point drove through the landed drones, and the separation rule refused
+# its pickups), and the Pier's boats at the dock in the marina basin east of Pier 39 (the drones'
+# hub point is on the pier, on land, and the domain rule refused a boat's pickup there).
+[[hub]]
+id = "hub-marina-kerb"
+name = "Marina car kerb"
+lon = -122.4360
+lat = 37.8045
+radius_m = 40
+pads = 8
+packs = 8
+
+[[hub]]
+id = "hub-pier-dock"
+name = "Pier 39 boat dock"
+lon = -122.4092
+lat = 37.8095
+radius_m = 60
+pads = 4
+packs = 4
 
 [[dropzone]]
 id = "dz-fort-mason-3"

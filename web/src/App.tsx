@@ -63,6 +63,15 @@ import { deliveryLabelCandidates } from './deliveryLabels'
 import { buildDeliveryLayers, deliveryTooltip, type DeliveryData, type DeliveryDraw } from './deliveryLayers'
 import { deliveryRoutes } from './deliveryRoutes'
 import { suspectAreas } from './suspectAreas'
+import { alertTracks, TRAFFIC_ALERT_KINDS } from './decisions'
+import { perfPush } from './perf'
+import { declutter, disagreementPairs, matchTruth, type FleetContext, type ShownTrack } from './traffic'
+import { TrafficBar, type TrafficToggles } from './TrafficBar'
+import { TrafficDetails } from './TrafficDetails'
+import { buildTrafficLayers, trafficLabelCandidates, trafficTooltip, TRAFFIC_PICK_LAYERS, type TrafficLayerInput } from './trafficLayers'
+import { trackTitle, trackTooltip } from './trafficText'
+import { domainOf } from './types'
+import { useTraffic, useTrafficSensors, useTrafficTruth } from './useTraffic'
 
 /** The bridge's scenario clock (scenarioClock.ts, `scenario` in GET /api/weather): asked once the
  *  bridge answers, again on each reconnect (a restarted bridge has a new start) and each minute. A
@@ -117,6 +126,10 @@ function readInvite(): { operator: string; code: string } | null {
 /** The console. `onMenu`: the launcher's main menu (`make start`), shown over it; absent when
  *  the stack was started without the launcher. */
 const NO_INTENTS: Intent[] = []
+
+/** a track's details (TrafficDetails, .vdetails' width and its margin) open on the map's left: a
+ *  fit to the track keeps that much clear */
+const TRACK_PAD_LEFT = 360
 
 /** Up to this many silent vehicles are drawn with both their estimates, filled. */
 const CROWD_SILENT = 10
@@ -174,16 +187,16 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   const [officerDraft, setOfficerDraft] = useState('')
   const [inboxTab, setInboxTab] = useState<InboxTab>('inbox')
   const [inboxSel, setInboxSel] = useState<InboxSelection>(null)
-  const [fit, setFit] = useState<{ points: LngLat[]; n: number; padRight: number; aloft?: [number, number, number][] } | null>(null)
+  const [fit, setFit] = useState<{ points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][] } | null>(null)
   // the drawer shown lies beside the map rather than over its right edge (the layout's choice, set
   // where the map is laid out: `map` below; never in Cockpit): nothing covers the map then
   const dockBeside = useRef(false)
   /** frame these points on the map (MapView's `fit`), `padRight` px kept clear on its right for the
    *  drawer over it (the usual margin when the drawer lies beside the map); `aloft`, points up in
    *  the air that must be in view too */
-  const frame = useCallback((points: LngLat[], padRight: number, aloft?: [number, number, number][]) => {
+  const frame = useCallback((points: LngLat[], padRight: number, aloft?: [number, number, number][], padLeft?: number) => {
     const pad = dockBeside.current ? FIT_PAD : padRight
-    setFit((f) => ({ points, aloft, n: (f?.n ?? 0) + 1, padRight: pad }))
+    setFit((f) => ({ points, aloft, n: (f?.n ?? 0) + 1, padRight: pad, padLeft }))
   }, [])
   // predicted link coverage (docs/LINK-COVERAGE.md): the map layer, off by default, and the
   // drafted order's predicted link (the task panel's dry run)
@@ -211,7 +224,11 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // (the vehicle details, the platforms: that Escape is theirs, and a hundred selected must not go
   // with it) or the key is a text field's or a control's own
   const anySelected = selected.size > 0
-  const escapeTaken = detailsUid != null || showPlatforms
+  // the traffic layer (docs/design/traffic.md): the track selected (its details open) and the one
+  // under the pointer (its predicted path drawn)
+  const [trackSel, setTrackSel] = useState<string | null>(null)
+  const [trackHover, setTrackHover] = useState<string | null>(null)
+  const escapeTaken = detailsUid != null || showPlatforms || trackSel != null
   useEffect(() => {
     if (!anySelected || escapeTaken) return
     const onKey = (e: KeyboardEvent) => {
@@ -337,9 +354,93 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [delivery, drawn, state?.taskings, orderTick])
+  // ---- the traffic the fleet does not control (docs/design/traffic.md), as the company's tracker
+  // sees it: drawn by how much it matters to the fleet (traffic.ts declutter), never ground truth
+  const [trafficToggles, setTrafficToggles] = useState<TrafficToggles>({ on: true, air: true, surface: true, coverage: false, truth: false })
+  const setTraffic = useCallback((t: Partial<TrafficToggles>) => setTrafficToggles((o) => ({ ...o, ...t })), [])
+  // the traffic bar's feeds, open (its picture button, or a picture alert's link)
+  const [trafficFeeds, setTrafficFeeds] = useState(false)
+  const showFeeds = useCallback(() => setTrafficFeeds(true), [])
+  const traffic = useTraffic(true)
+  const picture = traffic.picture
+  const pictureRef = useRef(picture)
+  pictureRef.current = picture
+  const trafficSensors = useTrafficSensors(trafficToggles.on && traffic.available !== false)
+  // the simulator's truth: a dev run only, never asked for in a credentials run
+  const truthAllowed = auth.auth === 'dev'
+  const truthOn = trafficToggles.on && trafficToggles.truth && truthAllowed
+  const truthApi = useTrafficTruth(truthOn)
+  // what the fleet is, for what matters: read when a new picture comes (once a second)
+  const fleetCtx = useMemo<FleetContext>(() => {
+    const vs = vehiclesRef.current
+    const dom = new Map(vs.map((v) => [v.uid, domainOf(v)]))
+    return {
+      ours: vs.flatMap((v) => (v.position ? [{ uid: v.uid, at: v.position, altM: v.alt_msl, domain: domainOf(v) }] : [])),
+      routes: deliveryRoutes(state?.taskings ?? [], vs).map((r) => ({ uid: r.uid, path: r.path, domain: dom.get(r.uid) ?? 'air' })),
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picture?.t, state?.taskings])
+  // the tracks an alert names, and the one selected: near wherever they are
+  const alertTrackIds = useMemo(() => (decisions?.inbox.alerts ?? []).filter((a) => TRAFFIC_ALERT_KINDS.has(a.kind)).flatMap(alertTracks), [decisions?.inbox.alerts])
+  const forceKey = [...alertTrackIds, trackSel ?? ''].join()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const force = useMemo(() => new Set([...alertTrackIds, ...(trackSel ? [trackSel] : [])]), [forceKey])
+  const decl = useMemo(() => {
+    if (!picture || !trafficToggles.on) return null
+    const t0 = performance.now()
+    const d = declutter(picture.tracks, fleetCtx, { air: trafficToggles.air, surface: trafficToggles.surface, force })
+    perfPush('trafficSort', performance.now() - t0)
+    return d
+  }, [picture, fleetCtx, trafficToggles.on, trafficToggles.air, trafficToggles.surface, force])
+  const trafficTotals = useMemo(() => ({ air: picture?.tracks.filter((t) => t.domain === 'air').length ?? 0, surface: picture?.tracks.filter((t) => t.domain === 'surface').length ?? 0 }), [picture])
+  const trackIds = useMemo(() => new Set(picture?.tracks.map((t) => t.id) ?? []), [picture])
+  const hasTrack = useCallback((id: string) => trackIds.has(id), [trackIds])
+  // a track by the name the map gives it (an alert's subject when it is about no vehicle of ours)
+  const trackNameOf = useCallback((id: string) => {
+    const t = pictureRef.current?.tracks.find((x) => x.id === id)
+    return t ? trackTitle(t) : null
+  }, [])
+  // a broadcast the company's sensors contradict, joined to where they see it: as the tracker paired
+  // them when the bridge passes that on, else the nearest flagged non-cooperative track
+  const pairs = useMemo(() => {
+    if (!picture || !decl) return []
+    const shownIds = new Set(decl.shown.map((r) => r.track.id))
+    const byId = new Map(picture.tracks.map((t) => [t.id, t]))
+    const list = picture.disagreements
+      ? picture.disagreements.flatMap((d) => {
+          const b = byId.get(d.track)
+          const x = byId.get(d.sensed)
+          return b && x ? [{ broadcast: b, sensed: x }] : []
+        })
+      : disagreementPairs(picture.tracks)
+    return list.filter((p) => shownIds.has(p.broadcast.id) && shownIds.has(p.sensed.id))
+  }, [picture, decl])
+  const truthMatches = useMemo(() => (truthOn && truthApi.truth && picture ? matchTruth(truthApi.truth, picture.tracks) : null), [truthOn, truthApi.truth, picture])
+  const trafficInput = useMemo<TrafficLayerInput | null>(
+    () => (decl && picture ? { shown: decl.shown, pictureT: picture.t, selected: trackSel, hovered: trackHover, pairs, coverage: trafficToggles.coverage ? trafficSensors : null, truth: truthMatches } : null),
+    [decl, picture, trackSel, trackHover, pairs, trafficToggles.coverage, trafficSensors, truthMatches],
+  )
+  const trackRow = useMemo(() => (trackSel && decl ? (decl.shown.find((r) => r.track.id === trackSel) ?? null) : null), [trackSel, decl])
+  // a click on a track selects it (again: no longer); the pointer over one draws its predicted path
+  const trafficPick = useMemo(
+    () => ({
+      layers: TRAFFIC_PICK_LAYERS,
+      onPick: (_layer: string, o: unknown) => {
+        const id = (o as ShownTrack).track.id
+        setTrackSel((s) => (s === id ? null : id))
+      },
+    }),
+    [],
+  )
+  const onMapHover = useCallback((layer: string | null, object: unknown) => {
+    const id = layer && TRAFFIC_PICK_LAYERS.includes(layer) && object ? (object as ShownTrack).track.id : null
+    setTrackHover((h) => (h === id ? h : id))
+  }, [])
   // the map's layers over the vehicles, in one list (MapView's `layers`)
   const mapLayers = useCallback<MapLayers>(
     (screen, plan) => [
+      // other traffic first, under everything of ours
+      ...(trafficInput ? buildTrafficLayers(trafficInput, plan, screen) : []),
       ...nodeRegionLayers,
       ...estimateLayers(screen, plan),
       ...buildOrderLayers({ queued: queuedIntents ?? [], intents: allIntents ?? [], taskings: state?.taskings ?? [], vehicles, nowMs: now() }, plan),
@@ -347,7 +448,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       ...(deliveryData ? buildDeliveryLayers(deliveryData, drawn, plan, screen) : []),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodeRegionLayers, estimateLayers, stationLayers, deliveryData, drawn, queuedIntents, allIntents, state?.taskings, vehicles, orderTick],
+    [trafficInput, nodeRegionLayers, estimateLayers, stationLayers, deliveryData, drawn, queuedIntents, allIntents, state?.taskings, vehicles, orderTick],
   )
   // every text layer's labels for the one label budget (declutter.ts), with our vehicles' (MapView's):
   // the same data and ticks as the layers above, so a new plan comes with them
@@ -356,20 +457,31 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       ...(silent.length ? estimateLabelCandidates({ vehicles: silent, nowMs: now(), focus: detailsUid, inFocus: vehicleFocus, showAll: estimateAll }, screen) : []),
       ...orderLabelCandidates({ queued: queuedIntents ?? [], intents: allIntents ?? [], taskings: state?.taskings ?? [], vehicles, nowMs: now() }, screen),
       ...(deliveryData ? deliveryLabelCandidates(deliveryData, drawn, screen) : []),
+      // other traffic's last: ours keep their room first at equal priority
+      ...(trafficInput ? trafficLabelCandidates(trafficInput, screen) : []),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [silent, estimateTick, detailsUid, vehicleFocus, estimateAll, queuedIntents, allIntents, state?.taskings, vehicles, orderTick, deliveryData, drawn],
+    [silent, estimateTick, detailsUid, vehicleFocus, estimateAll, queuedIntents, allIntents, state?.taskings, vehicles, orderTick, deliveryData, drawn, trafficInput],
   )
   // the full block of a coverage station mark or an estimate under the pointer, while its label is not
+  const pictureT = picture?.t ?? 0
   const mapTooltip = useCallback(
     (layer: string, object: unknown) =>
       layer === EXCLUDED_PICK_LAYER
         ? { key: `x:${(object as ExcludedMark).uid}`, text: (object as ExcludedMark).text }
-        : (deliveryTooltip(layer, object, delivery.parcels.elapsed_s, nameOf) ?? estimateTooltip(layer, object)),
-    [delivery.parcels.elapsed_s, nameOf],
+        : (trafficTooltip(layer, object, (t) => trackTooltip(t, pictureT, nameOf)) ?? deliveryTooltip(layer, object, delivery.parcels.elapsed_s, nameOf) ?? estimateTooltip(layer, object)),
+    [delivery.parcels.elapsed_s, nameOf, pictureT],
   )
   // the reference views behind the top bar's one Layers button
   const views: ViewEntry[] = [
+    {
+      key: 'traffic',
+      label: 'Other traffic',
+      title: "Aircraft and vessels the fleet does not control, as the company's receivers and sensors see them",
+      on: trafficToggles.on && traffic.available !== false,
+      off: traffic.available === false ? 'no traffic picture in this run' : null,
+      onToggle: () => setTraffic({ on: !trafficToggles.on }),
+    },
     { key: 'weather', label: 'Weather', title: 'The weather here and at the selected vehicle, and a colour field on the map', on: showWeather, onToggle: () => setShowWeather((v) => !v) },
     { key: 'links', label: 'Links', title: 'Predicted link coverage on the map: up, degraded and down for a link class at an altitude', on: showCoverage, onToggle: () => setShowCoverage((v) => !v) },
     ...(
@@ -403,6 +515,25 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     },
     [state?.vehicles, revealVehicles, frame],
   )
+  /** a traffic alert's link: the track selected, its details open, framed with the vehicle */
+  const showTrack = useCallback(
+    (id: string, uid: number | null) => {
+      const t = pictureRef.current?.tracks.find((x) => x.id === id)
+      setTrackSel(id)
+      if (!t) return
+      setTrafficToggles((o) => ({ ...o, on: true, [t.domain]: true }))
+      const pts: LngLat[] = [[t.lon, t.lat]]
+      const v = uid != null ? (state?.vehicles ?? []).find((x) => x.uid === uid) : undefined
+      if (v?.position) pts.push(v.position)
+      // clear of the drawer on the right and of the track's details opening on the left
+      frame(pts, 430, undefined, TRACK_PAD_LEFT)
+    },
+    [state?.vehicles, frame],
+  )
+  const flyToTrack = useCallback(() => {
+    const t = trackRow?.track
+    if (t) frame([[t.lon, t.lat]], fitPad(dock), t.domain === 'air' && t.alt_m != null ? [[t.lon, t.lat, t.alt_m]] : undefined, TRACK_PAD_LEFT)
+  }, [trackRow, frame, dock])
   const [reviewFocus, setReviewFocus] = useState<{ id: string; n: number } | null>(null)
   /** a link to a review item's card in the Inbox, in view (the person decides there; nothing here
    *  decides) */
@@ -446,6 +577,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
 
   // right click: deselect one vehicle, or everything (uid null)
   const deselect = useCallback((uid: number | null) => {
+    if (uid == null) setTrackSel(null)
     setSelected((prev) => {
       if (uid == null) return prev.size ? new Set() : prev
       if (!prev.has(uid)) return prev
@@ -599,6 +731,10 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
           return link ? <TurnCause link={link} onShow={() => setDock('officer')} /> : null
         }}
         taskings={state?.taskings}
+        onTrack={showTrack}
+        hasTrack={hasTrack}
+        trackName={trackNameOf}
+        onPicture={showFeeds}
       />
     </ErrorBoundary>
   )
@@ -692,6 +828,8 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
             linkRoute={linkRoute}
             coverage={coverageImage}
             weather={showCoverage ? null : weatherView}
+            pick={trafficInput ? trafficPick : null}
+            onHover={onMapHover}
           />
         </ErrorBoundary>
         {/* the panels that pop out over the map (FloatingPanel.tsx): each opens on the free spot
@@ -737,6 +875,21 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
               </ErrorBoundary>
             </FloatingPanel>
           )}
+          {trackRow && picture && (
+            <FloatingPanel id="traffic-details" prefer="top-left" reserve={440}>
+              <ErrorBoundary name="Traffic details" className="floating">
+                <TrafficDetails
+                  row={trackRow}
+                  pictureT={picture.t}
+                  sensors={trafficSensors ?? []}
+                  nameOf={nameOf}
+                  truth={truthMatches?.find((m) => m.track?.id === trackRow.track.id) ?? null}
+                  onFly={flyToTrack}
+                  onClose={() => setTrackSel(null)}
+                />
+              </ErrorBoundary>
+            </FloatingPanel>
+          )}
           {showPlatforms && (
             <FloatingPanel id="platforms" prefer="top-left" reserve={600}>
               <ErrorBoundary name="Platforms" className="floating">
@@ -753,15 +906,40 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
             </FloatingPanel>
           )}
         </FloatLayer>
+        {/* the map's bars on its bottom left, stacked: other traffic over the weather */}
+        <div className="map-legends">
+        <ErrorBoundary name="Traffic" className="floating">
+          <TrafficBar
+            available={traffic.available}
+            toggles={trafficToggles}
+            set={setTraffic}
+            totals={trafficTotals}
+            near={decl?.counts.near ?? 0}
+            picture={picture?.picture ?? null}
+            pictureT={pictureT}
+            sensors={trafficSensors}
+            truthAllowed={truthAllowed}
+            truthAvailable={truthApi.available}
+            missed={truthMatches ? truthMatches.filter((m) => !m.track).length : null}
+            open={trafficFeeds}
+            setOpen={setTrafficFeeds}
+          />
+        </ErrorBoundary>
         <WeatherLegend mode={weatherMode}
           effects={weatherEffects} onEffects={fx => { setWeatherEffects(fx); saveEffects(fx); setShowCoverage(false) }}
           grid={weatherField.grid} error={showCoverage ? 'Hidden while the Links layer is on' : weatherField.error}
           />
+        </div>
         {/* the drawer docked over the map's right edge (Cockpit: the dock's), a direct child: the
             floating panels' area stops at it (floating.ts measureMap) */}
         {slot.drawer}
         {status !== 'live' && (
           <div className="banner" role="status">Lost contact with the bridge: reconnecting</div>
+        )}
+        {truthOn && status === 'live' && (
+          <div className="truth-banner" role="note">
+            Simulator truth shown: not available to a real operator
+          </div>
         )}
         {PERF_ON && <PerfOverlay />}
       </main>

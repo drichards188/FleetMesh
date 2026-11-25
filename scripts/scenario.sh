@@ -5,6 +5,7 @@
 # tide, current and wind from tidewater when its data is in the checkout. Settings (all optional):
 #   SCALE=0.25     a fraction of the fleet and of the demand (every unit keeps one vehicle)
 #   FLEETMESH_RATE=5  a faster scenario clock (needs FLEETMESH_AT, which the scenario gives)
+#   FLEETMESH_TRAFFIC=0  no traffic simulator (the scenario's air and sea traffic; on by default)
 # make down stops it.
 set -euo pipefail
 cd "$(dirname "$0")/.."

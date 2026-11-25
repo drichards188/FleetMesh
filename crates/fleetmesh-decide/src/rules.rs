@@ -181,7 +181,7 @@ pub enum UnknownEndurance {
 /// with the rules it was produced under. `run.started` records it. FleetMesh starts at 1;
 /// new behaviour is gated on a named `*_SINCE` constant set to the version that adds it
 /// (never a literal), and replay is taught the same gate in the same change.
-pub const RULES_VERSION: u32 = STANDING_APPROVALS_SINCE;
+pub const RULES_VERSION: u32 = TRAFFIC_SEPARATION_SINCE;
 
 /// Rules 2: delivery points are approved ahead of time and a person is asked only about an
 /// exception (docs/DECISIONS.md, 2026-11-25, "Routine deliveries need no person"). A drop zone
@@ -193,12 +193,26 @@ pub const RULES_VERSION: u32 = STANDING_APPROVALS_SINCE;
 /// standing_approvals = false` restores the rules 1 procedure (the comparison setting).
 pub const STANDING_APPROVALS_SINCE: u32 = 2;
 
+/// Rules 3: the fleet keeps clear of the traffic it does not control, as the company's picture
+/// shows it (docs/design/traffic.md, docs/DECISIONS.md 2026-11-25, "Other traffic: automation keeps
+/// clear, a person hears of issues"). A delivery order's decision reads the picture
+/// (`DeliveryInputs::picture`, cut to the tracks and receivers near the order, logged by value),
+/// and the separation rule keeps a drone well clear of manned aircraft (2,000 ft and 250 ft) and
+/// clear of other drones and of air tracks that broadcast nothing, a boat clear of ships under way
+/// (a 0.25 nm closest approach, and out of a ship's way ahead of it) and of other vessels, each
+/// along the tracker's prediction widened by its uncertainty; it holds an order whose route the
+/// picture no longer covers or whose picture is stale. `[rules.delivery.separation.traffic]` holds
+/// the figures (policy schema 3).
+pub const TRAFFIC_SEPARATION_SINCE: u32 = 3;
+
 /// The fields each rules version added to what a log carries: (the version that added it, where
 /// it is). Replay flags a log whose `run.started` claims an older version but that carries one of
 /// them (an event that could not have existed then: a newer log given an older header).
 pub const RULES_MARKERS: &[(u32, &str)] = &[
     (STANDING_APPROVALS_SINCE, "policy.rules.delivery.dropzone.standing_approvals"),
     (STANDING_APPROVALS_SINCE, "check.result.inputs.delivery.places.drop_zones.approval"),
+    (TRAFFIC_SEPARATION_SINCE, "policy.rules.delivery.separation.traffic"),
+    (TRAFFIC_SEPARATION_SINCE, "check.result.inputs.delivery.picture"),
 ];
 
 /// The newest decision rules this build can decide under and replay: [`RULES_VERSION`] itself,
@@ -219,8 +233,12 @@ pub const PREPARED_SPACE_MAX_AGE_MS: i64 = 5_000;
 /// This is the one a run of the default rules logs; a run under older rules logs the schema they
 /// logged ([`RulesConfig::policy_schema`]: 9 under rules 34, 8 under rules 33, 7 below them, whose
 /// keys it does not log). Schema 2 (rules 2, [`STANDING_APPROVALS_SINCE`]) adds
-/// `[rules.delivery.dropzone] standing_approvals`.
-pub const POLICY_SCHEMA: u32 = STANDING_APPROVALS_SCHEMA;
+/// `[rules.delivery.dropzone] standing_approvals`; schema 3 (rules 3,
+/// [`TRAFFIC_SEPARATION_SINCE`]) adds `[rules.delivery.separation.traffic]`.
+pub const POLICY_SCHEMA: u32 = TRAFFIC_SEPARATION_SCHEMA;
+
+/// The policy schema rules 3 logs: [`STANDING_APPROVALS_SCHEMA`] and the traffic figures.
+pub const TRAFFIC_SEPARATION_SCHEMA: u32 = 3;
 
 /// The policy schema rules 2 logs: [`POLICY_SCHEMA_V1`] and `standing_approvals`.
 pub const STANDING_APPROVALS_SCHEMA: u32 = 2;
@@ -302,10 +320,16 @@ impl RulesConfig {
         self.silent_rules().drift_mps
     }
 
-    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`): 2 from
-    /// rules 2 (`standing_approvals`), 1 before.
+    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`): 3 from
+    /// rules 3 (the traffic figures), 2 from rules 2 (`standing_approvals`), 1 before.
     pub fn policy_schema(&self) -> u32 {
-        if self.at_least(STANDING_APPROVALS_SINCE) { STANDING_APPROVALS_SCHEMA } else { POLICY_SCHEMA_V1 }
+        if self.at_least(TRAFFIC_SEPARATION_SINCE) {
+            TRAFFIC_SEPARATION_SCHEMA
+        } else if self.at_least(STANDING_APPROVALS_SINCE) {
+            STANDING_APPROVALS_SCHEMA
+        } else {
+            POLICY_SCHEMA_V1
+        }
     }
 
     /// Whether these rules include the behaviour a `*_SINCE` constant names (rules-versioning.md

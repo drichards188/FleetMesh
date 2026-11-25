@@ -24,6 +24,8 @@ export function PerfOverlay() {
       <br />
       weather frame <b>{f1(s.weatherFrame.mean)}</b> ms <span className="muted">(p95 {f1(s.weatherFrame.p95)}, n {s.weatherFrame.n})</span>
       <br />
+      traffic: merge <b>{f1(s.trafficMerge.mean)}</b> · sort <b>{f1(s.trafficSort.mean)}</b> · layers <b>{f1(s.trafficLayers.mean)}</b> ms <span className="muted">(p95 {f1(s.trafficLayers.p95)}, n {s.trafficLayers.n})</span>
+      <br />
       long tasks <b>{Math.round(s.longTaskMsPerS)}</b> ms/s
     </div>
   )

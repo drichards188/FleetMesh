@@ -108,6 +108,7 @@ unported=()
 for c in bridge standins linkemu auth; do
   if [ -d "crates/fleetmesh-$c" ]; then bins+=("fleetmesh-$c"); else unported+=("fleetmesh-$c"); fi
 done
+if [ -d crates/fleetmesh-traffic ]; then bins+=(fleetmesh-traffic); else unported+=(fleetmesh-traffic); fi
 if [ -d crates/fleetmesh-decide ]; then bins+=(fleetmesh-decide fleetmesh-replay); else unported+=(fleetmesh-decide); fi
 absent=()
 for b in "${bins[@]}"; do
@@ -143,7 +144,7 @@ answers() { timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
 # probe every port at once (a filtered port takes the whole second), then read the answers
 probed="$(mktemp -d)"
 trap 'rm -rf "$probed"' EXIT
-for p in 5173 8760 8761 8765 8766 8770; do
+for p in 5173 8760 8761 8765 8766 8767 8768 8769 8770 8771; do
   { answers "$p" && touch "$probed/$p"; } &
 done
 wait
@@ -152,6 +153,7 @@ what_is() {
   have curl || return 0
   case "$1" in
     8760) curl -sf --max-time 1 "http://127.0.0.1:$1/launcher/api/state" >/dev/null && echo " (the launcher, make start)" ;;
+    8767) curl -sf --max-time 1 "http://127.0.0.1:$1/health" >/dev/null && echo " (the FleetMesh traffic simulator)" ;;
     8765) curl -sf --max-time 1 "http://127.0.0.1:$1/api/state" >/dev/null && echo " (a FleetMesh bridge)" ;;
   esac
 }
@@ -170,8 +172,8 @@ check_ports() {
     warn "$label: in use: ${joined%, }; if that is FleetMesh, $stop"
   fi
 }
-check_ports "ports, console and menu (5173 8760 8761 8765 8766 8770)" "make down stops a stack and Ctrl-C in its terminal the menu (or kill \$(cat logs/launcher.pid))" \
-  5173:console 8760:launcher 8761:launcher-relay 8765:bridge 8766:link-emulator 8770:tidewater
+check_ports "ports, console and menu (5173 8760 8761 8765 8766 8767 8768 8769 8770 8771)" "make down stops a stack and Ctrl-C in its terminal the menu (or kill \$(cat logs/launcher.pid))" \
+  5173:console 8760:launcher 8761:launcher-relay 8765:bridge 8766:link-emulator 8767:traffic-http 8768:traffic-sbs 8769:traffic-ais 8770:tidewater 8771:traffic-json
 if [ -f logs/up.pid ] && kill -0 "$(cat logs/up.pid)" 2>/dev/null; then
   warn "stack: one started from this checkout is running (pid $(cat logs/up.pid)); make down stops it"
 fi

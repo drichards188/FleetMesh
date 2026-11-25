@@ -175,7 +175,16 @@ export interface Alert {
     | 'return_failed'
     // a delivery failed its tries and automation gave the parcel up
     | 'delivery_failed'
+    // traffic the fleet does not control (docs/design/traffic.md section 6): a predicted conflict
+    // automation could not clear, something with no broadcast close to one of ours, a broadcast the
+    // company's own sensors contradict, the picture itself degraded (a feed or receiver silent)
+    | 'traffic_conflict'
+    | 'traffic_noncooperative_near'
+    | 'traffic_broadcast_disagrees'
+    | 'traffic_picture_degraded'
   severity: Severity
+  /** the vehicle it is about; a traffic_picture_degraded alert is about none (null, absent or a uid
+   *  the fleet does not have: the card names the picture instead) */
   uid: number
   callsign: string | null
   detail: string
@@ -186,6 +195,10 @@ export interface Alert {
   folded_into?: string
   /** an issue automation raised: what happened, what it did, what the person might do */
   issue?: { problem: string; did: string; recommend: string }
+  /** a traffic alert: the track it is about (`trk-...`, as GET /api/traffic names it) */
+  track_id?: string
+  /** a traffic alert about more than one track (a broadcast and what the sensors see instead) */
+  track_ids?: string[]
 }
 
 export interface Inbox {
@@ -234,6 +247,18 @@ export const ALERT_LABEL: Record<Alert['kind'], string> = {
   zone_not_approved: 'DROP ZONE NOT APPROVED',
   return_failed: 'RETURN FAILED',
   delivery_failed: 'DELIVERY GIVEN UP',
+  traffic_conflict: 'TRAFFIC CONFLICT',
+  traffic_noncooperative_near: 'UNIDENTIFIED TRAFFIC NEAR',
+  traffic_broadcast_disagrees: 'BROADCAST DISAGREES WITH OUR SENSORS',
+  traffic_picture_degraded: 'TRAFFIC PICTURE DEGRADED',
+}
+
+/** The alert kinds about other traffic: their cards link to the track as well as the vehicle. */
+export const TRAFFIC_ALERT_KINDS: ReadonlySet<string> = new Set(['traffic_conflict', 'traffic_noncooperative_near', 'traffic_broadcast_disagrees', 'traffic_picture_degraded'])
+
+/** The tracks a traffic alert names, the first the one to show. */
+export function alertTracks(a: Pick<Alert, 'track_id' | 'track_ids'>): string[] {
+  return [...new Set([...(a.track_id ? [a.track_id] : []), ...(a.track_ids ?? [])])]
 }
 
 /** For an alert the bridge derives from a vehicle's state (an issue automation raised carries its
@@ -248,6 +273,12 @@ export const ALERT_RESPONSE: Partial<Record<Alert['kind'], { did: string; recomm
   restore_pending: { did: 'The bridge keeps asking the vehicle to restore its own failsafe values.', recommend: 'Wait; look at it if it does not confirm them.' },
   path_crosses_land: { did: 'Its safety order went as ordered.', recommend: 'Watch its way home over land.' },
   nav_monitor: { did: 'The navigation monitor proposed a safe order for it.', recommend: 'Approve the safe order if it waits for you; watch it until its navigation recovers.' },
+  // traffic (docs/design/traffic.md section 6): only what the alert's existence says, for a bridge
+  // that sends no words of its own (its `issue` says what automation actually did)
+  traffic_conflict: { did: 'Automation could not clear the conflict on its own (it holds, delays, hovers or re-routes first).', recommend: 'Look at the traffic and the vehicle on the map; hold or re-route the vehicle if the conflict stands.' },
+  traffic_noncooperative_near: { did: 'Only our own sensors see it: there is no broadcast to say what it is or where it goes.', recommend: 'Look at the track and how uncertain it is; hold or land the vehicle if it closes.' },
+  traffic_broadcast_disagrees: { did: 'The picture keeps the broadcast and what our sensors see as separate tracks.', recommend: 'Treat the broadcast position as unreliable: keep our vehicles clear of where the sensors see it.' },
+  traffic_picture_degraded: { did: 'Tracks from the silent feed or receiver coast, then drop: the picture there thins out.', recommend: 'Check the feed or the receiver; be wary of an empty picture where it covered.' },
 }
 
 // ---- operator ------------------------------------------------------------------------------

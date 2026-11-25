@@ -12,7 +12,8 @@ platform = "delivery_car"
 count = 8
 sim = "standin"
 spacing_m = 6
-spawn = [37.8053, -122.4368, 4, 0]
+# at the Marina car kerb (hub-marina-kerb), clear of the drone pads
+spawn = [37.8045, -122.4360, 4, 0]
 
 [[unit]]
 platform = "delivery_plane"

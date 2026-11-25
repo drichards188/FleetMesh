@@ -666,6 +666,8 @@ mod tests {
             op_id: None,
             intent_id: None,
             issue: None,
+            track_id: None,
+            track_ids: Vec::new(),
         }
     }
 

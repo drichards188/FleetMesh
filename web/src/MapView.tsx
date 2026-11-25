@@ -62,7 +62,7 @@ interface Props {
   /** inbox: fit the view to these points (n changes on every request); `aloft`, points at their
    *  height (metres above mean sea level) the view must hold too: the camera then backs off
    *  until they are in it */
-  fit?: { points: LngLat[]; n: number; padRight: number; aloft?: [number, number, number][] } | null
+  fit?: { points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][] } | null
   /** the view while it moves (4 times a second) and when it stops: centre, bounds (w, s, e,
    *  n) and zoom; what the bridge's level of detail follows (murmur-and) */
   onView?: (center: LngLat, bounds: Bounds, zoom: number) => void
@@ -95,6 +95,9 @@ interface Props {
   /** the full block of what is under the pointer, by its label key (`e:<uid>`...), for a layer
    *  and object not our vehicles: shown as a tooltip while its label is not drawn in full */
   tooltip?: (layerId: string, object: unknown) => { key: string; text: string } | null
+  /** extension layers whose objects a click picks (the traffic's tracks), after our vehicles and
+   *  the cluster markers and before a click on the map itself */
+  pick?: { layers: string[]; onPick: (layerId: string, object: unknown) => void } | null
 }
 
 /** The extension layers: called with what the camera cannot show (aloft.ts) and the label plan
@@ -233,7 +236,7 @@ function surfacePoint(m: maplibregl.Map, e: maplibregl.MapMouseEvent): LngLat {
   return water ? [water.lng, water.lat] : [ground.lng, ground.lat]
 }
 
-export function MapView({ vehicles, exceptions, taskings, selected, draft, focus, follow = null, onFollowing, preview = empty, fit, onToggle, onDeselect, onMapClick, onView, layers, clusters = null, coverage = null, weather = null, linkRoute = null, labels = undefined, tooltip: tooltipProp }: Props) {
+export function MapView({ vehicles, exceptions, taskings, selected, draft, focus, follow = null, onFollowing, preview = empty, fit, onToggle, onDeselect, onMapClick, onView, layers, clusters = null, coverage = null, weather = null, linkRoute = null, labels = undefined, tooltip: tooltipProp, onHover: onHoverProp, pick = null }: Props) {
   // the top view (pitch 0, looking straight down) and the pitch to tilt back to from it
   const [top, setTop] = useState(false)
   const tiltBack = useRef(INITIAL_PITCH)
@@ -266,6 +269,10 @@ export function MapView({ vehicles, exceptions, taskings, selected, draft, focus
   const planRef = useRef<LabelPlan>(ALL_FULL)
   const tooltipRef = useRef(tooltipProp)
   tooltipRef.current = tooltipProp
+  const hoverRef = useRef(onHoverProp)
+  hoverRef.current = onHoverProp
+  const pickRef = useRef(pick)
+  pickRef.current = pick
   // the surface drawings' inputs (surfaceLayers.ts), and what they were last built from
   const taskingsRef = useRef(taskings)
   const draftRef = useRef(draft)
@@ -553,6 +560,7 @@ export function MapView({ vehicles, exceptions, taskings, selected, draft, focus
     // What is under the pointer: its full block as a tooltip while its label is not drawn in full
     // (short or none, the label budget's), and a pointer over anything that has one.
     const onHover = (info: PickingInfo) => {
+      hoverRef.current?.(info.layer?.id ?? null, info.object ?? null)
       const v = info.layer && VEHICLE_PICK_LAYERS.includes(info.layer.id) ? (info.object as Vehicle | undefined) : undefined
       let tipKey: string | null = null
       let tipText = ''
@@ -742,6 +750,16 @@ export function MapView({ vehicles, exceptions, taskings, selected, draft, focus
       // a cluster marker: zoom in on it (two levels: its tile is then four markers or symbols)
       const c = pickCluster(e.point)
       if (c) return m.flyTo({ center: c.c, zoom: m.getZoom() + 2, duration: 700 })
+      // an extension layer's object (a traffic track)
+      const pk = pickRef.current
+      if (pk && overlay.current && ready.current) {
+        try {
+          const hit = overlay.current.pickObject({ x: e.point.x, y: e.point.y, radius: 6, layerIds: pk.layers })
+          if (hit?.layer && hit.object != null) return pk.onPick(hit.layer.id, hit.object)
+        } catch {
+          // deck.gl not initialised yet: a click on the map
+        }
+      }
       clickRef.current(surfacePoint(m, e))
     })
     // Right click deselects: a vehicle under the pointer, else everything. A right drag rotates
@@ -1279,7 +1297,12 @@ export function MapView({ vehicles, exceptions, taskings, selected, draft, focus
     const bounds = new maplibregl.LngLatBounds(fit.points[0], fit.points[0])
     for (const p of fit.points) bounds.extend(p)
     // clear of the drawer docked over the right edge, but leaving some of a narrow map to fit in
-    const padding = { top: 70, bottom: 70, left: 70, right: fitRight(fit.padRight + 20, m.getCanvas().clientWidth, 70) }
+    // a panel opening on the left (a track's details) keeps its room too, while the map is wide
+    // enough for both
+    const cw = m.getCanvas().clientWidth
+    const wide = fit.padLeft != null && cw - fit.padLeft - fitRight(fit.padRight + 20, cw, fit.padLeft) >= 160
+    const left = wide ? fit.padLeft! : 70
+    const padding = { top: 70, bottom: 70, left, right: fitRight(fit.padRight + 20, cw, left) }
     const options = { padding, maxZoom: 13, duration: 1000, bearing: m.getBearing() }
     const cam = fit.aloft?.length ? m.cameraForBounds(bounds, options) : undefined
     if (!cam?.center || cam.zoom == null) {

@@ -144,6 +144,10 @@ struct Rec {
     pending_alt: Option<(i64, f64, AltRef, f64)>,
     rejects: Vec<(i64, f64, f64)>,
     corroborated: Vec<(SensorKey, i64)>,
+    /// Where the track was at each sensor's last corroboration (local metres).
+    corroborated_xy: Vec<(SensorKey, [f64; 2])>,
+    /// A non-cooperative track's first position (local metres), when it began with one.
+    first_xy: Option<[f64; 2]>,
     hit_times: Vec<i64>,
     init_sensor: Option<SensorKey>,
     scan_ms: i64,
@@ -187,6 +191,8 @@ impl Rec {
             pending_alt: None,
             rejects: Vec::new(),
             corroborated: Vec::new(),
+            corroborated_xy: Vec::new(),
+            first_xy: None,
             hit_times: Vec::new(),
             init_sensor: None,
             scan_ms: 1_000,
@@ -217,10 +223,24 @@ impl Rec {
     }
 
     fn corroborate(&mut self, key: &SensorKey, t: i64) {
+        // where the track was when the sensor last saw it there (local metres)
+        let xy = self.kf.as_ref().map(|k| {
+            let (x, _) = k.at(t);
+            [x[0], x[1]]
+        });
         if let Some(c) = self.corroborated.iter_mut().find(|c| &c.0 == key) {
-            c.1 = c.1.max(t);
+            if t >= c.1 {
+                c.1 = t;
+                if let Some(xy) = xy {
+                    self.corroborated_xy.retain(|(k, _)| k != key);
+                    self.corroborated_xy.push((key.clone(), xy));
+                }
+            }
         } else {
             self.corroborated.push((key.clone(), t));
+            if let Some(xy) = xy {
+                self.corroborated_xy.push((key.clone(), xy));
+            }
         }
     }
 
@@ -1570,7 +1590,20 @@ impl Tracker {
         let domain = match d.sensor {
             SensorKind::Daa => Domain::Air,
             SensorKind::MarineRadar => Domain::Surface,
-            SensorKind::GroundRadar => site.and_then(|s| s.domain).unwrap_or(Domain::Air),
+            // a ground radar watches what its site says; one that says nothing watches both: a
+            // return that may be at the surface (its height from range and elevation within two
+            // sigmas of the elevation's error of `ground_radar_surface_m`) is the water's traffic
+            SensorKind::GroundRadar => match site.and_then(|s| s.domain) {
+                Some(dom) => dom,
+                None => match (d.range_m, d.elev_deg) {
+                    (Some(r), Some(e)) => {
+                        let h = alt + r * e.to_radians().sin() + r * r / (2.0 * 8.5e6);
+                        let sh = r * d.sigma_elev_deg.unwrap_or(self.cfg.elev_sigma_deg).to_radians();
+                        if h < self.cfg.ground_radar_surface_m + 2.0 * sh { Domain::Surface } else { Domain::Air }
+                    }
+                    _ => Domain::Air,
+                },
+            },
         };
         // The platform's own motion (for range rate), from its successive positions.
         let pl = self.platforms.entry(key.clone()).or_insert(Platform {
@@ -1937,6 +1970,7 @@ impl Tracker {
                 return;
             };
             r.alt_known = d.domain == Domain::Surface || d.polar.elev.is_some();
+            r.first_xy = Some([kf.x[0], kf.x[1]]);
             r.kf = Some(kf);
             self.stats.det_new_tracks += 1;
         } else {
@@ -2264,6 +2298,9 @@ impl Tracker {
         let g_vel = chi2_quantile(0.99, 2);
         struct Snap {
             no: u64,
+            first_t: i64,
+            first_xy: Option<[f64; 2]>,
+            class: Class,
             domain: Domain,
             x: [f64; 6],
             p: M6,
@@ -2293,6 +2330,9 @@ impl Tracker {
                 .collect();
             Snap {
                 no: r.no,
+                first_t: r.first_t,
+                first_xy: r.first_xy,
+                class: r.class,
                 domain: r.domain,
                 x,
                 p,
@@ -2303,7 +2343,8 @@ impl Tracker {
         let sensed: Vec<Snap> = self
             .recs
             .values()
-            .filter(|r| !r.cooperative && r.confirmed && r.lob.is_none())
+            // a position track, or one bearing lines fixed (triangulated): a line alone is no position
+            .filter(|r| !r.cooperative && r.confirmed && (r.lob.is_none() || r.triangulated))
             .filter_map(|r| r.kf.as_ref().map(|k| snap(r, k)))
             .collect();
         let mut results: Vec<(u64, Pairing)> = Vec::new();
@@ -2330,7 +2371,12 @@ impl Tracker {
                     let dx = n.x[0] - c.x[0];
                     let dy = n.x[1] - c.x[1];
                     let dist = (dx * dx + dy * dy).sqrt();
-                    if dist > cfg.disagree_radius_m {
+                    // farther than the sensors' own errors and registration reach, nearer than
+                    // the radius
+                    // (a slow mover farther: an escort tug or a pilot boat keeps a few hundred
+                    // metres from its ship, moving with it)
+                    let min_offset = if cspeed >= cfg.disagree_distinct_speed_mps { cfg.disagree_min_offset_m } else { cfg.disagree_min_offset_slow_m };
+                    if dist > cfg.disagree_radius_m || dist < min_offset {
                         continue;
                     }
                     // Not the same object by position ...
@@ -2389,8 +2435,17 @@ impl Tracker {
                         if t - slast > 3 * pl.scan_ms.max(1_000) {
                             continue;
                         }
+                        // the broadcast position well within the sensor's reach for what it is (a
+                        // marine radar sees a ship far and a sailboat near): there it would be seen
                         let (ex, ey) = (c.x[0] - pl.s[0], c.x[1] - pl.s[1]);
-                        if (ex * ex + ey * ey).sqrt() > pl.range_m {
+                        let reach = match (skey.0, c.class) {
+                            (SensorKind::MarineRadar, class) => cfg
+                                .radar_detect_range_m
+                                .get(&class)
+                                .map_or(pl.range_m, |r| (r * cfg.disagree_range_frac).min(pl.range_m)),
+                            _ => pl.range_m,
+                        };
+                        if (ex * ex + ey * ey).sqrt() > reach {
                             continue;
                         }
                         let seen = r
@@ -2399,6 +2454,28 @@ impl Tracker {
                             .find(|(k, _)| k == skey)
                             .map(|(_, ct)| *ct);
                         if seen.is_some_and(|ct| *slast - ct <= 2 * pl.scan_ms.max(1_000)) {
+                            continue;
+                        }
+                        // Motion ties the two together only for a fast mover (an aircraft): slow
+                        // ones move alike all the time in a crowded bay (ferries on one route,
+                        // sailboats in one wind, drones loitering). For those the sensor must have
+                        // seen the broadcast's object where it said it was (corroborated it), and
+                        // the track it sees instead must have begun there and then: its view of
+                        // the object split off from the broadcast. Once paired, the pair holds
+                        // while the rest does.
+                        let fast = cspeed >= cfg.disagree_distinct_speed_mps;
+                        let paired = r.disagree.pair.as_ref().is_some_and(|p| p.0 == n.no);
+                        let at_ct = r.corroborated_xy.iter().find(|(k, _)| k == skey).map(|(_, xy)| *xy);
+                        let split = match (n.first_xy, at_ct, seen) {
+                            (Some(f), Some(p), Some(ct)) if n.first_t >= ct - 2 * pl.scan_ms.max(1_000) && n.first_t - ct <= cfg.disagree_split_ms => {
+                                // it began where the broadcast's object was last seen, carried along
+                                let dt = (n.first_t - ct) as f64 / 1000.0;
+                                let (ex, ey) = (p[0] + c.x[3] * dt, p[1] + c.x[4] * dt);
+                                (f[0] - ex).hypot(f[1] - ey) <= cfg.disagree_split_gate_m
+                            }
+                            _ => false,
+                        };
+                        if !fast && !paired && !split {
                             continue;
                         }
                         if best.as_ref().is_none_or(|b| dist < b.0) {

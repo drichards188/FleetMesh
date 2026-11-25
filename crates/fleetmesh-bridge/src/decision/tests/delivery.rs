@@ -69,7 +69,9 @@ async fn the_drop_time_look_is_given_to_deliveries_and_reads_the_zones_feed() {
 
 #[test]
 fn automation_waits_out_only_stale_facts_traffic_and_the_look_never_a_limit() {
-    let rules = std::fs::read_to_string(root().join("crates/fleetmesh-decide/src/delivery_rules.rs")).expect("rules");
+    // the delivery rules' codes, and (rules 3) the separation rule's for other traffic
+    let rules = std::fs::read_to_string(root().join("crates/fleetmesh-decide/src/delivery_rules.rs")).expect("rules")
+        + &std::fs::read_to_string(root().join("crates/fleetmesh-decide/src/traffic.rs")).expect("traffic rules");
     for code in WAIT_OUT {
         assert!(rules.contains(&format!("\"{code}\"")), "{code} is a code the delivery rules give");
         let family_ok = code.starts_with("SEP_")
@@ -118,6 +120,7 @@ async fn an_issue_is_an_alert_saying_what_happened_what_automation_did_and_what_
             at_wall_s: clock::wall(),
             until_ms: Some(until.0),
             intent: Some(IntentId(3)),
+            track_ids: Vec::new(),
         },
     );
     let alerts = r.d.current_alerts();
@@ -162,4 +165,68 @@ async fn a_pickup_on_the_hubs_pads_loads_where_the_vehicle_stands() {
     assert_eq!(away.params.route, Some(vec![[hub.lon, hub.lat]]), "a vehicle outside the landing zone flies to the hub");
     // the task layer then loads it with no flight
     assert!(fleetmesh_decide::geo::haversine_m(LonLat::new(at[0], at[1]), hub.at()) <= hub.radius_m);
+}
+
+// ---- rules 3: the picture of other traffic ---------------------------------------------------------
+
+/// An SBS-1 airborne position (`MSG,3`) and velocity (`MSG,4`) as a receiver serves them.
+fn sbs_pair(session: u32, hex: &str, t_ms: i64, lat: f64, lon: f64, alt_ft: u32, kt: u32, track: u32) -> [String; 2] {
+    let d = chrono::DateTime::from_timestamp_millis(t_ms).expect("time");
+    let (date, time) = (d.format("%Y/%m/%d"), d.format("%H:%M:%S%.3f"));
+    [
+        format!("MSG,3,{session},1,{hex},1,{date},{time},{date},{time},,{alt_ft},,,{lat:.5},{lon:.5},,,0,0,0,0"),
+        format!("MSG,4,{session},1,{hex},1,{date},{time},{date},{time},,,{kt},{track},,,0,,0,0,0,0"),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_picture_of_other_traffic_is_what_a_decision_reads_and_what_the_api_serves() {
+    let r = rig();
+    r.vehicle(7, Firmware::Copter, "delivery_drone", (LAT, LON));
+    sleep(Duration::from_millis(500)).await;
+    // no source: no picture, and the API says so (404 is the route's; the body here)
+    assert!(r.d.traffic().built().is_none());
+    assert!(r.d.snapshot().delivery.as_ref().is_some_and(|d| d.picture.is_none()), "a run with no traffic source reads no picture");
+    let pic = r.d.traffic();
+    pic.attach("in_process");
+    pic.set_sensors(&[json!({"id": "net-adsb", "kind": "adsb_1090", "num": 9, "owner": "network", "nominal_range_m": 400000.0})], &BTreeSet::new());
+    // a helicopter at 500 ft, 600 m north of the drone, coming south at 80 kt: a minute of it
+    let t0 = r.d.traffic_now_ms();
+    for k in 0..6 {
+        let t = t0 + k * 1000;
+        let lat = LAT + 0.0054 - 0.00037 * k as f64;
+        for l in sbs_pair(9, "A0B1C2", t, lat, LON, 500, 80, 180) {
+            pic.ingest(super::traffic::Feed::Sbs, &l, t + 2_500);
+        }
+    }
+    r.d.traffic_tick();
+    let api = r.d.traffic_json(None);
+    let track = api["tracks"].as_array().and_then(|t| t.first()).cloned().expect("the helicopter is a track");
+    assert_eq!(track["ids"]["icao24"], json!("a0b1c2"));
+    assert!(api["picture"]["feeds"]["sbs"]["connected"] == json!(true) && api["picture"]["feeds"]["sbs"].get("lines_per_s").is_some(), "{api}");
+    assert!(api["disagreements"].is_array() && api["automation"].is_array(), "{api}");
+    // the decision layer's inputs carry it, its altitude above mean sea level and its prediction
+    let w = r.d.snapshot();
+    let p = w.delivery.as_ref().and_then(|d| d.picture.as_ref()).expect("rules 3 reads the picture");
+    let tf = p.tracks.first().expect("the track");
+    assert_eq!(tf.alt_ref, "baro");
+    assert!(tf.alt_m.is_some_and(|a| (a - 152.4).abs() < 30.0), "500 ft of pressure altitude: {tf:?}");
+    assert!(p.qnh_hpa.is_none() && tf.v_sigma_m.is_some_and(|s| s >= 100.0), "no QNH in this rig: standard pressure, the vertical sigma widened");
+    assert!(!tf.path.is_empty());
+    assert_eq!(p.config_sha256, pic.config().1);
+    // and a delivery the dispatcher would send now is held for it (automation waits it out)
+    r.d.feed().parcels.insert("p-1".into(), fleetmesh_decide::delivery::ParcelFact { mass_kg: Some(0.5), class: "normal".into(), state: fleetmesh_decide::delivery::ParcelState::Loaded, vehicle: Some(fleetmesh_decide::Uid::new("7")) });
+    let zone = "dz-harbour-17";
+    let req = IntentRequest {
+        task: "deliver".into(),
+        uids: vec![7],
+        params: crate::tasks::TaskParams { parcel: Some("p-1".into()), drop_zone: Some(zone.into()), release: Some("winch".into()), ..Default::default() },
+        constraints: Default::default(),
+        rationale: Some("test".into()),
+        group: None,
+    };
+    let preview = r.d.agent_dry_run(&fleetmesh_decide::AgentId::new("dispatcher"), &req).await.expect("dry run");
+    let sep = preview.checks.iter().find(|c| c.rule == fleetmesh_decide::RuleId::Separation).expect("separation");
+    assert!(sep.codes.iter().any(|c| c == "SEP_TRAFFIC_CONFLICT"), "{sep:?}");
+    assert!(sep.codes.iter().all(|c| WAIT_OUT.contains(&c.as_str())), "a conflict with traffic is automation's to wait out: {sep:?}");
 }

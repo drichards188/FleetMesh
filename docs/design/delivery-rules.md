@@ -41,9 +41,10 @@ hub: if a rule returns `NotEvaluated` for these, the order is refused. Fail clos
    and navigation rules that make them impossible). A vehicle that cannot take a delivery can
    still be told to stop.
 6. **Rules are versioned.** The rules below are rules version 1 except where a section says
-   "from rules 2". Changing any of them means a new `*_SINCE` constant
+   "from rules 2" or "from rules 3". Changing any of them means a new `*_SINCE` constant
    ([rules-versioning.md](rules-versioning.md)); rules 2 is `STANDING_APPROVALS_SINCE` (standing
-   approved delivery points, section 10).
+   approved delivery points, section 10), rules 3 `TRAFFIC_SEPARATION_SINCE` (other traffic,
+   section 8.1).
 7. **A person is asked about exceptions only.** Routine deliveries run with no person (rules 2,
    docs/DECISIONS.md 2026-11-25). What real operations automate (a stale fact read again,
    departures sequenced round other traffic, the drop-time look) is automation's: the dispatcher
@@ -285,9 +286,9 @@ order sequence number (not randomness). Inbound routes use the intermediate laye
 `[70, 90, 110]`. The plane uses its own `typical_alt_m`. This is a v1 convention in dispatch, not
 a rule; the rule only sees altitudes.
 
-**Not modelled.** Aircraft that are not in the fleet, birds, people on the ground. Remote ID and
-strategic coordination with other operators are in [keep-out.md](keep-out.md) as an optional
-integration.
+**Not modelled.** Birds, people on the ground (aircraft and vessels that are not in the fleet: from
+rules 3, section 8.1). Strategic coordination with other operators is in [keep-out.md](keep-out.md)
+as an optional integration.
 
 **Cost.** Pair checks are done on a grid of positions at each step; at 5,000 vehicles the cost is
 bounded by vehicles per cell. Order of iteration is by uid so results are the same on any machine.
@@ -296,6 +297,37 @@ replay recomputes from the logged routes.
 
 **Knobs.** The table above; `separation.step_s`, `horizon_s`, `marginal_factor`, `drift_mps`,
 `relevant_km`.
+
+### 8.1 Other traffic (from rules 3, `TRAFFIC_SEPARATION_SINCE`)
+
+From rules 3 the rule also reads the company's picture of the traffic it does not control
+(docs/design/traffic.md, section 10): `DeliveryInputs::picture`, the tracker's tracks with their
+predictions and the receivers heard, cut by the engine to the tracks of the order's vehicles'
+domains within `relevant_km` of their positions and the order's points, and logged by value. Code
+in `crates/fleetmesh-decide/src/traffic.rs`.
+
+| our vehicle | traffic | minimum (horizontal, vertical) | ahead | hold |
+| --- | --- | --- | --- | --- |
+| air | manned aircraft (ADS-B; or one our sensors see whose broadcast disagrees) | `manned_h_m` 610 m (2,000 ft), `manned_v_m` 76 m (250 ft): ASTM F3442 well clear; manned aircraft have the right of way | `horizon_s` 60 s | `SEP_TRAFFIC_CONFLICT` |
+| air | another operator's drone (Remote ID) | `drone_h_m` 100 m, `drone_v_m` 30 m | 60 s | `SEP_TRAFFIC_CONFLICT` |
+| air | an air track that broadcasts nothing | `noncoop_h_m` 300 m, `noncoop_v_m` 60 m; a bearing-only track along its whole line, moving at `noncoop_speed_mps` 20 m/s since | 60 s (a line: `bearing_horizon_s` 20 s) | `SEP_TRAFFIC_NONCOOP` |
+| surface | a ship under way (`ship_classes`: cargo, tanker, passenger, ferry; at `underway_mps` 0.5 m/s or more, not moored or at anchor) | closest approach `ship_cpa_m` 463 m (0.25 nm); and its course ahead is not crossed within `ship_cross_ahead_s` 300 s of its arrival (COLREGs rule 9) | `surface_horizon_s` 300 s | `SEP_SHIP_CPA`, `SEP_SHIP_AHEAD` |
+| surface | any other vessel | `surface_surface_m` 30 m | 60 s | `SEP_TRAFFIC_CONFLICT` |
+| ground | none: no traffic model | | | |
+
+Each minimum is widened by the prediction's 1-sigma times `sigma_factor` (1.0); the vertical
+1-sigma grows at most `vrate_mps` (1 m/s) from the track's own (a level aircraft's altitude does
+not random-walk; its reported vertical rate is in the prediction). Both altitudes are above mean
+sea level (a pressure altitude brought there with the QNH, its conversion's uncertainty in the
+sigma: 120 m without a QNH). A vehicle under way (in the air above 5 m, a boat making way) that is
+inside a minimum now and opening the distance is leaving it: not a conflict. Every conflict is a
+`hold`: automation waits it out on the ground, holds or re-plans under way, and a person's own
+order waits for that person. Also: `SEP_PICTURE_DEGRADED` when no ADS-B receiver heard covers an
+air route (every point within a hub receiver's range, or a network feed heard), no AIS one a
+boat's; `SEP_TRAFFIC_UNKNOWN` for a picture older than `max_age_s` (10 s). A run with no picture
+(no traffic source) checks nothing of it and says so. Knobs: `[rules.delivery.separation.traffic]`
+(policy schema 3), every figure a draft. The result's detail names each conflict (the track, when,
+how far against its widened minimum) and the closest track that did not conflict.
 
 ## 9. Navigation integrity (`nav_integrity`)
 
@@ -562,5 +594,8 @@ input (`delivery::DeliveryInputs`) the rule reads and never defaults:
   bridge does not track yet (`NavFacts::range_mismatch_m`, `wrong_surface`, `prev_state`).
 - The in-flight monitor that proposes a hold or land when trust falls (section 9) is not built.
 - Separation reads other vehicles' positions and velocities; their routes are not yet in the
-  bridge's traffic facts.
+  bridge's traffic facts. From rules 3 it reads the picture of other traffic too (section 8.1);
+  tests in `crates/fleetmesh-decide/src/traffic.rs` and `tests/delivery.rs` (a low helicopter held
+  for and a high one not, the trimmed picture logged and replayed, a stale or uncovered picture, no
+  picture, a car; rules 1, 2 and 3 logs replayed, each with the wrong header found).
 

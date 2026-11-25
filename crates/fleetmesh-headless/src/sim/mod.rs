@@ -23,6 +23,7 @@ pub mod silent;
 pub mod space_cache;
 pub mod spec;
 pub mod terrain;
+pub mod traffic;
 pub mod water;
 
 use std::collections::BTreeSet;
@@ -602,6 +603,11 @@ async fn assemble(spec: &Spec) -> Result<Parts, String> {
                 }
             }));
         });
+    }
+    // the traffic the fleet does not control, and the company's picture of it, in process
+    if let Some(f) = traffic::scenario_file(&spec.root) {
+        let t = traffic::load(&spec.root, &f, spec.epoch)?;
+        traffic::spawn(t, world.clone(), decision.clone(), bridge_up);
     }
     tokio::spawn(perf::timed("emulator", emu.clone().run()));
     tokio::spawn(perf::timed("emulator.terrain", emu.clone().run_terrain()));

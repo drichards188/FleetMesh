@@ -25,6 +25,10 @@
 #   FLEETMESH_HTTP_PORT         8765   bridge REST + WebSocket
 #   FLEETMESH_WEB_PORT          5173   console (vite)
 #   FLEETMESH_TIDEWATER_PORT    8770   tidewater serve (reused if one already answers there)
+#   FLEETMESH_TRAFFIC_HTTP_PORT 8767   traffic simulator HTTP (/health /sensors /truth /stats)
+#   FLEETMESH_TRAFFIC_SBS_PORT  8768   traffic simulator ADS-B feed (TCP, SBS text)
+#   FLEETMESH_TRAFFIC_AIS_PORT  8769   traffic simulator AIS feed (TCP, NMEA)
+#   FLEETMESH_TRAFFIC_JSON_PORT 8771   traffic simulator JSON feed (TCP)
 #   FLEETMESH_SITL_INSTANCE_BASE 0     first SITL instance (TCP 5760 + 10*instance)
 #   FLEETMESH_STANDIN_SRC_BASE  unset  stand-in i (in sim/run/standins.json's order) sends from UDP
 #                                   base + i; unset, from an ephemeral port as before. Set it for
@@ -43,6 +47,12 @@
 # one on FLEETMESH_WEB_PORT, whose origin the bridge still accepts. FLEETMESH_WEB=preview builds the
 # console and serves the production build instead of the dev server (make stress).
 # FLEETMESH_WEB_MODE=build does the same where the dev server would run (default dev).
+# The traffic simulator (crates/fleetmesh-traffic, docs/design/traffic.md) runs when the scenario
+# has a traffic file (FLEETMESH_TRAFFIC_SCENARIO, set by scripts/scenario_env.py); FLEETMESH_TRAFFIC=1
+# runs it with the world alone and no scenario file; FLEETMESH_TRAFFIC=0 (or off, false, no) never.
+# It starts before the bridge, which connects to it only when FLEETMESH_TRAFFIC_URL is set (done
+# here); a FLEETMESH_TRAFFIC_URL already set to a simulator that answers /health is reused, not
+# started again. Log: logs/traffic.log.
 # FLEETMESH_TIDEWATER_URL overrides the port with any running `tidewater serve`. The scenario
 # clock (FLEETMESH_AT, FLEETMESH_RATE) goes to the stand-ins, tidewater drive, the emulator;
 # a FLEETMESH_RATE other than 1 needs FLEETMESH_AT (refused otherwise).
@@ -98,7 +108,7 @@ fi
 # build first (a no-op when fresh), so vehicles don't wait on a bridge that is still compiling;
 # only the crates this checkout has
 pkgs=()
-for c in bridge standins linkemu decide auth; do
+for c in bridge standins linkemu decide auth traffic; do
   if [ -d "crates/fleetmesh-$c" ]; then pkgs+=(-p "fleetmesh-$c"); fi
 done
 cargo="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
@@ -146,7 +156,7 @@ cleanup() {
   trap - INT TERM EXIT
   [ ${#pids[@]} -gt 0 ] && kill "${pids[@]}" 2>/dev/null || true
   wait 2>/dev/null || true
-  rm -f logs/up.pid logs/tidewater-serve.pid logs/linkemu.pid
+  rm -f logs/up.pid logs/tidewater-serve.pid logs/linkemu.pid logs/traffic.pid
 }
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM  # a requested stop (Ctrl-C, make down) is a clean exit
@@ -211,6 +221,50 @@ if [ "$linkemu" = 1 ]; then
 else
   echo "linkemu: off (FLEETMESH_LINKEMU=0); vehicles talk to the bridge directly"
 fi
+
+# the traffic simulator (docs/design/traffic.md): the bridge reads its feeds only when
+# FLEETMESH_TRAFFIC_URL is set, so that is set here when it runs and cleared when it does not
+export FLEETMESH_TRAFFIC_HTTP_PORT="${FLEETMESH_TRAFFIC_HTTP_PORT:-8767}"
+export FLEETMESH_TRAFFIC_SBS_PORT="${FLEETMESH_TRAFFIC_SBS_PORT:-8768}"
+export FLEETMESH_TRAFFIC_AIS_PORT="${FLEETMESH_TRAFFIC_AIS_PORT:-8769}"
+export FLEETMESH_TRAFFIC_JSON_PORT="${FLEETMESH_TRAFFIC_JSON_PORT:-8771}"
+traffic_want=0
+case "${FLEETMESH_TRAFFIC:-}" in
+  0|off|false|no) echo "traffic: off (FLEETMESH_TRAFFIC=0)" ;;
+  1|on|true|yes) traffic_want=1 ;;
+  *)
+    if [ -n "${FLEETMESH_TRAFFIC_SCENARIO:-}" ] || [ -n "${FLEETMESH_TRAFFIC_URL:-}" ]; then traffic_want=1
+    else echo "traffic: no scenario traffic file"; fi
+    ;;
+esac
+if [ "$traffic_want" = 1 ] && [ -n "${FLEETMESH_TRAFFIC_URL:-}" ] \
+   && curl -sf -m 2 "$FLEETMESH_TRAFFIC_URL/health" > /dev/null; then
+  echo "traffic: using the simulator at $FLEETMESH_TRAFFIC_URL"
+elif [ "$traffic_want" = 1 ] && [ ! -x target/release/fleetmesh-traffic ]; then
+  echo "traffic: no target/release/fleetmesh-traffic (make build); continuing without it" >&2
+  unset FLEETMESH_TRAFFIC_URL
+elif [ "$traffic_want" = 1 ]; then
+  if [ -n "${FLEETMESH_TRAFFIC_SCENARIO:-}" ] && [ ! -f "$FLEETMESH_TRAFFIC_SCENARIO" ]; then
+    echo "FLEETMESH_TRAFFIC_SCENARIO: no file $FLEETMESH_TRAFFIC_SCENARIO" >&2
+    exit 1
+  fi
+  traffic_args=(--config sim/traffic.toml --bridge "http://127.0.0.1:$FLEETMESH_HTTP_PORT")
+  [ -n "${FLEETMESH_TRAFFIC_SCENARIO:-}" ] && traffic_args+=(--scenario "$FLEETMESH_TRAFFIC_SCENARIO")
+  export FLEETMESH_TRAFFIC_URL="http://127.0.0.1:$FLEETMESH_TRAFFIC_HTTP_PORT"
+  target/release/fleetmesh-traffic "${traffic_args[@]}" > logs/traffic.log 2>&1 & pids+=($!)
+  echo "${pids[-1]}" > logs/traffic.pid
+  echo -n "traffic: starting (sbs :$FLEETMESH_TRAFFIC_SBS_PORT, ais :$FLEETMESH_TRAFFIC_AIS_PORT, json :$FLEETMESH_TRAFFIC_JSON_PORT, http :$FLEETMESH_TRAFFIC_HTTP_PORT)"
+  for _ in $(seq 60); do
+    curl -sf -m 2 "$FLEETMESH_TRAFFIC_URL/health" > /dev/null && break
+    kill -0 "${pids[-1]}" 2>/dev/null || { echo; echo "traffic exited; see logs/traffic.log" >&2; exit 1; }
+    echo -n .; sleep 1
+  done
+  curl -sf -m 2 "$FLEETMESH_TRAFFIC_URL/health" > /dev/null \
+    || { echo; echo "traffic did not answer in 60 s; see logs/traffic.log" >&2; exit 1; }
+  echo " up"
+fi
+# a simulator the user pointed at but that is not answering is not used either
+[ "$traffic_want" = 1 ] || unset FLEETMESH_TRAFFIC_URL
 
 # exec in each subshell so the tracked pid is the real process and cleanup reaches it
 .venv/bin/python sim/swarm.py --base-port "$vehicle_base" --bridge-host "$link_host" "$@" > logs/sim.log 2>&1 & pids+=($!)

@@ -289,6 +289,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(perf::report());
     tokio::spawn(world.clone().housekeeping());
     tokio::spawn(decision.clone().run());
+    // the company's picture of other traffic, from the traffic simulator's feeds
+    // (FLEETMESH_TRAFFIC_URL; docs/design/traffic.md)
+    tokio::spawn(decision.clone().run_traffic_live());
     // what a person alone is holding up (display only; the headless simulator does not look)
 
     let frames = Arc::new(watch::channel(None).0);

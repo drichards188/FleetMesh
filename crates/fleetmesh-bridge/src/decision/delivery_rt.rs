@@ -111,6 +111,10 @@ struct DemandToml {
     until_s: Option<f64>,
     hubs: Vec<String>,
     zones: Vec<String>,
+    /// A hub listed here draws its parcels' zones from its own list (a car hub's kerbs, a boat
+    /// dock's docks) instead of `zones`.
+    #[serde(default)]
+    zones_by_hub: BTreeMap<String, Vec<String>>,
     #[serde(default = "default_mass")]
     mass_kg: [f64; 2],
     #[serde(default = "default_mix")]
@@ -165,6 +169,10 @@ pub struct Automation {
     pub hold_retry_max_s: f64,
     /// How long an issue alert stays in the inbox after automation raised it, s.
     pub issue_show_s: f64,
+    /// Rules 3: an order that has waited this long for other traffic (a conflict the separation
+    /// rule predicts) is offered a route round it, s; after `hold_retry_max_s` the person is told
+    /// (an issue alert) and automation goes on waiting, never sending the order to the inbox.
+    pub traffic_replan_after_s: f64,
 }
 
 impl Default for Automation {
@@ -179,6 +187,7 @@ impl Default for Automation {
             hold_retry_s: 15.0,
             hold_retry_max_s: 300.0,
             issue_show_s: 300.0,
+            traffic_replan_after_s: 30.0,
         }
     }
 }
@@ -199,7 +208,25 @@ pub const WAIT_OUT: &[&str] = &[
     "NAV_TRUST_UNKNOWN",
     "LINK_PLAN_UNKNOWN",
     "INPUT_UNKNOWN",
+    // rules 3: other traffic (TRAFFIC_CODES): waited out on the ground, held or re-planned in flight
+    "SEP_TRAFFIC_CONFLICT",
+    "SEP_TRAFFIC_NONCOOP",
+    "SEP_SHIP_CPA",
+    "SEP_SHIP_AHEAD",
+    "SEP_PICTURE_DEGRADED",
 ];
+
+/// Rules 3: the holds for other traffic. Automation waits them out (a vehicle on the ground stays
+/// there, one under way holds), offers a route round a conflict after `traffic_replan_after_s`,
+/// and never sends the order to the inbox for them: a conflict that outlasts `hold_retry_max_s` is
+/// an issue alert (`traffic_conflict`), a picture that no longer covers a route another
+/// (`traffic_picture_degraded`).
+pub const TRAFFIC_CODES: &[&str] = &["SEP_TRAFFIC_CONFLICT", "SEP_TRAFFIC_NONCOOP", "SEP_SHIP_CPA", "SEP_SHIP_AHEAD", "SEP_PICTURE_DEGRADED"];
+
+/// Whether `codes` hold for other traffic.
+fn for_traffic(codes: &[String]) -> bool {
+    codes.iter().any(|c| TRAFFIC_CODES.contains(&c.as_str()))
+}
 
 /// The holds that are the drop zone's look (waited out at the hub up to `depart_wait_s`).
 const LOOK_CODES: &[&str] = &["DZ_PEOPLE_NEAR", "DZ_OBSERVATION_STALE"];
@@ -332,7 +359,8 @@ impl Scenario {
                 }
                 n += 1;
                 let hub = g.hubs[(rng.next() % g.hubs.len() as u64) as usize].clone();
-                let zone = g.zones[(rng.next() % g.zones.len() as u64) as usize].clone();
+                let zones = g.zones_by_hub.get(&hub).filter(|z| !z.is_empty()).unwrap_or(&g.zones);
+                let zone = zones[(rng.next() % zones.len() as u64) as usize].clone();
                 let mass = g.mass_kg[0] + rng.unit() * (g.mass_kg[1] - g.mass_kg[0]);
                 let u = rng.unit();
                 let mut acc = 0.0;
@@ -503,11 +531,27 @@ struct Job {
     waiting_on: Vec<String>,
     /// Its holds were waited out as long as automation waits: the next proposal goes as it is.
     escalated: bool,
+    /// Rules 3: the route round other traffic the next deliver takes (its waypoints).
+    via: Vec<LonLat>,
+    /// Rules 3: tried a route round other traffic during this wait.
+    replanned: bool,
 }
 
 impl Job {
     fn new(parcel: Option<String>, stage: Stage, intent: Option<IntentId>, now_ms: i64) -> Job {
-        Job { parcel, stage, intent, confirm: None, proposed_ms: now_ms, not_before_ms: 0, waiting_since_ms: None, waiting_on: Vec::new(), escalated: false }
+        Job {
+            parcel,
+            stage,
+            intent,
+            confirm: None,
+            proposed_ms: now_ms,
+            not_before_ms: 0,
+            waiting_since_ms: None,
+            waiting_on: Vec::new(),
+            escalated: false,
+            via: Vec::new(),
+            replanned: false,
+        }
     }
 }
 
@@ -531,6 +575,8 @@ pub struct Issue {
     /// shown until this time on the decision clock (none: while its cause lasts)
     pub until_ms: Option<i64>,
     pub intent: Option<IntentId>,
+    /// Rules 3: the traffic tracks it is about (the broadcast first, then what the sensors see)
+    pub track_ids: Vec<String>,
 }
 
 /// Everything the runtime keeps between steps.
@@ -564,6 +610,31 @@ pub struct Runtime {
     waits_said: BTreeMap<DUid, String>,
     /// Returns to a hub that ended short of it in a row, by vehicle (a failed upload is tried again).
     return_failures: BTreeMap<DUid, u32>,
+    /// Rules 3: the vehicles automation is keeping clear of other traffic (on the ground, or held
+    /// under way), and what for.
+    pub traffic_waits: BTreeMap<DUid, TrafficWait>,
+    /// Rules 3: when the traffic monitor last looked.
+    last_traffic_ms: i64,
+    /// Rules 3: where each non-cooperative aircraft's issue last saw it, and when (ms).
+    noncoop_seen: BTreeMap<String, (LonLat, i64)>,
+    /// Rules 3: when each non-cooperative track was first near a drone (ms).
+    noncoop_first: BTreeMap<String, i64>,
+}
+
+/// Rules 3: a vehicle automation keeps clear of other traffic.
+#[derive(Clone, Debug)]
+pub struct TrafficWait {
+    pub since_ms: i64,
+    /// the holding checks' words
+    pub why: String,
+    pub codes: Vec<String>,
+    /// what automation did, in words (waits at the hub, holds where it is, a route round it)
+    pub did: String,
+    /// under way (held where it is) rather than on the ground
+    pub under_way: bool,
+    pub parcel: Option<String>,
+    /// shown until then (a pickup that waits has no job to follow), ms
+    pub until_ms: Option<i64>,
 }
 
 /// A return to a hub that fails (a mission upload with no answer, a link that drops mid-exchange)
@@ -650,6 +721,8 @@ impl Decision {
         self.refresh_feed(now).await;
         self.follow_jobs(now).await;
         self.watch_navigation(now).await;
+        // rules 3: other traffic (the monitor under way, and the picture's own issues)
+        self.watch_traffic(now).await;
         self.recharge(now);
         self.dispatch_parcels(now).await;
         self.publish_parcels();
@@ -871,6 +944,30 @@ impl Decision {
         })
     }
 
+    /// The QNH now, hPa, for the traffic picture: the weather archive's pressure at the hubs (on
+    /// the shore, a few metres above sea level: their surface pressure is the sea-level pressure
+    /// within half a hectopascal), the middle of them. None where the weather gives none (no
+    /// archive, a point it does not cover): the picture then says standard pressure was used.
+    pub(super) fn qnh_now(&self) -> Option<f64> {
+        let now = self.clock.now();
+        let rt = self.rt();
+        let s = rt.scenario.as_ref()?;
+        let el = self.elapsed(&rt, now);
+        let t_unix = scenario_unix(now, el);
+        let mut p: Vec<f64> = self
+            .places
+            .hubs
+            .values()
+            .filter_map(|h| s.store.at(h.lat, h.lon, t_unix, el).values.pressure_hpa)
+            .filter(|p| (900.0..=1100.0).contains(p))
+            .collect();
+        if p.is_empty() {
+            return None;
+        }
+        p.sort_by(f64::total_cmp);
+        Some(p[p.len() / 2])
+    }
+
     // ---- the vehicles' state ---------------------------------------------------------------
 
     /// Each vehicle that is idle at a hub, with its battery and what it is.
@@ -1059,6 +1156,7 @@ impl Decision {
                             at_wall_s: crate::clock::wall(),
                             until_ms: Some(now.0 + (a.issue_show_s * 1000.0) as i64),
                             intent: Some(id),
+                            track_ids: Vec::new(),
                         },
                     );
                     return;
@@ -1109,6 +1207,7 @@ impl Decision {
                             at_wall_s: crate::clock::wall(),
                             until_ms: Some(now.0 + (a.issue_show_s * 1000.0) as i64),
                             intent: Some(id),
+                            track_ids: Vec::new(),
                         },
                     );
                 }
@@ -1145,6 +1244,7 @@ impl Decision {
                             at_wall_s: crate::clock::wall(),
                             until_ms: Some(now.0 + (a.issue_show_s * 1000.0) as i64),
                             intent: Some(id),
+                            track_ids: Vec::new(),
                         },
                     );
                     // a parcel aboard stays aboard: the person decides where the vehicle goes
@@ -1413,6 +1513,7 @@ impl Decision {
                                 at_wall_s: crate::clock::wall(),
                                 until_ms: None,
                                 intent: a.intent,
+                                track_ids: Vec::new(),
                             },
                         );
                     }
@@ -1439,17 +1540,31 @@ impl Decision {
     /// What a dispatcher's order would get now, dry run: `None` to send it as it is (auto, a
     /// refusal, or a hold that is a person's), or the hold codes automation waits out.
     async fn wait_out(&self, req: &IntentRequest) -> Option<Vec<String>> {
+        self.wait_out_why(req).await.map(|(codes, _)| codes)
+    }
+
+    /// [`Self::wait_out`], and what the holding checks said (one line).
+    async fn wait_out_why(&self, req: &IntentRequest) -> Option<(Vec<String>, String)> {
         let p = self.agent_dry_run(&AgentId::new(DISPATCHER), req).await.ok()?;
         if p.would_reach != State::PendingApproval {
             return None;
         }
-        let held: Vec<String> = p
+        let holding: Vec<&fleetmesh_decide::CheckResult> = p
             .checks
             .iter()
             .filter(|c| matches!(c.outcome, fleetmesh_decide::Outcome::Hold | fleetmesh_decide::Outcome::Unverified))
+            .collect();
+        let held: Vec<String> = holding
+            .iter()
             .flat_map(|c| if c.codes.is_empty() { vec![format!("{}:{:?}", c.rule.as_str(), c.outcome)] } else { c.codes.clone() })
             .collect();
-        (!held.is_empty() && held.iter().all(|c| WAIT_OUT.contains(&c.as_str()))).then_some(held)
+        let why = holding.iter().map(|c| c.detail.clone()).collect::<Vec<_>>().join("; ");
+        (!held.is_empty() && held.iter().all(|c| WAIT_OUT.contains(&c.as_str()))).then_some((held, why))
+    }
+
+    /// Whether an order of the dispatcher's would go at once (auto), dry run.
+    async fn goes_auto(&self, req: &IntentRequest) -> bool {
+        self.agent_dry_run(&AgentId::new(DISPATCHER), req).await.is_ok_and(|p| p.would_reach == State::AutoApproved)
     }
 
     /// Log what automation waits on for a vehicle, when it changes.
@@ -1699,6 +1814,23 @@ impl Decision {
                 rt.cooldown.insert(uid.clone(), now.0 + (a.hold_retry_s * 1000.0) as i64);
             }
             self.say_wait(uid, Some(parcel), format!("{uid} waits before it loads {parcel} ({}): automation tries again", codes.join(", ")), json!({ "codes": codes, "order": "pickup" }));
+            // rules 3: shown with what automation does for other traffic, while it waits
+            if for_traffic(&codes) {
+                let why = self.wait_out_why(&req).await.map(|(_, w)| w).unwrap_or_default();
+                let hub = self.vehicle_hub(uid).unwrap_or_else(|| "its hub".into());
+                self.rt().traffic_waits.insert(
+                    uid.clone(),
+                    TrafficWait {
+                        since_ms: now.0,
+                        why,
+                        codes: codes.clone(),
+                        did: format!("{uid} waits on the ground at {hub} before it loads {parcel}"),
+                        under_way: false,
+                        parcel: Some(parcel.to_string()),
+                        until_ms: Some(now.0 + ((a.hold_retry_s + 5.0) * 1000.0) as i64),
+                    },
+                );
+            }
             return;
         }
         let id = self.propose(DISPATCHER, req, "pickup").await;
@@ -1736,7 +1868,9 @@ impl Decision {
         let escalated = job.as_ref().is_some_and(|j| j.escalated);
         // the look before departure: a zone that does not look clear makes the loaded vehicle
         // wait at the hub and look again; after depart_wait_s the parcel stays there for later
-        if let Err(why) = self.zone_look(&zone, now, false) {
+        // (one under way, held for other traffic, looks again over the zone)
+        let at_hub = self.vehicle_hub(uid).is_some();
+        if at_hub && let Err(why) = self.zone_look(&zone, now, false) {
             let since = since.unwrap_or(now.0);
             if (now.0 - since) as f64 / 1000.0 >= a.depart_wait_s {
                 self.rt().jobs.remove(uid);
@@ -1760,6 +1894,7 @@ impl Decision {
                         at_wall_s: crate::clock::wall(),
                         until_ms: Some(now.0 + (a.issue_show_s * 1000.0) as i64),
                         intent: None,
+                        track_ids: Vec::new(),
                     },
                 );
                 return;
@@ -1787,11 +1922,13 @@ impl Decision {
                 crate::mav::Kind::Boat => "dock",
                 _ => "slip",
             });
+        let via = job.as_ref().map(|j| j.via.clone()).unwrap_or_default();
         let params = TaskParams {
             parcel: Some(parcel.into()),
             drop_zone: Some(zone.clone()),
             release: Some(release.into()),
             window_end: Some(rfc3339(due_ms + 3_600_000)),
+            route: (!via.is_empty()).then(|| via.iter().map(|p| [p.lon, p.lat]).collect()),
             ..TaskParams::default()
         };
         let req = IntentRequest {
@@ -1799,13 +1936,28 @@ impl Decision {
             uids: vec![b],
             params,
             constraints: Default::default(),
-            rationale: Some(format!("dispatcher: {parcel} is aboard {uid}: take it to {zone}")),
+            rationale: Some(if via.is_empty() {
+                format!("dispatcher: {parcel} is aboard {uid}: take it to {zone}")
+            } else {
+                format!("dispatcher: {parcel} is aboard {uid}: take it to {zone} by a route round other traffic")
+            }),
             group: None,
         };
         // a hold automation waits out: the vehicle waits at the hub with the parcel and tries
         // again; after hold_retry_max_s the order goes as it is and a person decides
         self.publish_parcels();
-        if !escalated && let Some(codes) = self.wait_out(&req).await {
+        let held = self.wait_out_why(&req).await;
+        // rules 3: other traffic is automation's to wait out, or to go round; the person hears of a
+        // conflict that outlasts that, and is never sent the order for it (even one an earlier
+        // hold already escalated)
+        if let Some((codes, why)) = &held
+            && for_traffic(codes)
+        {
+            let since = since.unwrap_or(now.0);
+            self.wait_for_traffic(uid, Some(parcel), Stage::Deliver, &req, codes, why, since, now).await;
+            return;
+        }
+        if !escalated && let Some((codes, _)) = held {
             let since = since.unwrap_or(now.0);
             if (now.0 - since) as f64 / 1000.0 < a.hold_retry_max_s {
                 {
@@ -1830,6 +1982,7 @@ impl Decision {
         let id = self.propose(DISPATCHER, req, "deliver").await;
         let mut rt = self.rt();
         rt.waits_said.remove(uid);
+        rt.traffic_waits.remove(uid);
         let job = rt.jobs.entry(uid.clone()).or_insert_with(|| Job::new(Some(parcel.into()), Stage::Deliver, None, now.0));
         job.stage = Stage::Deliver;
         job.intent = id;
@@ -1837,6 +1990,8 @@ impl Decision {
         job.proposed_ms = now.0;
         job.waiting_since_ms = None;
         job.waiting_on.clear();
+        job.via.clear();
+        job.replanned = false;
         if id.is_none() {
             job.not_before_ms = now.0 + 30_000;
         }
@@ -1866,8 +2021,19 @@ impl Decision {
         let a = self.auto();
         let job = self.rt().jobs.get(uid).filter(|j| j.stage == Stage::Return).cloned();
         let since = job.as_ref().and_then(|j| j.waiting_since_ms);
+        let held = self.wait_out_why(&req).await;
+        if let Some((codes, why)) = &held
+            && for_traffic(codes)
+        {
+            let since = since.unwrap_or(now.0);
+            if job.is_none() {
+                self.rt().jobs.insert(uid.clone(), Job::new(parcel.map(str::to_string), Stage::Return, None, now.0));
+            }
+            self.wait_for_traffic(uid, parcel, Stage::Return, &req, codes, why, since, now).await;
+            return Some(hub);
+        }
         if !job.as_ref().is_some_and(|j| j.escalated)
-            && let Some(codes) = self.wait_out(&req).await
+            && let Some((codes, _)) = held
         {
             let since = since.unwrap_or(now.0);
             if (now.0 - since) as f64 / 1000.0 < a.hold_retry_max_s {
@@ -1883,6 +2049,7 @@ impl Decision {
         }
         let id = self.propose(DISPATCHER, req, "return_to_hub").await;
         self.rt().waits_said.remove(uid);
+        self.rt().traffic_waits.remove(uid);
         match id {
             Some(id) => {
                 self.rt().jobs.insert(uid.clone(), Job::new(parcel.map(str::to_string), Stage::Return, Some(id), now.0));
@@ -2064,7 +2231,437 @@ impl Decision {
             .collect();
     }
 
+    // ---- other traffic (rules 3) -------------------------------------------------------------
+
+    /// An issue that lasts while its cause does: raised (and logged) the first time, kept quietly
+    /// after, shown until `tail_ms` after the last time it was kept.
+    fn keep_issue(&self, id: String, mut issue: Issue, tail_ms: i64, now: Time) {
+        issue.until_ms = Some(now.0 + tail_ms);
+        let first = self.rt().issues.get(&id).map(|i| i.at_wall_s);
+        match first {
+            Some(at) => {
+                issue.at_wall_s = at;
+                self.rt().issues.insert(id, issue);
+            }
+            None => self.raise(id, issue),
+        }
+    }
+
+    /// Rules 3: one of the dispatcher's orders held for other traffic. The vehicle stays where it
+    /// is (on the ground at its hub, or held under way) and the order is tried again every
+    /// `hold_retry_s`; a delivery that has waited `traffic_replan_after_s` for a conflict is offered
+    /// a route round it once (it goes when the rules pass it); a conflict that outlasts
+    /// `hold_retry_max_s` is the person's to hear of (`traffic_conflict`), and the order is never
+    /// sent to the inbox for it.
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_for_traffic(&self, uid: &DUid, parcel: Option<&str>, stage: Stage, req: &IntentRequest, codes: &[String], why: &str, since: i64, now: Time) {
+        let a = self.auto();
+        let waited_s = (now.0 - since) as f64 / 1000.0;
+        let hub = self.vehicle_hub(uid);
+        let under_way = hub.is_none();
+        let conflict = codes.iter().any(|c| c != "SEP_PICTURE_DEGRADED" && TRAFFIC_CODES.contains(&c.as_str()));
+        let mut did = match &hub {
+            Some(h) => format!("{uid} waits on the ground at {h}"),
+            None => format!("{uid} holds where it is"),
+        };
+        // a route round it, once in a wait (a delivery: a return names only its hub)
+        let replanned = self.rt().jobs.get(uid).is_some_and(|j| j.replanned);
+        if stage == Stage::Deliver && conflict && waited_s >= a.traffic_replan_after_s && !replanned {
+            if let Some(j) = self.rt().jobs.get_mut(uid) {
+                j.replanned = true;
+            }
+            let dest = req.params.drop_zone.as_ref().and_then(|z| self.places.drop_zones.get(z)).map(|z| z.at());
+            if let Some(dest) = dest
+                && let Some(wps) = self.traffic_detour(uid, dest)
+            {
+                let mut alt = req.clone();
+                alt.params.route = Some(wps.iter().map(|p| [p.lon, p.lat]).collect());
+                if self.goes_auto(&alt).await {
+                    if let Some(j) = self.rt().jobs.get_mut(uid) {
+                        j.via = wps.clone();
+                        j.intent = None;
+                        j.not_before_ms = now.0;
+                    }
+                    self.log_delivery(
+                        "traffic",
+                        Some(uid),
+                        parcel,
+                        &format!("{uid} waited {waited_s:.0} s for other traffic ({}): it goes by a route round it, by {}", codes.join(", "), wps.iter().map(|p| format!("{:.5},{:.5}", p.lat, p.lon)).collect::<Vec<_>>().join(" ")),
+                        json!({ "response": "replan", "codes": codes, "via": wps.iter().map(|p| [p.lon, p.lat]).collect::<Vec<_>>(), "waited_s": waited_s }),
+                    );
+                    return;
+                }
+            }
+            did.push_str("; no route round it that the rules pass was found");
+        }
+        {
+            let mut rt = self.rt();
+            if let Some(j) = rt.jobs.get_mut(uid) {
+                j.waiting_since_ms = Some(since);
+                j.waiting_on = codes.to_vec();
+                j.intent = None;
+                j.not_before_ms = now.0 + (a.hold_retry_s * 1000.0) as i64;
+            }
+            rt.traffic_waits.insert(
+                uid.clone(),
+                TrafficWait { since_ms: since, why: why.to_string(), codes: codes.to_vec(), did: did.clone(), under_way, parcel: parcel.map(str::to_string), until_ms: None },
+            );
+        }
+        self.say_wait(uid, parcel, format!("{did} for other traffic ({}): automation tries again", codes.join(", ")), json!({ "codes": codes, "order": if stage == Stage::Return { "return_to_hub" } else { "deliver" }, "traffic": true }));
+        if conflict && waited_s >= a.hold_retry_max_s {
+            let what = if stage == Stage::Return { "its return" } else { "its delivery" };
+            self.keep_issue(
+                format!("traffic_conflict:{uid}"),
+                Issue {
+                    kind: "traffic_conflict",
+                    uid: Some(uid.clone()),
+                    problem: format!("{uid}'s predicted conflict with other traffic has lasted {:.0} min: {why}", waited_s / 60.0),
+                    did: format!("{did} and tries {what} again every {:.0} s{}", a.hold_retry_s, if replanned { "; it looked for a route round it and none clears" } else { "" }),
+                    recommend: "nothing is needed for safety: it goes when the traffic has passed. If it should not wait, order it another route or a return yourself".into(),
+                    at_wall_s: crate::clock::wall(),
+                    until_ms: None,
+                    intent: None,
+                    track_ids: tracks_named(why),
+                },
+                30_000,
+                now,
+            );
+        }
+    }
+
+    /// Rules 3: a route for `uid` from where it is to `dest` round the first conflict a straight one
+    /// meets ([`fleetmesh_decide::traffic::detour`], within the reroute's automatic limit).
+    fn traffic_detour(&self, uid: &DUid, dest: LonLat) -> Option<Vec<LonLat>> {
+        let b = self.traffic.built()?;
+        let world = self.snapshot();
+        let v = world.vehicles.get(uid)?;
+        let platform = v.platform.as_ref()?;
+        let pos = v.position.as_ref()?.value;
+        let d = self.rules.delivery_rules();
+        let k = d.separation.traffic_knobs();
+        let alt = self.cruise_msl(&world, uid);
+        let refs = [pos, dest];
+        let km = d.separation.relevant_km;
+        fleetmesh_decide::traffic::detour(
+            pos,
+            dest,
+            platform.cruise_mps.unwrap_or(0.0).max(0.1),
+            alt,
+            platform.domain,
+            self.vehicle_hub(uid).is_none(),
+            &b.picture,
+            world.t,
+            &k,
+            d.separation.step_s,
+            d.separation.surface_surface_m,
+            d.reroute.auto_added_pct / 100.0,
+            |t| fleetmesh_decide::traffic::relevant(t, &refs, km),
+        )
+    }
+
+    /// A vehicle's cruise altitude above mean sea level, as the separation rule takes it (its
+    /// platform's cruise height above home, and home's height), none on the surface.
+    fn cruise_msl(&self, world: &fleetmesh_decide::WorldSnapshot, uid: &DUid) -> Option<f64> {
+        let v = world.vehicles.get(uid)?;
+        let p = v.platform.as_ref()?;
+        if p.domain != fleetmesh_decide::Domain::Air {
+            return None;
+        }
+        let rel = world.delivery.as_ref().and_then(|d| d.traffic.get(uid)).and_then(|t| t.alt_m);
+        let home = match (v.alt_msl_m.as_ref(), rel) {
+            (Some(msl), Some(rel)) => msl.value - rel,
+            _ => 0.0,
+        };
+        Some(p.typical_alt_m.unwrap_or(0.0) + home)
+    }
+
+    /// Rules 3, every 2 s: the traffic monitor. A delivery or return under way whose route ahead
+    /// the picture predicts a conflict on is held where it is (a drone hovers, a boat stops: a
+    /// `hold`, which goes at once) and tried again as soon as it is clear; when the traffic comes
+    /// at it where it is, a delivery takes a route round it, or holds and the person hears of it.
+    /// And the issues the picture itself raises: a feed or receiver not heard, a broadcast our
+    /// sensors contradict, an aircraft that broadcasts nothing near a drone.
+    async fn watch_traffic(&self, now: Time) {
+        if !self.rules.at_least(fleetmesh_decide::TRAFFIC_SEPARATION_SINCE) || !self.traffic.active() {
+            return;
+        }
+        {
+            let mut rt = self.rt();
+            if now.0 - rt.last_traffic_ms < 2_000 {
+                return;
+            }
+            rt.last_traffic_ms = now.0;
+            // a wait that ended (its order went, or the job is over) is not a wait
+            let live: BTreeSet<DUid> = rt.jobs.iter().filter(|(_, j)| j.intent.is_none()).map(|(u, _)| u.clone()).collect();
+            rt.traffic_waits.retain(|u, w| live.contains(u) || w.until_ms.is_some_and(|t| now.0 < t));
+        }
+        let Some(b) = self.traffic.built() else { return };
+        let world = self.snapshot();
+        self.picture_issues(&b, &world, now);
+        let d = self.rules.delivery_rules();
+        let k = d.separation.traffic_knobs();
+        let a = self.auto();
+        let running: Vec<(DUid, Job, IntentId)> = self
+            .rt()
+            .jobs
+            .iter()
+            .filter(|(_, j)| matches!(j.stage, Stage::Deliver | Stage::Return))
+            .filter_map(|(u, j)| Some((u.clone(), j.clone(), j.intent?)))
+            .collect();
+        for (uid, job, id) in running {
+            let task = {
+                let core = self.lock();
+                match core.engine.intent(id) {
+                    Some(i) if i.state() == State::Dispatched => i.spec().task.clone(),
+                    _ => continue,
+                }
+            };
+            let Some(v) = world.vehicles.get(&uid) else { continue };
+            let Some(platform) = v.platform.as_ref() else { continue };
+            if platform.domain == fleetmesh_decide::Domain::Ground || self.vehicle_hub(&uid).is_some() {
+                continue;
+            }
+            let Some(pos) = v.position.as_ref().map(|p| p.value) else { continue };
+            let Some(path) = task.path() else { continue };
+            let Some(dest) = path.points.last().copied() else { continue };
+            if fleetmesh_decide::geo::haversine_m(pos, dest) < 60.0 {
+                continue;
+            }
+            let ahead = remaining_route(pos, &path.points);
+            let alt = match platform.domain {
+                fleetmesh_decide::Domain::Air => v.alt_msl_m.as_ref().map(|a| a.value).or_else(|| self.cruise_msl(&world, &uid)),
+                _ => None,
+            };
+            let speed = platform.cruise_mps.unwrap_or(0.0).max(0.1);
+            let horizon = if platform.domain == fleetmesh_decide::Domain::Surface { k.surface_horizon_s.max(k.horizon_s) } else { k.horizon_s };
+            let mut refs = ahead.clone();
+            refs.push(pos);
+            let km = d.separation.relevant_km;
+            let relevant = |t: &fleetmesh_decide::delivery::TrackFact| fleetmesh_decide::traffic::relevant(t, &refs, km);
+            let samples = fleetmesh_decide::traffic::trajectory(&ahead, speed, alt, d.separation.step_s, horizon);
+            let found = fleetmesh_decide::traffic::assess(&samples, &ahead, speed, platform.domain, true, &b.picture, world.t, &k, d.separation.surface_surface_m, relevant);
+            let Some(c) = found.conflicts.first().cloned() else { continue };
+            let here = fleetmesh_decide::traffic::trajectory(&[pos], 0.0, alt, d.separation.step_s, horizon);
+            let hover_ok = fleetmesh_decide::traffic::assess(&here, &[pos], 0.0, platform.domain, true, &b.picture, world.t, &k, d.separation.surface_surface_m, relevant).conflicts.is_empty();
+            let stop = if platform.domain == fleetmesh_decide::Domain::Surface { "stops and stands off" } else { "holds where it is" };
+            // a route round it, when holding here does not keep it clear
+            if !hover_ok
+                && job.stage == Stage::Deliver
+                && let Some(wps) = fleetmesh_decide::traffic::detour(pos, dest, speed, alt, platform.domain, true, &b.picture, world.t, &k, d.separation.step_s, d.separation.surface_surface_m, d.reroute.auto_added_pct / 100.0, relevant)
+            {
+                {
+                    let mut rt = self.rt();
+                    if let Some(j) = rt.jobs.get_mut(&uid) {
+                        j.via = wps.clone();
+                        j.intent = None;
+                        j.not_before_ms = now.0;
+                        j.waiting_since_ms = Some(now.0);
+                        j.replanned = true;
+                    }
+                }
+                self.log_delivery(
+                    "traffic",
+                    Some(&uid),
+                    job.parcel.as_deref(),
+                    &format!("{uid} under way: {}: holding there would not keep it clear, so it takes a route round it", c.words()),
+                    json!({ "response": "replan", "track": c.track, "code": c.code, "dt_s": c.dt_s, "ratio": c.ratio, "via": wps.iter().map(|p| [p.lon, p.lat]).collect::<Vec<_>>() }),
+                );
+                continue;
+            }
+            let Some(b_uid) = bridge_uid(&uid) else { continue };
+            let req = IntentRequest {
+                task: "hold".into(),
+                uids: vec![b_uid],
+                params: TaskParams::default(),
+                constraints: Default::default(),
+                rationale: Some(format!("dispatcher: {}: {uid} {stop} until it is clear (it gives way)", c.words())),
+                group: None,
+            };
+            let Some(hold) = self.propose(DISPATCHER, req, "hold").await else { continue };
+            let did = if hover_ok { format!("{uid} {stop} (i{})", hold.0) } else { format!("{uid} {stop} (i{}); it is coming its way and no route round it clears", hold.0) };
+            {
+                let mut rt = self.rt();
+                if let Some(j) = rt.jobs.get_mut(&uid) {
+                    j.intent = None;
+                    j.waiting_since_ms = Some(now.0);
+                    j.waiting_on = vec![c.code.to_string()];
+                    j.not_before_ms = now.0 + (a.hold_retry_s * 1000.0) as i64;
+                    j.replanned = !hover_ok;
+                }
+                rt.traffic_waits.insert(uid.clone(), TrafficWait { since_ms: now.0, why: c.words(), codes: vec![c.code.to_string()], did: did.clone(), under_way: true, parcel: job.parcel.clone(), until_ms: None });
+            }
+            self.log_delivery(
+                "traffic",
+                Some(&uid),
+                job.parcel.as_deref(),
+                &format!("{uid} under way: {}: {did}", c.words()),
+                json!({ "response": "hold", "hold": hold.0, "track": c.track, "code": c.code, "dt_s": c.dt_s, "ratio": c.ratio, "hover_clear": hover_ok }),
+            );
+            // the person hears of it if it lasts: the order's own wait raises traffic_conflict
+        }
+    }
+
+    /// Rules 3: the issues the picture itself raises, each while it lasts (and a minute after).
+    fn picture_issues(&self, b: &super::traffic::Built, world: &fleetmesh_decide::WorldSnapshot, now: Time) {
+        let d = self.rules.delivery_rules();
+        let k = d.separation.traffic_knobs();
+        let reach = d.separation.relevant_km * 1000.0;
+        let fleet_at: Vec<(DUid, LonLat, bool)> = world
+            .vehicles
+            .iter()
+            .filter_map(|(u, v)| {
+                let air = v.platform.as_ref().is_some_and(|p| p.domain == fleetmesh_decide::Domain::Air);
+                Some((u.clone(), v.position.as_ref()?.value, air))
+            })
+            .collect();
+        let ops: Vec<LonLat> = fleet_at.iter().map(|(_, p, _)| *p).chain(self.places.hubs.values().map(|h| h.at())).collect();
+        let near_ops = |p: LonLat| ops.iter().any(|o| fleetmesh_decide::geo::haversine_m(*o, p) <= reach);
+        // the picture degraded: what automation holds for it
+        if b.picture.state == fleetmesh_decide::delivery::PictureState::Degraded {
+            let held: Vec<DUid> = self.rt().traffic_waits.iter().filter(|(_, w)| w.codes.iter().any(|c| c == "SEP_PICTURE_DEGRADED")).map(|(u, _)| u.clone()).collect();
+            let did = if held.is_empty() {
+                "other receivers or the network feed still cover the fleet's routes: automation holds nothing for it".to_string()
+            } else {
+                format!(
+                    "automation holds the departures whose routes depend on that coverage ({} now: {}) and sends each when a receiver heard covers its route again",
+                    held.len(),
+                    held.iter().map(DUid::as_str).collect::<Vec<_>>().join(", ")
+                )
+            };
+            self.keep_issue(
+                "traffic_picture".into(),
+                Issue {
+                    kind: "traffic_picture_degraded",
+                    uid: None,
+                    problem: format!("the traffic picture is degraded: {}", b.picture.reasons.join("; ")),
+                    did,
+                    recommend: "check the receiver or the feed named; nothing else is needed".into(),
+                    at_wall_s: crate::clock::wall(),
+                    until_ms: None,
+                    intent: None,
+                    track_ids: Vec::new(),
+                },
+                20_000,
+                now,
+            );
+        }
+        // a broadcast our own sensors contradict, near operations
+        for dis in &b.disagreements {
+            let Some(t) = b.raw.iter().find(|t| t.id == dis.track) else { continue };
+            // an aircraft's: a marine radar's disagreements with AIS are mostly vessels that move
+            // alike, one seen and the other not (the tracker's limit: no detection model), and the
+            // separation rule keeps clear of both tracks anyway
+            if t.domain != fleetmesh_tracker::Domain::Air || !near_ops(LonLat::new(t.lon, t.lat)) {
+                continue;
+            }
+            let label = t.ids.callsign.clone().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).or_else(|| t.ids.icao24.clone()).unwrap_or_else(|| t.id.clone());
+            let class = serde_json::to_value(t.class).ok().and_then(|v| v.as_str().map(|s| s.replace('_', " "))).unwrap_or_default();
+            self.keep_issue(
+                format!("traffic_disagree:{label}"),
+                Issue {
+                    kind: "traffic_broadcast_disagrees",
+                    uid: None,
+                    problem: format!(
+                        "{class} {label} broadcasts a position {:.0} m from where our sensor ({}) sees an aircraft moving as it does, and the sensor sees nothing where it says it is: a faulty or spoofed broadcast",
+                        dis.offset_m, dis.sensor
+                    ),
+                    did: "automation keeps well clear of both: the broadcast position and the one our sensors see each count as a manned aircraft, for departures and for flights under way".into(),
+                    recommend: "nothing is needed for safety; if it lasts, report the faulty broadcast (to the aircraft's operator or air traffic control)".into(),
+                    at_wall_s: crate::clock::wall(),
+                    until_ms: None,
+                    intent: None,
+                    track_ids: vec![dis.track.clone(), dis.sensed.clone()],
+                },
+                30_000,
+                now,
+            );
+        }
+        // an aircraft that broadcasts nothing near one of our drones (one issue per object: a track
+        // that reappears near where an earlier one was is the same issue)
+        for t in &b.picture.tracks {
+            if fleetmesh_decide::traffic::kind_of(t, &k) != Some(fleetmesh_decide::traffic::TrackKind::Noncoop) {
+                continue;
+            }
+            let line = t.line.as_ref();
+            let at = line.map_or(t.at, |l| l.from);
+            let near = fleet_at
+                .iter()
+                .filter(|(_, _, air)| *air)
+                .map(|(u, p, _)| (u, fleetmesh_decide::geo::haversine_m(*p, at)))
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let Some((drone, dist)) = near.filter(|(_, d)| *d <= 2.0 * k.noncoop_h_m) else { continue };
+            // seen for a while (a sensor's false alarm, and a crossing of two of them, does not last)
+            let first = *self.rt().noncoop_first.entry(t.id.clone()).or_insert(now.0);
+            if now.0 - first < 10_000 {
+                continue;
+            }
+            let id = {
+                let mut rt = self.rt();
+                let found = rt
+                    .noncoop_seen
+                    .iter()
+                    .find(|(_, (p, last))| now.0 - *last < 60_000 && fleetmesh_decide::geo::haversine_m(*p, at) <= 500.0)
+                    .map(|(id, _)| id.clone());
+                let id = found.unwrap_or_else(|| format!("traffic_noncoop:{}", t.id));
+                rt.noncoop_seen.insert(id.clone(), (at, now.0));
+                rt.noncoop_seen.retain(|_, (_, last)| now.0 - *last < 120_000);
+                let live: BTreeSet<String> = b.picture.tracks.iter().map(|x| x.id.clone()).collect();
+                rt.noncoop_first.retain(|k, _| live.contains(k));
+                id
+            };
+            let seen = match line {
+                Some(l) => format!(
+                    "seen only as a bearing ({:.0} degrees from {drone}'s detect-and-avoid, somewhere between {:.0} and {:.0} m out)",
+                    l.bearing_deg, l.range_m[0], l.range_m[1]
+                ),
+                None => format!("{} ({:.0} m from {drone})", t.id, dist),
+            };
+            self.keep_issue(
+                id,
+                Issue {
+                    kind: "traffic_noncooperative_near",
+                    uid: Some(drone.clone()),
+                    problem: format!("an aircraft that broadcasts nothing (no ADS-B, no Remote ID) near {drone}: {seen}"),
+                    did: format!(
+                        "automation keeps drones {:.0} m clear of it and of its uncertainty (a bearing-only one along its whole line): departures and flights whose routes pass near it wait, hold or go round it",
+                        k.noncoop_h_m
+                    ),
+                    recommend: "nothing is needed for safety; if it stays near a hub or the routes, look at it (a drone's camera) and report it if it is a hazard".into(),
+                    at_wall_s: crate::clock::wall(),
+                    until_ms: None,
+                    intent: None,
+                    track_ids: vec![t.id.clone()],
+                },
+                60_000,
+                now,
+            );
+        }
+    }
+
     // ---- reads ------------------------------------------------------------------------------
+
+    /// `GET /api/traffic` and the console's `traffic` message: the picture ([`super::traffic`])
+    /// and what automation is doing for other traffic now (`automation`: each vehicle it keeps
+    /// clear, since when, why and how), shown and never asked about.
+    pub fn traffic_json(&self, bounds: Option<[f64; 4]>) -> Value {
+        let mut v = self.traffic.api_json(bounds);
+        let now = self.clock.now();
+        let waits: Vec<Value> = self
+            .rt()
+            .traffic_waits
+            .iter()
+            .map(|(u, w)| {
+                json!({
+                    "uid": u.as_str(), "since_s": ((now.0 - w.since_ms) as f64 / 1000.0).max(0.0).round(),
+                    "codes": w.codes, "why": w.why, "did": w.did, "under_way": w.under_way, "parcel": w.parcel,
+                })
+            })
+            .collect();
+        if let Some(o) = v.as_object_mut() {
+            o.insert("automation".into(), json!(waits));
+        }
+        v
+    }
 
     /// `GET /api/parcels` and MCP `get_parcels`.
     pub fn parcels_json(&self) -> Value {
@@ -2262,13 +2859,21 @@ impl Decision {
                 let uid = i.uid.as_ref().and_then(bridge_uid);
                 let callsign = match uid {
                     Some(u) => fleet.get(&u).and_then(|c| super::alerts::callsign(c)),
-                    // an issue about a place: the place names the card
-                    None => id.strip_prefix("zone:").map(str::to_string),
+                    // an issue about a place, or another aircraft: it names the card
+                    None => id
+                        .strip_prefix("zone:")
+                        .or_else(|| id.strip_prefix("traffic_disagree:"))
+                        .map(str::to_string)
+                        .or_else(|| (id == "traffic_picture").then(|| "traffic picture".to_string())),
+                };
+                let severity = match i.kind {
+                    "traffic_conflict" | "traffic_noncooperative_near" | "traffic_broadcast_disagrees" => super::alerts::Severity::High,
+                    _ => super::alerts::Severity::Medium,
                 };
                 super::alerts::Alert {
                     id: id.clone(),
                     kind: i.kind,
-                    severity: super::alerts::Severity::Medium,
+                    severity,
                     uid: uid.unwrap_or(0),
                     callsign,
                     detail: format!("{}; automation: {}; you: {}", i.problem, i.did, i.recommend),
@@ -2276,6 +2881,8 @@ impl Decision {
                     op_id: None,
                     intent_id: i.intent.map(|x| x.0),
                     issue: Some(super::alerts::IssueText { problem: i.problem.clone(), did: i.did.clone(), recommend: i.recommend.clone() }),
+                    track_id: i.track_ids.first().cloned(),
+                    track_ids: if i.track_ids.len() > 1 { i.track_ids.clone() } else { Vec::new() },
                 }
             })
             .collect()
@@ -2321,6 +2928,8 @@ pub fn nav_alert(uid: crate::vehicle::Uid, callsign: Option<String>, a: &NavActi
             did: format!("the navigation monitor proposed {} {did} (i{}); a {} over people or away from a hub waits for you in the inbox", a.task.replace('_', " "), a.intent.0, a.task.replace('_', " ")),
             recommend: "approve the safe order if it waits for you (or order a hold or land elsewhere); watch the vehicle until its navigation recovers".into(),
         }),
+        track_id: None,
+        track_ids: Vec::new(),
     }
 }
 
@@ -2337,6 +2946,39 @@ struct TwSample {
 
 fn pair(s: &Value, e: &str, n: &str) -> Option<[f64; 2]> {
     Some([s[e].as_f64()?, s[n].as_f64()?])
+}
+
+/// The traffic tracks a check's words name (`trk-` and its number), in order, once each.
+fn tracks_named(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, _) in text.match_indices("trk-") {
+        let id: String = text[i..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        if id.len() > 4 && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// The rest of a route `pts` from `pos`: from where the vehicle is to the far end of the leg it
+/// is nearest, then on.
+pub fn remaining_route(pos: LonLat, pts: &[LonLat]) -> Vec<LonLat> {
+    if pts.len() < 2 {
+        return std::iter::once(pos).chain(pts.iter().copied()).collect();
+    }
+    let mut best = (f64::INFINITY, 0usize);
+    for (i, w) in pts.windows(2).enumerate() {
+        let (ax, ay) = fleetmesh_decide::geo::enu(pos, w[0]);
+        let (bx, by) = fleetmesh_decide::geo::enu(pos, w[1]);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let f = if len2 > 0.0 { (-(ax * dx + ay * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = (ax + f * dx).hypot(ay + f * dy);
+        if d < best.0 {
+            best = (d, i);
+        }
+    }
+    std::iter::once(pos).chain(pts[best.1 + 1..].iter().copied()).collect()
 }
 
 /// How far from a hub's point a vehicle still counts as at it (its pads, its dock).

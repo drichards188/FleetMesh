@@ -22,7 +22,7 @@ makes the answer measurable.
 | 8 | Evaluation and attention cost | next | [attention-cost.md](design/attention-cost.md) |
 | 9 | Fast forward | optional, after 8 | [FASTFORWARD.md](FASTFORWARD.md) |
 | 10 | Rename and first commit | done (first commit 5c1003c) | [DECISIONS.md](DECISIONS.md) |
-| 11 | Other traffic and the company's picture of it | in progress | [traffic.md](design/traffic.md) |
+| 11 | Other traffic and the company's picture of it | phases 1 to 3 done (rules 3: separation from other traffic, automation first); console layer by the console | [traffic.md](design/traffic.md) |
 | 12 | External interfaces (identity broadcasts, UTM, ATC and VTS, city and responders) | backlog | [external-interfaces.md](design/external-interfaces.md) |
 
 ## 1. Vehicle-side port (done)

@@ -144,7 +144,17 @@ impl Traffic {
         Traffic::new(cfg, scn, opts)
     }
 
-    pub fn new(cfg: WorldConfig, scn: ScenarioCfg, opts: Options) -> Result<Traffic, String> {
+    pub fn new(mut cfg: WorldConfig, scn: ScenarioCfg, opts: Options) -> Result<Traffic, String> {
+        // the scenario's own: its hour's QNH, the ground radars it switches on
+        if let Some(q) = scn.qnh_hpa {
+            cfg.world.qnh_hpa = q;
+        }
+        for g in &scn.ground_radar {
+            match cfg.ground_radar.iter_mut().find(|r| &r.id == g) {
+                Some(r) => r.enabled = true,
+                None => return Err(format!("the scenario switches on ground radar {g}, which the world does not have")),
+            }
+        }
         let seed = opts.seed.or(scn.seed).unwrap_or(1);
         let start_ms = match (opts.start_ms, scn.at.as_deref()) {
             (Some(ms), _) => ms,

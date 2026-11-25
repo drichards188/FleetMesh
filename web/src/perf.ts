@@ -15,6 +15,9 @@
 //   deckCpu     deck.gl's CPU time per frame ("CPU Time" stat from luma.gl)
 //   weatherFrame  one frame of every weather effect together (weatherMap.ts): drift, pack the
 //               shader's uniforms, step the wind and rain particles and build their layers
+//   trafficMerge  reading one traffic picture from the bridge (useTraffic.ts)
+//   trafficSort   deciding which tracks matter and how each is drawn (traffic.ts declutter)
+//   trafficLayers building the traffic layers and their label candidates (trafficLayers.ts)
 //
 // window.fleetmeshPerfStats() returns a snapshot; the ?perf overlay shows the same numbers.
 
@@ -41,7 +44,7 @@ class Ring {
   }
 }
 
-const rings = { applyDelta: new Ring(), render: new Ring(), latency: new Ring(), frame: new Ring(), attrs: new Ring(), deckCpu: new Ring(), weatherFrame: new Ring() }
+const rings = { applyDelta: new Ring(), render: new Ring(), latency: new Ring(), frame: new Ring(), attrs: new Ring(), deckCpu: new Ring(), weatherFrame: new Ring(), trafficMerge: new Ring(), trafficSort: new Ring(), trafficLayers: new Ring() }
 export type PerfName = keyof typeof rings
 
 export function perfPush(name: PerfName, ms: number) {
@@ -157,6 +160,9 @@ export function perfStats() {
     attrs: rings.attrs.stats(),
     deckCpu: rings.deckCpu.stats(),
     weatherFrame: rings.weatherFrame.stats(),
+    trafficMerge: rings.trafficMerge.stats(),
+    trafficSort: rings.trafficSort.stats(),
+    trafficLayers: rings.trafficLayers.stats(),
     longTaskMsPerS: secs > 0 ? longMs / secs : 0,
     longTasks: longCount,
     windowS: secs,

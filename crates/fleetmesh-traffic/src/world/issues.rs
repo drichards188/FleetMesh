@@ -1,6 +1,7 @@
 //! Scripted issue events from a scenario's traffic.toml: the objects they add to the world (a
 //! drone without Remote ID near a hub, a ship arriving at a given time, an aircraft whose
-//! ADS-B position is wrong, a vessel that switches its AIS off). Receiver outages are the
+//! ADS-B position is wrong, an aircraft of a stream's kind flying a given route at a given time,
+//! a vessel that switches its AIS off). Receiver outages are the
 //! sensors' (crate::sensors).
 
 use rand::Rng;
@@ -18,9 +19,12 @@ impl Issues {
         for (i, is) in ctx.scn.issue.iter().enumerate() {
             match is.kind.as_str() {
                 "drone_no_rid" | "receiver_down" => {}
-                "ship_arrival" | "adsb_bad_position" | "ais_off" => {
+                "ship_arrival" | "adsb_bad_position" | "ais_off" | "flight" => {
                     if ctx.cfg.stream(&is.stream).is_none() {
                         return Err(format!("issue {i} ({}): no stream {:?}", is.kind, is.stream));
+                    }
+                    if is.kind == "flight" && is.route.len() < 2 {
+                        return Err(format!("issue {i} (flight): a route of at least two points"));
                     }
                 }
                 other => return Err(format!("issue {i}: unknown kind {other:?}")),
@@ -81,6 +85,22 @@ impl Gen for Issues {
                     let d = if is.offset_m > 0.0 { is.offset_m } else { 800.0 };
                     let dur = if is.duration_s > 0.0 { is.duration_s } else { 600.0 };
                     m.faults.push(Fault::PositionOffset { t0: is.at_s, t1: is.at_s + dur, north_m: d * b.cos(), east_m: d * b.sin() });
+                    m.id = format!("{stream}-{n:04}");
+                    m.key = rng::tag(&m.id);
+                    m.stream = stream.clone();
+                    out.push(m);
+                }
+                "flight" => {
+                    // one flight of the stream's kind (its class, callsign style, equipage) along
+                    // the issue's own route, from `at_s`, broadcasting ADS-B
+                    let Some(s) = ctx.cfg.stream(&is.stream) else { continue };
+                    let mut s = s.clone();
+                    s.routes = vec![crate::config::RouteCfg { name: is.name.clone(), weight: 1.0, points: is.route.clone() }];
+                    s.jitter_m = 0.0;
+                    s.bidirectional = false;
+                    let class = Class::parse(&is.class).unwrap_or(Class::Helicopter);
+                    let Some(mut m) = air::route_object(&s, &mut rng, ctx, is.at_s, n, class) else { continue };
+                    m.equip.adsb = Adsb::Es1090;
                     m.id = format!("{stream}-{n:04}");
                     m.key = rng::tag(&m.id);
                     m.stream = stream.clone();

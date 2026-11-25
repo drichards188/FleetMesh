@@ -27,7 +27,7 @@ start:   ## the main menu (eval/launcher.py): open http://localhost:5173 and sta
 scenarios: ## list the delivery scenarios (sim/scenarios): make start SCENARIO=name
 	@for s in $(DELIVERY_SCENARIOS); do echo "$$s"; done
 
-up:      ## fleet + link emulator + bridge + web (FLEET=, ARGS=; FLEETMESH_LINKEMU=0 bypasses the emulator; ports: scripts/up.sh; FLEETMESH_SCENARIO=<tidewater scenario> with FLEETMESH_AT adds real tide, current and wind)
+up:      ## fleet + link emulator + bridge + web (FLEET=, ARGS=; FLEETMESH_LINKEMU=0 bypasses the emulator; FLEETMESH_TRAFFIC=0 starts no traffic simulator; ports: scripts/up.sh; FLEETMESH_SCENARIO=<tidewater scenario> with FLEETMESH_AT adds real tide, current and wind)
 	./scripts/up.sh --fleet $(FLEET) $(ARGS)
 
 # a setting that comes from make's command line only: a shell may export N for something else

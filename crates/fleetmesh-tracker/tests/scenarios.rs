@@ -644,7 +644,7 @@ fn bearing_only_from_one_hovering_drone_claims_no_position() {
         "{} vs {truth}",
         line.bearing_deg
     );
-    assert_eq!(line.range_m[1], 1_500.0);
+    assert_eq!(line.range_m[1], 3_000.0);
     assert!((line.sensor_lat - DRONE.0).abs() < 1e-6);
     // Its prediction stays on the line and only widens.
     let p = tr.predict(trk, 30.0);
@@ -838,12 +838,13 @@ fn adsb_position_that_disagrees_with_radar_is_flagged() {
         let x0 = offset(RADAR.0, RADAR.1, -2_000.0, 2_500.0);
         let y0 = offset(RADAR.0, RADAR.1, -2_500.0, -2_000.0);
         let mut pictures = Vec::new();
-        for k in 0..=30 {
+        for k in 0..=45 {
             let t = T0 + k * 1_000;
             let x = offset(x0.0, x0.1, 70.0 * k as f64, 0.0);
             let y = offset(y0.0, y0.1, 0.0, 60.0 * k as f64);
-            // X broadcasts a position 1.2 km north of where it is.
-            let xb = offset(x.0, x.1, 0.0, 1_200.0);
+            // X broadcasts where it is, and the radar sees it there; then, from 10 s, a position
+            // 1.2 km north of where it is (a faulty navigation source).
+            let xb = offset(x.0, x.1, 0.0, if k < 10 { 0.0 } else { 1_200.0 });
             for l in adsb_pair("1", "BADBAD", t, xb.0, xb.1, 300.0 / FT, 70.0 / KT, 90.0) {
                 tr.ingest_sbs(&l, t + 40);
             }
@@ -890,8 +891,9 @@ fn adsb_position_that_disagrees_with_radar_is_flagged() {
             .map(|t| (&t.id, t.cooperative, t.state))
             .collect::<Vec<_>>()
     );
-    // The flag needs persistence: not in the first seconds.
+    // The flag needs persistence: not in the first seconds of the fault.
     assert!(!pictures[3].contains("sensor_disagree"));
+    assert!(!pictures[13].contains("sensor_disagree"));
     // Deterministic: the same inputs give the same picture at every step.
     let (_, again) = run();
     assert_eq!(pictures, again);
@@ -1162,4 +1164,29 @@ fn delayed_feed_and_out_of_order_reports() {
     );
     let q = offset(start.0, start.1, 90.0 * 14.5, 0.0);
     assert!(err_m(trk, q.0, q.1) < 30.0);
+}
+
+#[test]
+fn a_vessel_moving_like_one_the_radar_never_saw_is_not_a_disagreement() {
+    // A boat's radar sees a small boat with no AIS; 1 km away a sailboat with AIS moves just as it
+    // does, too far for the radar to see a boat its size. The radar never saw the sailboat, so not
+    // seeing it now contradicts nothing.
+    let mut tr = Tracker::new(Config::default());
+    tr.set_sensors(vec![site("radar-1", SiteKind::GroundRadar, RADAR.0, RADAR.1, RADAR.2, 8_000.0, 1_000)]);
+    let mut noise = Noise::new(11);
+    let a0 = offset(RADAR.0, RADAR.1, 1_500.0, 0.0);
+    let b0 = offset(RADAR.0, RADAR.1, 1_500.0, 1_000.0);
+    for k in 0..=90 {
+        let t = T0 + k * 1_000;
+        let a = offset(a0.0, a0.1, 4.0 * k as f64, 0.0);
+        let b = offset(b0.0, b0.1, 4.0 * k as f64, 0.0);
+        // the AIS boat: a ground radar watching the air here stands in for a radar that sees only
+        // the other (an air target is what this tracker's ground radar associates)
+        for l in adsb_pair("1", "5A1105", t, b.0, b.1, 300.0 / FT, 4.0 / KT, 90.0) {
+            tr.ingest_sbs(&l, t + 40);
+        }
+        radar_det(&mut tr, &mut noise, "radar-1", t, RADAR, (a.0, a.1, 300.0));
+        tr.update(t + 500);
+    }
+    assert!(tr.disagreements().is_empty(), "{:?}", tr.disagreements());
 }

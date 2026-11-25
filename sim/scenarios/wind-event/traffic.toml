@@ -5,6 +5,16 @@ seed = 22
 at = "2026-06-14T17:00:00Z"
 duration_s = 4200
 
+# The world's QNH at the scenario's hour: the weather archive's sea-level pressure
+# (tidewater/data/cache/golden-gate-2026-06/weather.json, 2026-06-14 17:00Z), the QNH the bridge
+# reads from the same archive, so the pressure altitudes the receivers hear agree with it.
+qnh_hpa = 1014.5
+
+# The Pier hub's ground radar is on: it sees the aircraft round the waterfront where they are,
+# which is what shows a broadcast position to be wrong (the drones' detect-and-avoid gives bearings
+# only).
+ground_radar = ["radar-pier"]
+
 # Wind keeps hobby drones, kayaks, seaplanes and many light aircraft on the ground, and brings
 # sailors out.
 [rates]

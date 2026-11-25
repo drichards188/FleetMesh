@@ -617,6 +617,8 @@ impl WorldSnapshot {
         };
         Self::sample_legs(&mut w, spec, oracle, cfg);
         routed(&mut w);
+        // rules 3: only the part of the traffic picture the order's checks read is kept (and logged)
+        crate::traffic::trim(&mut w, spec, cfg);
         w
     }
 

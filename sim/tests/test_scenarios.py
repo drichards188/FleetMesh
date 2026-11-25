@@ -78,6 +78,16 @@ def test_the_environment_a_run_gets(name):
     assert env["FLEETMESH_AT"].endswith("Z")
 
 
+@pytest.mark.parametrize("name", NAMES)
+def test_every_scenario_names_a_traffic_file_the_run_exports(name):
+    sc = tomllib.loads((ROOT / "scenarios" / name / "scenario.toml").read_text())
+    assert sc["traffic"] == "traffic.toml"
+    assert (ROOT / "scenarios" / name / sc["traffic"]).exists()
+    env = scenario_env.env_for(name)
+    assert env["FLEETMESH_TRAFFIC_SCENARIO"] == f"sim/scenarios/{name}/traffic.toml"
+    assert (ROOT.parent / env["FLEETMESH_TRAFFIC_SCENARIO"]).exists()
+
+
 def test_the_wind_event_ramp_crosses_the_drone_limits():
     frames = load("wind-event", "events.toml")["weather"]["timeline"]
     gusts = [f["values"]["gust_mps"] for f in frames]

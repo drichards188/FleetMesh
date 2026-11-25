@@ -63,21 +63,28 @@ pub struct SensorSite {
     pub owner: Option<String>,
 }
 
+/// What a site receives or senses. A commercial aggregated feed is the kind of what it delivers
+/// (`adsb_1090`, `adsb_uat`, `ais`) with `owner` `network` ([`SensorSite::is_network`]), as the
+/// simulator's `/sensors` lists `net-adsb`, `net-uat` and `net-ais`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SiteKind {
     #[serde(rename = "adsb_1090")]
     Adsb1090,
     AdsbUat,
-    /// A commercial aggregated ADS-B feed.
-    AdsbFeed,
     Ais,
-    AisFeed,
     #[serde(alias = "rid")]
     RemoteId,
     Daa,
     MarineRadar,
     GroundRadar,
+}
+
+impl SensorSite {
+    /// A commercial aggregated feed (`owner` `network`): no position of its own.
+    pub fn is_network(&self) -> bool {
+        self.owner.as_deref() == Some("network")
+    }
 }
 
 fn opt_string_or_number<'de, D: serde::Deserializer<'de>>(
@@ -213,6 +220,24 @@ pub struct Config {
     pub disagree_max_vel_sigma_mps: f64,
     pub disagree_persist_ms: i64,
     pub disagree_hold_ms: i64,
+    /// A broadcast moving at least this fast is tied to what a sensor sees by motion alone, m/s
+    /// (an aircraft's speed and course are distinctive; vessels', drones' and boats' are not).
+    pub disagree_distinct_speed_mps: f64,
+    /// For a slower one, the track a sensor sees instead must have begun within this of the
+    /// sensor's last corroboration of the broadcast, ms: its view of the object split off from it.
+    pub disagree_split_ms: i64,
+    /// ... and where the broadcast's object was then (carried along its velocity), within this, m.
+    pub disagree_split_gate_m: f64,
+    /// A disagreement smaller than this is within the sensors' own errors, m: not reported.
+    pub disagree_min_offset_m: f64,
+    /// ... and for a slow mover (under `disagree_distinct_speed_mps`), m.
+    pub disagree_min_offset_slow_m: f64,
+    /// A marine radar's 50% detection range by vessel class, m (the operator's figures for its own
+    /// small-boat radar); a class not listed takes the radar's nominal range.
+    pub radar_detect_range_m: BTreeMap<Class, f64>,
+    /// A broadcast is compared with a radar only within this fraction of that range, where the
+    /// radar would see the vessel nearly every scan (at half the 50% range, about 94%).
+    pub disagree_range_frac: f64,
 
     // Anonymous identities.
     /// Address ranges (inclusive, hex) treated as anonymous (for example a Privacy ICAO Address
@@ -241,6 +266,9 @@ pub struct Config {
     /// The fitted range must beat ranges 40% shorter and 60% longer by this chi-square margin.
     pub tri_profile_dchi2: f64,
 
+    /// A ground radar whose site names no domain takes a return that may be lower than this above
+    /// sea level (within two sigmas of its elevation's error) for a vessel, m.
+    pub ground_radar_surface_m: f64,
     /// Own vehicles' positions are this old at most to be used for self-detection checks.
     pub own_vehicle_max_age_ms: i64,
     pub own_vehicle_sigma_m: f64,
@@ -344,7 +372,7 @@ impl Default for Config {
                 (SensorKind::MarineRadar, 7_400.0),
                 (SensorKind::GroundRadar, 6_000.0),
             ]),
-            daa_range_by_size_m: [600.0, 1_500.0, 2_500.0, 2_000.0],
+            daa_range_by_size_m: [600.0, 3_000.0, 9_000.0, 3_000.0],
             scan_ms: BTreeMap::from([
                 (SensorKind::Daa, 1_000),
                 (SensorKind::MarineRadar, 2_500),
@@ -358,6 +386,25 @@ impl Default for Config {
             disagree_max_vel_sigma_mps: 8.0,
             disagree_persist_ms: 4_000,
             disagree_hold_ms: 15_000,
+            disagree_distinct_speed_mps: 25.0,
+            disagree_split_ms: 60_000,
+            disagree_split_gate_m: 300.0,
+            disagree_min_offset_m: 500.0,
+            disagree_min_offset_slow_m: 1_000.0,
+            radar_detect_range_m: BTreeMap::from([
+                (Class::Cargo, 16_000.0),
+                (Class::Tanker, 16_000.0),
+                (Class::Passenger, 14_000.0),
+                (Class::Ferry, 8_000.0),
+                (Class::Tug, 6_500.0),
+                (Class::Pilot, 5_000.0),
+                (Class::Fishing, 4_500.0),
+                (Class::Pleasure, 3_000.0),
+                (Class::Sailing, 2_500.0),
+                (Class::SmallCraft, 600.0),
+                (Class::UnknownSurface, 600.0),
+            ]),
+            disagree_range_frac: 0.5,
             anonymous_icao_ranges: Vec::new(),
             handover_ms: 30_000,
             handover_chi2: 13.8,
@@ -371,6 +418,7 @@ impl Default for Config {
             tri_max_sigma_rel: 0.15,
             tri_max_speed_mps: 200.0,
             tri_profile_dchi2: 9.0,
+            ground_radar_surface_m: 25.0,
             own_vehicle_max_age_ms: 5_000,
             own_vehicle_sigma_m: 25.0,
             max_alt_sigma_out_m: 300.0,

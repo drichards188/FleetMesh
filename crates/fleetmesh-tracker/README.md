@@ -8,7 +8,8 @@ and predictions come out.
 
 It does not depend on `fleetmesh-traffic` and uses nothing beyond those formats, so it runs
 unchanged on a real dump1090 or readsb SBS stream (port 30003) or a real AIS receiver's NMEA.
-The bridge and the headless simulator link it; that integration is not done here.
+The bridge (`crates/fleetmesh-bridge/src/decision/traffic.rs`) and the headless simulator link it
+(docs/design/traffic.md section 10).
 
 ## Using it
 
@@ -40,7 +41,7 @@ let counters = tr.stats();
 | `ingest_nmea(line, receipt_ms)` | The receiver is the tag block's `s:`, else `"ais"`. |
 | `ingest_nmea_from(line, receipt_ms, rx)` | For a stream without tag blocks. |
 | `ingest_json(line)`, `ingest_rid(&Rid)`, `ingest_det(&Det)` | Remote ID is fused at once; detections are held until their scan is complete (the next detection from that sensor at another time, or `update`). |
-| `set_sensors(Vec<SensorSite>)` | Receivers and sites: SBS session numbers, radar positions, ranges and scan intervals. Own-vehicle sensor positions come in each `det`. |
+| `set_sensors(Vec<SensorSite>)` | Receivers and sites: SBS session numbers, radar positions, ranges and scan intervals. Own-vehicle sensor positions come in each `det`: give it the fixed sites only (an onboard entry's position is its vehicle's last). A commercial feed is the kind of what it delivers with `owner` `network` (`SensorSite::is_network`). |
 | `set_own_fleet(&OwnFleet)`, `set_own_vehicles(&[OwnVehicle])` | The fleet's own broadcasts are not traffic; a detection that matches an own vehicle's position is dropped. |
 | `set_qnh(Option<f64>)` | Pressure and geometric altitudes are compared through it. |
 | `update(t_ms)` | Processes held detections, ages, confirms and drops tracks, checks integrity, rebuilds `tracks()` at `t_ms`. |
@@ -117,7 +118,9 @@ rejected reports that agree with each other (at a plausible speed) move the trac
 lasting shift is followed, a single bad report is not.
 
 **Sensor detections.** A scan's detections are gated against every track of the sensor's
-domain (DAA and ground radar: air; marine radar: surface) at chi-square probability 99.9%,
+domain (DAA: air; marine radar: surface; a ground radar: its site's `domain`, else air, and a
+return whose height from range and elevation may be under `ground_radar_surface_m` (25 m, within
+two sigmas of the elevation's error) is a vessel's) at chi-square probability 99.9%,
 using whichever of bearing, elevation, range and range rate the detection has. Candidates are
 ranked by d² + ln|S| (so a large, vague track does not win by being vague), a tentative track
 pays a penalty of 3 so a confirmed track that also gates keeps the detection, and detections and
@@ -138,8 +141,9 @@ not pretend it can:
 - An unmatched bearing-only detection starts a *line-of-bearing track*: the history of its
   lines (sensor position, bearing, elevation, time). It is output flagged `bearing_only`, with a
   `bearing_only` object giving the line itself (sensor position, bearing, sigma, elevation and
-  the range interval from 20 m to the DAA's detection range for the target's size: 600, 1,500
-  or 2,500 m, 2,000 m when the size is not given). `lat`/`lon` are the middle of that interval, `h_sigma_m` half its length, and the
+  the range interval from 20 m to the DAA's detection range for the target's size: 600 m,
+  3 km or 9 km, 3 km when the size is not given: its reach, where it still sees a target one scan
+  in ten). `lat`/`lon` are the middle of that interval, `h_sigma_m` half its length, and the
   velocity is null. A consumer that ignores the flag still sees a sigma of hundreds of metres.
 - A new line is associated with the track by its predicted bearing (and elevation) from the same
   sensor, or, from a different sensor, by crossing the track's latest line (within 2 s) inside
@@ -206,6 +210,20 @@ broadcast within two scans of its last sighting of the sensed track. That is the
 company's sensors see an object moving exactly like the aircraft, elsewhere, and nothing where
 it says it is. Both tracks are flagged, and `disagreements()` pairs them with the offset and the
 sensor. Disagreements smaller than the sensor's own gate are not detectable.
+
+Since phase 3 (2026-11-25; a boat's radar flagged about 15 ordinary AIS vessels in every
+harbour-city frame, vessels moving alike): motion ties a broadcast to a sensed track only for a
+fast mover (`disagree_distinct_speed_mps`, 25 m/s: an aircraft's speed and course are distinctive);
+for a slower one (vessels, drones) the sensor must have corroborated the broadcast's object and the
+track it sees instead must have begun within `disagree_split_ms` (60 s) of that, within
+`disagree_split_gate_m` (300 m) of where the object was then, carried along its velocity: its view
+split off from the broadcast. A marine radar is compared only within `disagree_range_frac` (half)
+of its 50% range for the vessel's class (`radar_detect_range_m`, the operator's own radar's
+figures), where it would see the vessel nearly every scan. The offset must be at least
+`disagree_min_offset_m` (500 m; `disagree_min_offset_slow_m`, 1 km, for a slow mover: an escort tug
+keeps a few hundred metres from its ship). A track bearing lines fixed (`triangulated`) is compared
+too; a line alone is not. A broadcast fault on a slow mover that begins outside the sensors' view
+is not detected.
 
 **Anonymous rotation.** A new anonymous identity whose first report comes after an old
 anonymous identity's last (within 30 s), at the old track's predicted position (2-D gate 13.8)

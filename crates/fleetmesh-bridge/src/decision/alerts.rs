@@ -58,6 +58,13 @@ pub struct Alert {
     /// bridge derives from a vehicle's state, whose kind says as much (the console words them).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue: Option<IssueText>,
+    /// Rules 3: the traffic track an alert is about (`traffic_*` kinds), as `/api/traffic` names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+    /// ... and, for `traffic_broadcast_disagrees`, the broadcast's track and the one the company's
+    /// sensors see instead, in that order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub track_ids: Vec<String>,
 }
 
 /// What an issue alert tells the person, in three parts.
@@ -126,6 +133,8 @@ pub fn alerts(
                 op_id: None,
                 intent_id: None,
                 issue: None,
+                track_id: None,
+                track_ids: Vec::new(),
             });
         }
         let link = cell.link_snapshot(crate::clock::mono());
@@ -143,6 +152,8 @@ pub fn alerts(
                 op_id: None,
                 intent_id: None,
                 issue: None,
+                track_id: None,
+                track_ids: Vec::new(),
             });
         }
     }
@@ -168,6 +179,8 @@ pub fn alerts(
             op_id: Some(op.id),
             intent_id: (op.intent_id != 0).then_some(op.intent_id),
             issue: None,
+            track_id: None,
+            track_ids: Vec::new(),
         });
     }
     out.sort_by(|a, b| {
@@ -236,6 +249,8 @@ fn may_be_running(
         op_id: Some(op.id),
         intent_id: (op.intent_id != 0).then_some(op.intent_id),
         issue: None,
+        track_id: None,
+        track_ids: Vec::new(),
     })
 }
 

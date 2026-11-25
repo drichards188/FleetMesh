@@ -167,6 +167,31 @@ surface_surface_m = 30.0
 air_over_ground_m = 20.0
 max_age_s = 10.0
 
+# Rules 3 (policy schema 3): the traffic the fleet does not control, as the company's picture
+# shows it (docs/design/traffic.md, delivery-rules.md section 8.1). Each minimum is widened by the
+# tracker's predicted 1-sigma times sigma_factor along the prediction; altitudes are above mean
+# sea level on both sides. A predicted conflict holds the order: the dispatcher waits it out on the
+# ground, holds or re-plans in flight, and tells a person only when that does not clear it. Every
+# figure is a draft.
+[rules.delivery.separation.traffic]
+horizon_s = 60.0                            # aircraft and small vessels are predicted this far ahead
+surface_horizon_s = 300.0                   # ships are predicted this far ahead for a boat
+sigma_factor = 1.0                          # times the predicted 1-sigma, added to each minimum
+vrate_mps = 1.0                             # a level aircraft's altitude uncertainty grows at most this fast
+manned_h_m = 610.0                          # well clear of a manned aircraft: 2,000 ft (ASTM F3442)
+manned_v_m = 76.0                           # and 250 ft; manned aircraft have the right of way (14 CFR 107.37)
+drone_h_m = 100.0                           # another operator's drone (Remote ID)
+drone_v_m = 30.0
+noncoop_h_m = 300.0                         # an air track that broadcasts nothing: what it is is not known
+noncoop_v_m = 60.0
+bearing_horizon_s = 20.0                    # a bearing-only track (a line) is checked this far ahead
+noncoop_speed_mps = 20.0                    # and may have moved this fast since it was seen
+ship_cpa_m = 463.0                          # a boat's closest approach to a ship under way: 0.25 nm
+ship_cross_ahead_s = 300.0                  # and it does not cross the course a ship reaches within this (COLREGs rule 9)
+ship_classes = ["cargo", "tanker", "passenger", "ferry"]
+underway_mps = 0.5                          # a vessel slower than this is not under way
+max_age_s = 10.0                            # a picture older than this is unknown
+
 [rules.delivery.nav]
 trusted_acc_m = { air = 5.0, ground = 8.0, surface = 10.0 }
 degraded_acc_m = { air = 15.0, ground = 20.0, surface = 25.0 }

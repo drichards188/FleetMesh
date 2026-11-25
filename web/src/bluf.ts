@@ -128,6 +128,10 @@ const ALERT_HEADLINE: Record<string, string> = {
   zone_not_approved: 'Parcels wait for a drop zone nobody approved',
   return_failed: 'It could not be sent home: automation stopped trying; send it yourself',
   delivery_failed: 'A delivery failed its tries: automation gave the parcel up',
+  traffic_conflict: 'Traffic conflict automation could not clear: look at the traffic and the vehicle',
+  traffic_noncooperative_near: 'Something with no broadcast is close to one of ours: only our own sensors see it',
+  traffic_broadcast_disagrees: 'A broadcast position disagrees with our own sensors: it may be faulty or spoofed',
+  traffic_picture_degraded: 'The traffic picture is degraded: a feed or a receiver is silent',
 }
 
 /** An alert as headline (what it asks), the bridge's detail as up to three bullets, and the

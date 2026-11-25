@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the environment a scenario (sim/scenarios/<name>/) runs under, as `export` lines for
 scripts/scenario.sh: the scenario's directory (hubs, drop zones, parcels), its link and GNSS
-events, its areas, its policy, its clock and, when tidewater's data for it is in the checkout, the
+events, its traffic (the simulated air and sea traffic around it), its areas, its policy, its clock and, when tidewater's data for it is in the checkout, the
 tidewater scenario that gives real tide, current and wind.
 
     eval "$(.venv/bin/python scripts/scenario_env.py harbour-city)"
@@ -41,6 +41,9 @@ def env_for(name):
     events = d / sc.get("events", "events.toml")
     if events.exists():
         out["FLEETMESH_LINK_EVENTS"] = str(events.relative_to(REPO))
+    traffic = d / sc["traffic"] if "traffic" in sc else None
+    if traffic and traffic.exists():
+        out["FLEETMESH_TRAFFIC_SCENARIO"] = str(traffic.relative_to(REPO))
     tw = sc.get("tidewater")
     twfile = REPO / "tidewater" / "scenarios" / f"{tw}.toml" if tw else None
     if twfile and twfile.exists() and (REPO / ".venv/bin/tidewater").exists():

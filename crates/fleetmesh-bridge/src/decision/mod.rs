@@ -68,6 +68,7 @@ pub mod queue;
 pub mod snapshot;
 pub mod delivery_rt;
 pub(crate) mod terrain;
+pub mod traffic;
 #[cfg(test)]
 mod tests;
 
@@ -451,6 +452,8 @@ pub struct Decision {
     /// The delivery runtime: the scenario's parcels, the dispatcher's jobs, the navigation monitor
     /// ([`delivery_rt`]).
     runtime: Mutex<delivery_rt::Runtime>,
+    /// The company's picture of the traffic the fleet does not control ([`traffic`], rules 3).
+    traffic: traffic::Picture,
     /// The watch settings this run decides under (`Policy::effective_watch`; see
     /// docs/SCENARIO-SETTINGS.md): the policy's `[watch]` from rules 33, else the legacy values
     /// with the scenario's area. MCP `get_policy` serves them.
@@ -812,6 +815,7 @@ impl Decision {
             p.sink,
         )
         .map_err(|e| e.to_string())?;
+        let world_root = world.cfg.root.clone();
         let d = Arc::new_cyclic(|me| Decision {
             me: me.clone(),
             world,
@@ -828,6 +832,7 @@ impl Decision {
             places,
             feed: Mutex::new(DeliveryFeed::default()),
             runtime: Mutex::new(delivery_rt::Runtime::new(scenario)),
+            traffic: traffic::Picture::new(traffic::Settings::from_env(&world_root)),
             audit_path: p.audit_path,
             anchors: std::sync::OnceLock::new(),
             core: Mutex::new(Core {
@@ -1663,6 +1668,13 @@ impl Decision {
             }
         }
         snapshot::delivery_vehicle_inputs(&self.world, self.facts_catalog(), &mut di);
+        // rules 3: the picture of other traffic, when this run has one
+        if self.rules.at_least(fleetmesh_decide::TRAFFIC_SEPARATION_SINCE)
+            && self.traffic.active()
+            && let Some(b) = self.traffic.built()
+        {
+            di.picture = Some(b.picture.clone());
+        }
         for (uid, (state, good_for)) in &feed.nav_hysteresis {
             if let Some(n) = di.nav.get_mut(uid) {
                 n.prev_state = Some(*state);
@@ -1746,6 +1758,8 @@ impl Decision {
                     op_id: Some(op.id),
                     intent_id: Some(op.intent_id),
                     issue: None,
+                    track_id: None,
+                    track_ids: Vec::new(),
                 })
             })
             .collect()

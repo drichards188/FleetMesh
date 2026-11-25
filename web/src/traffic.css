@@ -1,0 +1,68 @@
+/* the traffic layer's bar (TrafficBar.tsx) and a track's details (TrafficDetails.tsx): air traffic
+   lavender, surface traffic sand (trafficSymbols.ts), the simulator's truth magenta */
+:root {
+  --traffic-air: #c7b5ff;
+  --traffic-surface: #e8d6a6;
+  --traffic-truth: #ff5cd6;
+}
+
+/* the map's bars on its bottom left, stacked (App.tsx): the traffic bar over the weather bar, so
+   neither covers the other whatever its height */
+.map-legends { position: absolute; z-index: 12; left: 14px; bottom: 50px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: calc(100% - 28px); pointer-events: none; }
+.map-legends > * { pointer-events: auto; }
+.mapwrap .map-legends .weather-legend { position: static; width: 360px; max-width: 100%; }
+/* beside the dock (dock.css): the bars keep to what the drawer leaves */
+.mapwrap.docked .map-legends { max-width: max(220px, calc(100% - var(--dock-w) - 28px)); }
+.traffic-bar { width: 420px; max-width: 100%; background: #101a26dd; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: #b6c6d7; font-size: var(--text-label); }
+.traffic-bar.degraded { border-color: #6b5520; }
+.tb-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tb-sub { margin-top: 5px; }
+.traffic-bar .chip { background: #16222f; color: #8fa2b6; border: 1px solid #3a4e63; border-radius: 10px; padding: 1px 8px; font-size: var(--text-label); cursor: pointer; }
+.traffic-bar .chip.on { background: #24425c; color: #e3f0fb; border-color: #5f8db5; }
+.traffic-bar .chip b { font-family: var(--font-data); font-weight: 600; margin-left: 2px; }
+.traffic-bar .chip.air.on { border-color: #8d7fc0; background: #2a2645; }
+.traffic-bar .chip.air.on b { color: var(--traffic-air); }
+.traffic-bar .chip.surface.on { border-color: #a8966a; background: #332d1f; }
+.traffic-bar .chip.surface.on b { color: var(--traffic-surface); }
+.traffic-bar .chip.truth.on { border-color: var(--traffic-truth); color: #ffd6f5; background: #3a1834; }
+.traffic-bar .chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.tb-title { font-weight: 600; }
+.traffic-bar .tb-title.chip { color: var(--muted); }
+.traffic-bar .tb-title.chip.on { color: #e3f0fb; }
+.tb-toggles { display: inline-flex; gap: 3px; }
+.tb-near { color: var(--muted); white-space: nowrap; }
+.tb-near b { font-family: var(--font-data); color: var(--text); font-weight: 600; }
+.tb-quiet { color: var(--muted); }
+.tb-cov { margin: 4px 0 0; color: var(--muted); line-height: var(--leading-label); }
+.tb-health { margin-left: auto; background: none; border: 1px solid currentColor; border-radius: 3px; padding: 0 7px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; }
+.tb-health.ok { color: var(--muted); border-color: #3a4e63; }
+.tb-health.bad { color: var(--warn); }
+.tb-health.none { color: var(--muted); border-color: #3a4e63; }
+.tb-reason { margin: 4px 0 0; color: var(--warn); line-height: var(--leading-label); }
+.tb-panel { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2e3f52; }
+.tb-panel p { margin: 4px 0 0; line-height: var(--leading-label); }
+.tb-reasons { margin: 0 0 6px; padding-left: 16px; color: var(--warn); }
+.tb-feeds { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.tb-feeds th { text-align: left; font-weight: 600; color: var(--muted); padding: 0 6px 2px 0; }
+.tb-feeds td { padding: 1px 6px 1px 0; font-family: var(--font-data); white-space: nowrap; }
+.tb-feeds tr.bad td { color: var(--bad); }
+.tb-feeds tr.warn td { color: var(--warn); }
+.tb-truth { margin: 5px 0 0; color: #ffd6f5; line-height: var(--leading-label); }
+.tb-truth i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--traffic-truth); vertical-align: -1px; margin-right: 4px; }
+/* while the truth overlay is on: said at the top of the map too, whatever else is open */
+.truth-banner { position: absolute; z-index: 9; top: 12px; left: 50%; transform: translateX(-50%); background: #2a1028ee; border: 1px solid var(--traffic-truth); color: #ffd6f5; padding: 4px 12px; border-radius: 4px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; white-space: nowrap; pointer-events: none; max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; }
+.mapwrap.docked .truth-banner { left: calc((100% - var(--dock-w)) / 2); max-width: calc(100% - var(--dock-w) - 28px); }
+
+/* a track's details: the vehicle card's layout (index.css .vdetails), marked as not ours */
+.tdetails { border-color: #3b3558; }
+.td-sym svg { width: 34px; height: auto; }
+.td-not-ours { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--traffic-air); border: 1px solid #5a4f86; border-radius: 3px; padding: 0 5px; }
+.td-flags { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.td-flags li { border-left: 3px solid var(--warn); padding: 3px 8px; background: #1b1a12; line-height: var(--leading-label); }
+.td-flags li.bad { border-left-color: var(--bad); background: #241414; color: #ffd0d0; }
+.td-sources { margin: 0; padding-left: 16px; line-height: var(--leading-label); }
+.td-sources li + li { margin-top: 2px; }
+.td-pair { display: contents; }
+.td-truth h4 { color: var(--traffic-truth) !important; }
+.td-truth p { color: #ffd6f5; }
+.td-id { font-family: var(--font-data); font-size: var(--text-label); }

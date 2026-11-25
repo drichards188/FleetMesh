@@ -573,6 +573,8 @@ impl Decision {
                     op_id: None,
                     intent_id: None,
                     issue: None,
+                    track_id: None,
+                    track_ids: Vec::new(),
                 })
             })
             .collect();
@@ -597,6 +599,8 @@ impl Decision {
                 op_id: None,
                 intent_id: None,
                 issue: None,
+                track_id: None,
+                track_ids: Vec::new(),
             })
         }));
         out

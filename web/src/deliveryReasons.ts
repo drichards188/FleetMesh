@@ -54,10 +54,16 @@ export const REASONS: Record<string, Reason> = {
   TIDE_AGROUND: R('Would run aground', 'At this tide the water is too shallow for the boat.'),
   TIDE_DOCK_LEVEL: R('Dock level against the tide', 'The water is at or near the dock’s deck level when the boat would arrive.'),
   // separation
-  SEP_TRAFFIC_UNKNOWN: R('Nearby traffic unknown', 'Another vehicle near the route has not reported lately, so separation from it cannot be checked.'),
+  SEP_TRAFFIC_UNKNOWN: R('Nearby traffic unknown', 'Another vehicle near the route has not reported lately, or the picture of other traffic is too old to rely on, so separation cannot be checked.'),
   SEP_MARGINAL: R('Close to another vehicle', 'The route passes another vehicle at less than one and a half times the minimum separation.'),
   SEP_HUB_ZONE: R('Two vehicles for one hub', 'Two vehicles would meet near a hub. Automation waited for the other to clear and it did not: a person decides who waits.', 'Approve if the other vehicle is about to leave; else reject and the dispatcher tries again.'),
   SEP_ROUTE_CONFLICT: R('Route conflict', 'The route would lose separation with another vehicle.'),
+  // other traffic, the fleet does not control it (docs/design/traffic.md section 6)
+  SEP_TRAFFIC_CONFLICT: R('Traffic in the way', 'The route would come inside the well-clear distance of an aircraft or another operator\'s drone. It has the right of way: automation waits it out or takes another route.', 'Approve only once it has passed or the route keeps clear of it; else reject and the vehicle waits.'),
+  SEP_TRAFFIC_NONCOOP: R('Unidentified traffic near the route', 'Our own sensors see an aircraft near the route that broadcasts nothing: what it is and where it goes are not known.', 'Look at the track and its uncertainty on the map; approve only if the route keeps clear of where it can be.'),
+  SEP_SHIP_CPA: R('Too close to a ship', 'The boat would pass a ship under way closer than it keeps from ships, the picture\'s uncertainty added.', 'Approve only once the ship has passed; else reject and the boat waits or takes another way.'),
+  SEP_SHIP_AHEAD: R('Crossing ahead of a ship', 'The route crosses ahead of a ship under way. A boat keeps out of the way of a ship that can only keep to the channel.', 'Reject and let the boat wait for the ship to pass.'),
+  SEP_PICTURE_DEGRADED: R('Traffic picture degraded here', 'The receivers that cover this route are silent, so other traffic on it may not be seen.', 'Approve only if you know the way is clear by other means; else wait for the receivers to come back.'),
   // drop zone
   DZ_NOT_APPROVED: R('Not an approved delivery point', 'This spot is not on the list of delivery points approved ahead of time (surveyed, or chosen by the customer), or its approval was withdrawn.', 'Approve it if the spot is fit: it becomes an approved delivery point from then on, and deliveries there go with no one asked. Reject it if not.'),
   DZ_UNCONFIRMED: R('Drop zone not confirmed lately', 'The strict procedure: no person has said this drop zone is fit in the last hour. Confirming it lets the delivery go, and others there for an hour.', 'Confirm it if the latest look is clear and the spot is fit.'),

@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import type { Alert, Check, Decisions, Intent } from './decisions'
-import { ALERT_LABEL, ALERT_RESPONSE, useAlertMemory, useOperator, verdict } from './decisions'
+import { ALERT_LABEL, ALERT_RESPONSE, alertTracks, TRAFFIC_ALERT_KINDS, useAlertMemory, useOperator, verdict } from './decisions'
 import { Bluf } from './Bluf'
 import { RefusalFold } from './RefusalFold'
 import { alertParts } from './bluf'
@@ -45,6 +45,15 @@ interface Props {
   cause?: (i: Intent) => ReactNode
   /** the task layer's orders, for what each vehicle does now (orderWords.ts) */
   taskings?: Tasking[]
+  /** a traffic alert's link: show this track (selected, its details open, framed with the vehicle
+   *  the alert is about, if any) */
+  onTrack?: (trackId: string, uid: number | null) => void
+  /** whether a track is in the traffic picture now (a gone one's link is greyed) */
+  hasTrack?: (trackId: string) => boolean
+  /** a track's name as the map gives it, or null when it is gone */
+  trackName?: (trackId: string) => string | null
+  /** a traffic picture alert's link: the traffic bar's feeds, opened */
+  onPicture?: () => void
 }
 
 // ---- top bar button -------------------------------------------------------------------------
@@ -82,6 +91,12 @@ function AlertCard({
   mem,
   onFocus,
   name,
+  vehicle,
+  onVehicle,
+  onTrack,
+  hasTrack,
+  trackName,
+  onPicture,
 }: {
   alert: Alert
   now: () => number
@@ -91,14 +106,26 @@ function AlertCard({
   onFocus: () => void
   /** one of ours by its uid, for a detail that names one by uid */
   name: (uid: string) => string
+  /** the alert's vehicle is in the fleet (a traffic picture alert has none) */
+  vehicle: boolean
+  /** select the alert's vehicle and fly to it */
+  onVehicle?: () => void
+  onTrack?: (trackId: string, uid: number | null) => void
+  hasTrack?: (trackId: string) => boolean
+  trackName?: (trackId: string) => string | null
+  onPicture?: () => void
 }) {
-  const who = a.callsign ?? `vehicle ${a.uid}`
+  const traffic = TRAFFIC_ALERT_KINDS.has(a.kind)
+  const tracks = traffic ? alertTracks(a) : []
+  // a traffic alert about no vehicle of ours: its track (by the map's name for it), or the picture
+  // (none for the picture itself: its kind says it)
+  const who = a.callsign ?? (vehicle || !traffic ? `vehicle ${a.uid}` : tracks.length ? (trackName?.(tracks[0]) ?? tracks[0]) : '')
   const age = Math.max(0, now() / 1000 - a.since_t)
   return (
     <article className={`ix-alert ${a.severity} ${selected ? 'sel' : ''} ${muted ? 'muted-card' : ''}`} tabIndex={0} onClick={onFocus} onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && onFocus()}>
       <header className="ix-head">
         <strong className="ix-akind">{ALERT_LABEL[a.kind] ?? a.kind}</strong>
-        <span className="ix-who">{who}</span>
+        {who && <span className="ix-who">{who}</span>}
         <span className="ix-age" title="since">since {fmtWorldZ(a.since_t * 1000)}</span>
       </header>
       {/* the consequence first, the bridge's detail with its epoch stamps in words under More */}
@@ -118,9 +145,32 @@ function AlertCard({
           </>
         ) : (
           <>
-            <button className="ghost" onClick={onFocus}>
-              Fly to
-            </button>
+            {traffic ? (
+              <>
+                {tracks.map((id, k) => {
+                  const there = hasTrack?.(id) ?? true
+                  return (
+                    <button key={id} className="ghost" disabled={!there || !onTrack} title={there ? `Select ${id} on the map and open its details` : `${id} is no longer in the traffic picture`} onClick={() => onTrack?.(id, vehicle ? a.uid : null)}>
+                      {k === 0 ? 'Show track' : `Show ${id}`}
+                    </button>
+                  )
+                })}
+                {vehicle && (
+                  <button className="ghost" onClick={onVehicle ?? onFocus} title="Select the vehicle and fly to it">
+                    Show vehicle
+                  </button>
+                )}
+                {a.kind === 'traffic_picture_degraded' && onPicture && (
+                  <button className="ghost" onClick={onPicture} title="Open the traffic bar's feeds on the map: each feed and receiver, the silent ones first">
+                    Show feeds
+                  </button>
+                )}
+              </>
+            ) : (
+              <button className="ghost" onClick={onFocus}>
+                Fly to
+              </button>
+            )}
             <span className="spacer" />
             <button className="ghost" title={ACK_TITLE} onClick={() => mem.ack(a)}>
               Acknowledge
@@ -255,7 +305,7 @@ interface Item {
   node: ReactNode
 }
 
-export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, selection, onFocus, onClose, notice, focus, mem, hidden, cause, taskings }: Props & { mem: ReturnType<typeof useAlertMemory>; hidden: Set<string> }) {
+export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, selection, onFocus, onClose, notice, focus, mem, hidden, cause, taskings, onTrack, hasTrack, trackName, onPicture }: Props & { mem: ReturnType<typeof useAlertMemory>; hidden: Set<string> }) {
   // a card chosen from outside this drawer (a line at the head of another, the task panel's link)
   // is brought into view; one clicked here already is (`nearest` leaves it be)
   const selId = selection?.kind === 'intent' ? selection.id : null
@@ -322,7 +372,30 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
       key: a.id,
       rank: muted ? RANK.acknowledged : alertRank(a.kind, a.severity),
       sort: alertSort(a.severity, a.since_t),
-      node: <AlertCard key={a.id} alert={a} now={now} selected={selection?.kind === 'alert' && selection.id === a.id} muted={muted} mem={mem} name={name} onFocus={() => onFocus({ kind: 'alert', id: a.id }, [a.uid], null)} />,
+      node: (
+        <AlertCard
+          key={a.id}
+          alert={a}
+          now={now}
+          selected={selection?.kind === 'alert' && selection.id === a.id}
+          muted={muted}
+          mem={mem}
+          name={name}
+          vehicle={typeof a.uid === 'number' && vehicles.some((v) => v.uid === a.uid)}
+          onTrack={onTrack}
+          hasTrack={hasTrack}
+          trackName={trackName}
+          onPicture={onPicture}
+          onVehicle={() => onFocus({ kind: 'alert', id: a.id }, [a.uid], null)}
+          onFocus={() => {
+            // a traffic alert: the track with the vehicle; any other: its vehicle
+            const t = TRAFFIC_ALERT_KINDS.has(a.kind) ? alertTracks(a)[0] : undefined
+            const ours = typeof a.uid === 'number' && vehicles.some((v) => v.uid === a.uid)
+            onFocus({ kind: 'alert', id: a.id }, ours || !TRAFFIC_ALERT_KINDS.has(a.kind) ? [a.uid] : [], null)
+            if (t && onTrack && (hasTrack?.(t) ?? true)) onTrack(t, ours ? a.uid : null)
+          }}
+        />
+      ),
     })
   }
   const { needs, info } = inboxOrder(items)

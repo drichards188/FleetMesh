@@ -13,7 +13,7 @@ kerb = 0.1
 # the supply run to a vessel offshore, and a small parcel to a mooring
 [[parcel]]
 id = "p-supply"
-from = "hub-pier"
+from = "hub-pier-dock"
 to = "dz-vessel"
 mass_kg = 40.0
 ready_s = 60
@@ -22,7 +22,7 @@ priority = 2
 
 [[parcel]]
 id = "p-mooring"
-from = "hub-pier"
+from = "hub-pier-dock"
 to = "dz-sausalito-mooring"
 mass_kg = 6.0
 ready_s = 90
@@ -32,7 +32,9 @@ priority = 1
 [demand]
 rate_per_min = 1.0
 from_s = 120
-hubs = ["hub-pier"]
+hubs = ["hub-pier", "hub-pier", "hub-pier-dock"]
+# the boats' dock: the zones on the water
+zones_by_hub = { "hub-pier-dock" = ["dz-pier-dock", "dz-sausalito-mooring"] }
 zones = ["dz-harbour-01", "dz-harbour-02", "dz-harbour-03", "dz-harbour-04", "dz-harbour-05", "dz-harbour-06", "dz-pier-dock"]
 mass_kg = [0.2, 2.0]
 priority_mix = [0.1, 0.6, 0.25, 0.05]
@@ -46,6 +48,17 @@ lat = 37.8089
 radius_m = 100
 pads = 10
 packs = 8
+
+# The boats load at the dock in the marina basin east of Pier 39: the hub's point is on the pier,
+# on land, where the domain rule refused a boat's pickup.
+[[hub]]
+id = "hub-pier-dock"
+name = "Pier 39 boat dock"
+lon = -122.4092
+lat = 37.8095
+radius_m = 60
+pads = 4
+packs = 4
 
 [[dropzone]]
 id = "dz-harbour-01"

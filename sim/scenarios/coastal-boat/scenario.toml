@@ -8,6 +8,7 @@ seed = 33
 fleet = "fleet.toml"
 dispatch = "dispatch.toml"
 events = "events.toml"
+traffic = "traffic.toml"
 areas = "areas"
 reference = "reference.toml"
 policy = "sim/policy.toml"

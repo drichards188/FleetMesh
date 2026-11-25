@@ -418,7 +418,7 @@ fn deliver_to_a_standing_approved_point_goes_at_once_with_no_person() {
     let again = r.agent(deliver());
     assert_eq!(r.state(again), State::AutoApproved, "{:?}", r.engine.intent(again).expect("i").checks());
     let report = r.replays();
-    assert_eq!(report.rules_version, 2);
+    assert_eq!(report.rules_version, fleetmesh_decide::rules::RULES_VERSION);
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn under_the_strict_procedure_a_deliver_to_an_unconfirmed_zone_waits_and_its_app
     assert_eq!(r.state(lapsed), State::PendingApproval, "{:?}", r.engine.intent(lapsed).expect("i").checks());
     assert!(r.codes(lapsed).contains(&"DZ_UNCONFIRMED".to_string()), "{:?}", r.codes(lapsed));
     let report = r.replays();
-    assert_eq!(report.rules_version, 2, "the strict procedure is a setting of rules 2, logged with the policy");
+    assert_eq!(report.rules_version, fleetmesh_decide::rules::RULES_VERSION, "the strict procedure is a setting of rules 2 on, logged with the policy");
 }
 
 #[test]
@@ -809,9 +809,11 @@ fn the_shipped_policy_routes_every_delivery_kind_as_the_design_says() {
     assert_eq!(q.expire_s(TaskKind::SwapBattery), 900);
     assert!(q.queues(TaskKind::Deliver));
     // the policy's delivery numbers are the code's defaults: one set, not two (it writes out
-    // rules 2's standing approvals, which the code's default leaves implied)
+    // rules 2's standing approvals and rules 3's traffic figures, which the code's default leaves
+    // implied)
     let mut defaults = fleetmesh_decide::delivery::DeliveryRules::default();
     defaults.dropzone.standing_approvals = Some(true);
+    defaults.separation.traffic = Some(fleetmesh_decide::delivery::TrafficKnobs::default());
     assert_eq!(p.rules.delivery_rules(), defaults);
     assert!(p.rules.standing_approvals());
     // the strict comparison policy is the same but for that one key
@@ -1630,6 +1632,7 @@ fn v1_rig() -> Rig {
     p.rules.rules_version = 1;
     if let Some(d) = p.rules.delivery.as_mut() {
         d.dropzone.standing_approvals = None;
+        d.separation.traffic = None;
     }
     let mut r = Rig::with_policy(p);
     for z in di(&mut r.world).places.drop_zones.values_mut() {
@@ -1681,23 +1684,38 @@ fn a_rules_1_log_replays_with_no_mismatch_under_its_own_rules() {
     assert!(strict.mismatches.iter().any(|m| m.what.contains("older decision rules")), "{:?}", strict.mismatches);
 }
 
+/// A policy as a rules 2 build logged it: rules version 2 and no traffic figures (they did not
+/// exist), and a world with no traffic picture (nor did it).
+fn v2_rig() -> Rig {
+    let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+    p.rules.rules_version = 2;
+    if let Some(d) = p.rules.delivery.as_mut() {
+        d.separation.traffic = None;
+    }
+    let mut r = Rig::with_policy(p);
+    di(&mut r.world).picture = None;
+    r
+}
+
 #[test]
 fn a_rules_2_log_replays_with_no_mismatch_and_its_deliveries_needed_no_person() {
-    let mut r = Rig::new();
+    let mut r = v2_rig();
     let (first, second) = deliveries(&mut r);
     for id in [first, second] {
         assert_eq!(r.tier(id).1, "routine-delivery", "{:?}", r.codes(id));
     }
     let text = r.log.text();
     assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":2,") && l.contains("\"policy_schema\":2")), "a rules 2 header");
-    let report = r.replays();
+    assert!(!text.contains("\"picture\"") && !text.contains("ship_cpa_m"), "nothing rules 3 added");
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
     assert_eq!(report.rules_version, fleetmesh_decide::STANDING_APPROVALS_SINCE);
     assert_eq!(report.approvals, 0, "no person was asked");
 }
 
 #[test]
 fn a_rules_2_log_given_a_rules_1_header_is_found() {
-    let mut r = Rig::new();
+    let mut r = v2_rig();
     deliveries(&mut r);
     let text = r.log.text();
     let mut events = fleetmesh_decide::audit::parse_log(&text).expect("parses");
@@ -1729,4 +1747,200 @@ fn a_rules_1_log_given_a_rules_2_header_is_found() {
     let rep = fleetmesh_decide::replay::replay(&events);
     // rules 2 reads the zone as a new delivery point, where rules 1 asked for a confirmation
     assert!(rep.mismatches.iter().any(|m| m.what == "check results differ" && m.logged.contains("DZ_UNCONFIRMED") && m.recomputed.contains("DZ_NOT_APPROVED")), "{:?}", rep.mismatches);
+}
+
+// ---- rules 3: the traffic the fleet does not control ----------------------------------------------
+
+use fleetmesh_decide::delivery::{PathPoint, PictureState, ReceiverFact, TrackFact, TrafficPicture};
+
+/// A picture at `t` with the network feeds heard, and these tracks.
+fn picture(t: Time, tracks: Vec<TrackFact>) -> TrafficPicture {
+    let rx = |id: &str, kind: &str| ReceiverFact { id: id.into(), kind: kind.into(), network: true, at: None, range_m: None, up: true };
+    TrafficPicture {
+        t,
+        state: PictureState::Ok,
+        reasons: Vec::new(),
+        qnh_hpa: Some(1014.5),
+        config_sha256: "c0ffee".into(),
+        receivers: vec![rx("net-adsb", "adsb_1090"), rx("net-ais", "ais")],
+        tracks,
+    }
+}
+
+/// A track at `e`, `n` metres from the Crissy Field hub, moving at `vel`, with a straight
+/// prediction every 10 s to 60 s (300 s for a vessel) and its sigma growing.
+fn track(id: &str, class: &str, e: f64, n: f64, alt: Option<f64>, vel: [f64; 2]) -> TrackFact {
+    let at = fleetmesh_decide::geo::offset(hub(), e, n);
+    let surface = matches!(class, "cargo" | "tanker" | "sailing");
+    let (step, count) = if surface { (30.0, 10) } else { (10.0, 6) };
+    TrackFact {
+        id: id.into(),
+        domain: if surface { Domain::Surface } else { Domain::Air },
+        class: class.into(),
+        cooperative: true,
+        label: format!("{id}-label"),
+        at,
+        alt_m: alt,
+        alt_ref: if alt.is_some() { "baro".into() } else { "none".into() },
+        h_sigma_m: 20.0,
+        v_sigma_m: alt.map(|_| 15.0),
+        vel_mps: Some(vel),
+        vs_mps: alt.map(|_| 0.0),
+        flags: Vec::new(),
+        line: None,
+        path: (1..=count)
+            .map(|i| {
+                let dt = f64::from(i) * step;
+                PathPoint {
+                    dt_s: dt,
+                    at: fleetmesh_decide::geo::offset(at, vel[0] * dt, vel[1] * dt),
+                    alt_m: alt,
+                    h_sigma_m: 20.0 + 2.0 * dt,
+                    v_sigma_m: alt.map(|_| 15.0 + dt),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// A helicopter 400 m east and 800 m north of the hub, coming south at 40 m/s at 150 m: across
+/// the drone's route east to dz-harbour-17 within half a minute.
+fn low_helicopter() -> TrackFact {
+    track("trk-heli", "helicopter", 400.0, 800.0, Some(150.0), [0.0, -40.0])
+}
+
+#[test]
+fn a_drone_waits_for_a_manned_aircraft_that_will_cross_its_route_low() {
+    let mut r = Rig::new();
+    let t = r.world.t;
+    di(&mut r.world).picture = Some(picture(t, vec![low_helicopter()]));
+    let held = r.agent(deliver());
+    assert_eq!(r.state(held), State::PendingApproval, "an agent's order the rule holds waits");
+    assert!(r.codes(held).contains(&"SEP_TRAFFIC_CONFLICT".to_string()), "{:?}", r.codes(held));
+    let sep = r.engine.intent(held).expect("i").checks().iter().find(|c| c.rule == RuleId::Separation).cloned().expect("separation");
+    assert_eq!(sep.outcome, Outcome::Hold);
+    assert!(sep.detail.contains("helicopter trk-heli-label (trk-heli)") && sep.detail.contains("well clear") && sep.detail.contains("right of way"), "{}", sep.detail);
+    // the same helicopter at 1,500 ft passes over: clear, and the order goes at once
+    let mut high = low_helicopter();
+    high.alt_m = Some(457.0);
+    high.path.iter_mut().for_each(|p| p.alt_m = Some(457.0));
+    di(&mut r.world).picture = Some(picture(t, vec![high]));
+    let clear = r.agent(deliver());
+    assert_eq!(r.state(clear), State::AutoApproved, "{:?}", r.engine.intent(clear).expect("i").checks());
+    let sep = r.engine.intent(clear).expect("i").checks().iter().find(|c| c.rule == RuleId::Separation).cloned().expect("separation");
+    assert!(sep.detail.contains("1 track(s) near the route checked"), "{}", sep.detail);
+    r.replays();
+}
+
+#[test]
+fn only_the_tracks_near_the_order_are_logged_and_replay_decides_on_them() {
+    let mut r = Rig::new();
+    let t = r.world.t;
+    let far = track("trk-far", "airliner", 25_000.0, -20_000.0, Some(3000.0), [-100.0, 0.0]);
+    let ship = track("trk-ship", "cargo", 1000.0, 600.0, None, [5.0, 0.0]);
+    di(&mut r.world).picture = Some(picture(t, vec![low_helicopter(), far, ship]));
+    let id = r.agent(deliver());
+    assert!(r.codes(id).contains(&"SEP_TRAFFIC_CONFLICT".to_string()));
+    let text = r.log.text();
+    let line = text.lines().find(|l| l.contains("\"type\":\"check.result\"") && l.contains("trk-heli")).expect("the decision logged the helicopter");
+    assert!(!line.contains("trk-far"), "an airliner 30 km off is not part of the decision");
+    assert!(!line.contains("trk-ship"), "a ship is not a drone's traffic");
+    assert!(!line.contains("net-ais"), "nor is the AIS feed");
+    assert!(line.contains("\"config_sha256\":\"c0ffee\""), "the tracker's configuration is named");
+    r.replays();
+    // an edited track in the log is found
+    let edited: Vec<String> = text.lines().map(|l| l.replace("\"alt_m\":150.0", "\"alt_m\":450.0")).collect();
+    assert_ne!(edited.join("\n"), text);
+    assert!(!fleetmesh_decide::replay::replay_str(&edited.join("\n")).expect("parses").ok(), "an edited picture goes unnoticed");
+}
+
+#[test]
+fn a_stale_picture_or_one_that_no_longer_covers_the_route_holds() {
+    let mut r = Rig::new();
+    let t = r.world.t;
+    di(&mut r.world).picture = Some(picture(t.plus_ms(-30_000), Vec::new()));
+    let stale = r.agent(deliver());
+    assert!(r.codes(stale).contains(&"SEP_TRAFFIC_UNKNOWN".to_string()), "{:?}", r.codes(stale));
+    let mut blind = picture(t, Vec::new());
+    for rx in &mut blind.receivers {
+        rx.up = false;
+    }
+    blind.state = PictureState::Degraded;
+    di(&mut r.world).picture = Some(blind);
+    let held = r.agent(deliver());
+    assert!(r.codes(held).contains(&"SEP_PICTURE_DEGRADED".to_string()), "{:?}", r.codes(held));
+    let sep = r.engine.intent(held).expect("i").checks().iter().find(|c| c.rule == RuleId::Separation).cloned().expect("separation");
+    assert!(sep.detail.contains("net-adsb"), "it names the feed not heard: {}", sep.detail);
+    r.replays();
+}
+
+#[test]
+fn with_no_picture_the_rule_says_other_traffic_is_not_checked_and_a_car_has_no_traffic_model() {
+    let mut r = Rig::new();
+    let id = r.agent(deliver());
+    assert_eq!(r.state(id), State::AutoApproved);
+    let sep = r.engine.intent(id).expect("i").checks().iter().find(|c| c.rule == RuleId::Separation).cloned().expect("separation");
+    assert!(sep.detail.contains("no picture of it in this run"), "{}", sep.detail);
+    // a car's delivery: no traffic model, whatever the picture
+    let mut w = r.world.clone();
+    w.vehicles.insert(Uid::new("car-1"), vehicle("delivery_car", w.t));
+    let t = w.t;
+    di(&mut w).picture = Some(picture(t, vec![low_helicopter()]));
+    let results = fleetmesh_decide::delivery_rules::separation(&spec_for(deliver_to("dz-marina-kerb"), "car-1"), &w, &r.engine.policy().rules);
+    assert!(results.iter().all(|c| c.outcome == Outcome::Pass && c.detail.contains("no traffic model for a car")), "{results:?}");
+}
+
+fn spec_for(task: Task, uid: &str) -> IntentSpec {
+    let mut s = spec(task);
+    s.uids = vec![Uid::new(uid)];
+    s
+}
+
+#[test]
+fn a_rules_3_log_replays_with_no_mismatch() {
+    let mut r = Rig::new();
+    let t = r.world.t;
+    di(&mut r.world).picture = Some(picture(t, Vec::new()));
+    let (first, second) = deliveries(&mut r);
+    for id in [first, second] {
+        assert_eq!(r.tier(id).1, "routine-delivery", "{:?}", r.codes(id));
+    }
+    let text = r.log.text();
+    assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":3,") && l.contains("\"policy_schema\":3")), "a rules 3 header");
+    assert!(text.contains("\"picture\"") && text.contains("ship_cpa_m"), "the picture and the traffic figures are logged");
+    let report = r.replays();
+    assert_eq!(report.rules_version, fleetmesh_decide::TRAFFIC_SEPARATION_SINCE);
+}
+
+#[test]
+fn a_rules_3_log_given_a_rules_2_header_is_found() {
+    let mut r = Rig::new();
+    let t = r.world.t;
+    di(&mut r.world).picture = Some(picture(t, vec![low_helicopter()]));
+    r.agent(deliver());
+    let mut events = fleetmesh_decide::audit::parse_log(&r.log.text()).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(2);
+    let opts = fleetmesh_decide::replay::ReplayOptions { rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1), ..Default::default() };
+    let rep = fleetmesh_decide::replay::replay_with(&events, &opts);
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("separation.traffic")), "{:?}", rep.mismatches);
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("delivery.picture")), "{:?}", rep.mismatches);
+    // rules 2 never read the picture: the held order recomputes as clear
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
+}
+
+#[test]
+fn a_rules_2_log_given_a_rules_3_header_is_found() {
+    let mut r = v2_rig();
+    deliveries(&mut r);
+    let mut events = fleetmesh_decide::audit::parse_log(&r.log.text()).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(3);
+    let rep = fleetmesh_decide::replay::replay(&events);
+    // rules 3's separation says what it checked of other traffic; rules 2's said nothing of it
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
 }

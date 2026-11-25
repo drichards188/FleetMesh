@@ -33,6 +33,12 @@ struct Episode {
 
 impl Episode {
     fn start(name: &str, scale: f64, workdir: &std::path::Path, port: u16, policy: Option<&str>) -> Option<Episode> {
+        Episode::start_with(name, scale, workdir, port, policy, false)
+    }
+
+    /// [`Episode::start`], with the scenario's weather archive when `weather` (the QNH the traffic
+    /// picture brings pressure altitudes to sea level with comes from it).
+    fn start_with(name: &str, scale: f64, workdir: &std::path::Path, port: u16, policy: Option<&str>, weather: bool) -> Option<Episode> {
         let root = repo();
         let py = root.join(".venv/bin/python");
         if !py.exists() {
@@ -60,7 +66,7 @@ impl Episode {
             .env("FLEETMESH_SCENARIO_DIR", format!("sim/scenarios/{name}"))
             .env("FLEETMESH_SCENARIO_SCALE", scale.to_string())
             .env("FLEETMESH_AREAS", format!("sim/scenarios/{name}/areas"))
-            .env("FLEETMESH_WEATHER_ARCHIVE", "off")
+            .env("FLEETMESH_WEATHER_ARCHIVE", if weather { "on" } else { "off" })
             .env("FLEETMESH_LAND_WATER_GRID", root.join("sim/terrain/golden-gate.water.grid.gz"))
             .env("FLEETMESH_ANCHORS", "0")
             .env("FLEETMESH_RESUME", "0")
@@ -131,6 +137,15 @@ impl Seen {
         let mut out = std::collections::BTreeMap::new();
         for (kind, codes) in self.items.values() {
             *out.entry(format!("{kind} [{}]", codes.join(","))).or_insert(0) += 1;
+        }
+        out
+    }
+
+    /// The alerts seen, counted by kind.
+    fn alert_kinds(&self) -> std::collections::BTreeMap<String, u32> {
+        let mut out = std::collections::BTreeMap::new();
+        for a in self.alerts.values() {
+            *out.entry(a.split(':').next().unwrap_or("?").to_string()).or_insert(0) += 1;
         }
         out
     }
@@ -218,7 +233,12 @@ fn harbour_city_delivers_parcels_and_its_log_replays() {
     };
     let (seen, last_parcels) = operate(&mut ep, 1500.0);
     let parcels = ep.api("GET", "/api/parcels", None)["body"].clone();
-    eprintln!("inbox items {:?}; approved {}; alerts {:?}; parcels {}", seen.kinds(), seen.approved, seen.alerts.values().collect::<Vec<_>>(), parcels["counts"]);
+    eprintln!("inbox items {:?}; approved {}; alerts {:?}; parcels {}", seen.kinds(), seen.approved, seen.alert_kinds(), parcels["counts"]);
+    if std::env::var("E2E_DEBUG").is_ok() {
+        for a in seen.alerts.values() {
+            eprintln!("ALERT {}", a.chars().take(400).collect::<String>());
+        }
+    }
     if std::env::var("E2E_DEBUG").is_ok() {
         let intents = ep.api("GET", "/api/intents", None);
         for i in intents["body"]["intents"].as_array().into_iter().flatten().take(40) {
@@ -278,5 +298,114 @@ fn under_the_strict_procedure_a_person_confirms_the_zones() {
     assert!(seen.approved >= 1);
     let text = audit_replays(ep);
     assert!(text.contains("\"standing_approvals\":false"), "the run logged the setting it decided under");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Rules 3 (other traffic): harbour-city's scripted traffic, with the traffic simulator in process
+/// and the bridge's tracker making the picture. A medical helicopter crossing the drones' routes low
+/// at 600 s is kept clear of by automation alone (no inbox item for traffic, ever); the Pier hub's AIS
+/// receiver down from 2400 s for ten minutes is exactly one issue alert (the picture degraded); the
+/// tour helicopter broadcasting a position 700 m off from 1500 s is an issue alert naming both
+/// tracks once the Pier hub's radar sees it; every traffic alert says what happened, what
+/// automation did and what to do; and the log, the picture in each decision included, replays.
+#[test]
+fn harbour_city_keeps_clear_of_other_traffic_and_asks_a_person_only_about_issues() {
+    let dir = std::env::temp_dir().join(format!("fleetmesh-e2e-traffic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("workdir");
+    let Some(mut ep) = Episode::start_with("harbour-city", 0.25, &dir, 18400 + (std::process::id() % 300) as u16, None, true) else {
+        return;
+    };
+    let mut seen = Seen::default();
+    // the crossing helicopter's address, from the simulator's truth (a dev run's overlay: only the
+    // test reads it, to know which track is the scripted one)
+    let mut crossing: Option<String> = None;
+    let mut crossing_tracks: std::collections::BTreeSet<String> = Default::default();
+    let mut alerts: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut kept_clear_of_the_crossing = false;
+    let mut t = 0.0;
+    let mut sampled = 0;
+    while t < 3080.0 {
+        t += 2.0;
+        let r = ep.rpc(json!({"op": "step", "t": t}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        let inbox = ep.api("GET", "/api/inbox", None);
+        for a in inbox["body"]["alerts"].as_array().into_iter().flatten() {
+            let kind = a["kind"].as_str().unwrap_or("?").to_string();
+            if kind.starts_with("traffic_") {
+                for part in ["problem", "did", "recommend"] {
+                    assert!(a["issue"][part].as_str().is_some_and(|s| !s.is_empty()), "{kind} without its {part}: {a}");
+                }
+                if kind != "traffic_picture_degraded" {
+                    assert!(a["track_id"].is_string(), "{kind} names no track: {a}");
+                }
+                alerts.entry(a["id"].as_str().unwrap_or("?").to_string()).or_insert(a.clone());
+            }
+        }
+        // the scripted operator approves what waits (none of it for traffic: that is asserted below)
+        for item in inbox["body"]["pending"].as_array().into_iter().flatten() {
+            let id = item["id"].as_u64().expect("an intent id");
+            let codes: Vec<String> = item["checks"].as_array().into_iter().flatten().filter(|c| c["outcome"] != json!("pass")).flat_map(|c| c["codes"].as_array().cloned().unwrap_or_default()).filter_map(|c| c.as_str().map(str::to_string)).collect();
+            seen.items.entry(id).or_insert((item["kind"].as_str().unwrap_or("?").to_string(), codes));
+            if ep.api("POST", &format!("/api/intents/{id}/approve"), Some("op-1"))["status"] == json!(200) {
+                seen.approved += 1;
+            }
+        }
+        // the picture, and what automation does for the crossing helicopter, while it crosses
+        if (600.0..=800.0).contains(&t) {
+            if crossing.is_none() {
+                let truth = ep.api("GET", "/api/traffic/truth", None)["body"].clone();
+                assert_eq!(truth["simulator_truth"], json!(true), "a dev run's truth says what it is: {truth}");
+                crossing = truth["truth"].as_array().into_iter().flatten().find(|o| o["stream"] == json!("issue-flight")).and_then(|o| o["ids"]["icao24"].as_str()).map(str::to_lowercase);
+            }
+            let tr = ep.api("GET", "/api/traffic", None)["body"].clone();
+            sampled += 1;
+            assert!(tr["picture"]["state"].is_string() && tr["picture"]["feeds"]["sbs"]["lines_per_s"].is_number(), "{tr}");
+            let track = tr["tracks"].as_array().into_iter().flatten().find(|k| crossing.is_some() && k["ids"]["icao24"].as_str() == crossing.as_deref()).and_then(|k| k["id"].as_str().map(str::to_string));
+            if let Some(t) = &track {
+                crossing_tracks.insert(t.clone());
+            }
+            if let Some(track) = track
+                && tr["automation"].as_array().into_iter().flatten().any(|w| w["why"].as_str().is_some_and(|y| y.contains(&track)))
+            {
+                kept_clear_of_the_crossing = true;
+            }
+        }
+    }
+    let kinds: std::collections::BTreeMap<String, u32> = alerts.values().fold(Default::default(), |mut m, a| {
+        *m.entry(a["kind"].as_str().unwrap_or("?").to_string()).or_insert(0) += 1;
+        m
+    });
+    let parcels = ep.api("GET", "/api/parcels", None)["body"].clone();
+    eprintln!("traffic: inbox items {:?}; alerts {kinds:?}; parcels {}", seen.kinds(), parcels["counts"]);
+    for a in alerts.values() {
+        eprintln!("  {} {}: {}", a["kind"], a["id"], a["detail"].as_str().unwrap_or("").chars().take(240).collect::<String>());
+    }
+    eprintln!("crossing {crossing:?} tracks {crossing_tracks:?}");
+    assert!(sampled > 50, "the picture was read while the helicopter crossed");
+    assert!(kept_clear_of_the_crossing, "automation kept a drone clear of the crossing helicopter");
+    // other traffic never reached the person as an order to decide: an order that waits for a
+    // person waits for something else (a restriction, its energy), whatever traffic it also met
+    let traffic = |c: &str| matches!(c, "SEP_TRAFFIC_CONFLICT" | "SEP_TRAFFIC_NONCOOP" | "SEP_SHIP_CPA" | "SEP_SHIP_AHEAD" | "SEP_PICTURE_DEGRADED");
+    let waited_out = |c: &str| traffic(c) || matches!(c, "SEP_HUB_ZONE" | "SEP_MARGINAL" | "SEP_TRAFFIC_UNKNOWN" | "WX_UNKNOWN" | "INPUT_UNKNOWN" | "DZ_PEOPLE_NEAR" | "DZ_OBSERVATION_STALE");
+    assert!(
+        !seen.any(|_, c| c.iter().any(|c| traffic(c)) && c.iter().all(|c| waited_out(c))),
+        "an order held for traffic reached the inbox: {:?}",
+        seen.kinds()
+    );
+    assert!(crossing.is_some() && !crossing_tracks.is_empty(), "the scripted crossing was in the truth and in the picture");
+    assert!(
+        !alerts.values().any(|a| a["kind"] == json!("traffic_conflict") && crossing_tracks.iter().any(|t| a["detail"].as_str().is_some_and(|d| d.contains(t.as_str())))),
+        "the crossing was automation's: {kinds:?}"
+    );
+    // the receiver down: one issue, the picture's
+    assert_eq!(kinds.get("traffic_picture_degraded"), Some(&1), "{kinds:?}");
+    let degraded = alerts.get("traffic_picture").expect("the picture's issue");
+    assert!(degraded["detail"].as_str().is_some_and(|d| d.contains("hub-pier ais")), "{degraded}");
+    // the broadcast our own radar contradicts
+    let bad = alerts.values().find(|a| a["kind"] == json!("traffic_broadcast_disagrees")).unwrap_or_else(|| panic!("no broadcast-fault issue: {kinds:?}"));
+    assert_eq!(bad["track_ids"].as_array().map(Vec::len), Some(2), "{bad}");
+    assert!(parcels["counts"]["delivered"].as_u64().unwrap_or(0) >= 3, "deliveries still flow: {}", parcels["counts"]);
+    let text = audit_replays(ep);
+    assert!(text.contains("\"picture\"") && text.contains("\"traffic_config\""), "the picture each decision read, and the tracker's configuration, are logged");
     let _ = std::fs::remove_dir_all(&dir);
 }

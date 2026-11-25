@@ -483,6 +483,12 @@ pub struct ScenarioCfg {
     pub rates: BTreeMap<String, f64>,
     /// streams switched off
     pub disable: Vec<String>,
+    /// the world's QNH for this scenario, hPa (the weather archive's sea-level pressure at its
+    /// hour, so pressure altitudes agree with the QNH the bridge reads from the weather); absent:
+    /// `[world] qnh_hpa`
+    pub qnh_hpa: Option<f64>,
+    /// ground radars (`[[ground_radar]]` ids) this scenario switches on
+    pub ground_radar: Vec<String>,
     pub issue: Vec<IssueCfg>,
 }
 
@@ -496,7 +502,7 @@ impl ScenarioCfg {
     }
 }
 
-/// A scripted issue: `drone_no_rid`, `ship_arrival`, `adsb_bad_position`, `receiver_down`,
+/// A scripted issue: `drone_no_rid`, `ship_arrival`, `adsb_bad_position`, `flight`, `receiver_down`,
 /// `ais_off`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -518,4 +524,6 @@ pub struct IssueCfg {
     pub offset_m: f64,
     pub bearing_deg: f64,
     pub vessel_name: String,
+    /// `flight`: the route the aircraft flies, points as a stream's (`[lat, lon, alt_ft, kt]`)
+    pub route: Vec<Vec<f64>>,
 }

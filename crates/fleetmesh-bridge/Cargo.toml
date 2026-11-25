@@ -14,6 +14,9 @@ fleetmesh-decide = { path = "../fleetmesh-decide" }
 fleetmesh-auth = { path = "../fleetmesh-auth" }
 # Predicted link coverage (bd murmur-hei): the link emulator's own predictor and geometry.
 fleetmesh-linkemu = { path = "../fleetmesh-linkemu" }
+# The company's picture of other traffic (docs/design/traffic.md): decoders and fusion of what the
+# receivers and sensors deliver (SBS-1, AIVDM, Remote ID and detection JSON lines).
+fleetmesh-tracker = { path = "../fleetmesh-tracker" }
 mavlink = { version = "0.18", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-extensions"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }

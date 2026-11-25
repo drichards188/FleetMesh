@@ -1048,11 +1048,103 @@ pub fn separation(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -
                 }
             }
         }
+        // rules 3: the traffic the fleet does not control, as the company's picture shows it
+        if cfg.at_least(crate::rules::TRAFFIC_SEPARATION_SINCE) {
+            traffic_separation(&mut x, uid, v, platform, &pts, speed, spec, world, di, &d);
+        }
         match closest {
             Some((_, text, _)) => x.done(format!("clear of {} vehicles (closest: {text})", pairs.len())),
             None => x.done("no other vehicle within reach of the route"),
         }
     })
+}
+
+/// Rules 3 ([`crate::rules::TRAFFIC_SEPARATION_SINCE`], section 8.1): the order's route against
+/// the picture of other traffic ([`crate::traffic`]). A drone keeps well clear of manned aircraft
+/// (they have the right of way) and clear of other drones and of air tracks that broadcast
+/// nothing; a boat keeps its closest approach from ships under way and out of their way ahead,
+/// and clear of other vessels; a car has no traffic model. Each holds (`SEP_TRAFFIC_CONFLICT`,
+/// `SEP_TRAFFIC_NONCOOP`, `SEP_SHIP_CPA`, `SEP_SHIP_AHEAD`): automation waits it out or takes
+/// another route, and a person's own order waits for that person. A route the receivers heard no
+/// longer cover holds `SEP_PICTURE_DEGRADED`, a stale picture `SEP_TRAFFIC_UNKNOWN`.
+#[allow(clippy::too_many_arguments)]
+fn traffic_separation(
+    x: &mut Verdict,
+    uid: &Uid,
+    v: &VehicleFacts,
+    platform: &PlatformFacts,
+    pts: &[LonLat],
+    speed: f64,
+    spec: &IntentSpec,
+    world: &WorldSnapshot,
+    di: &DeliveryInputs,
+    d: &DeliveryRules,
+) {
+    let k = d.separation.traffic_knobs();
+    if platform.domain == Domain::Ground {
+        x.note("other traffic: no traffic model for a car");
+        return;
+    }
+    let Some(pic) = &di.picture else {
+        x.note("other traffic: no picture of it in this run (aircraft and vessels the fleet does not control are not checked)");
+        return;
+    };
+    let age = secs(world.t.ms_since(pic.t));
+    if age > k.max_age_s {
+        x.hold("SEP_TRAFFIC_UNKNOWN", format!("the picture of other traffic is {age:.0} s old (over {:.0} s): it cannot be relied on", k.max_age_s));
+        return;
+    }
+    if let Some(gap) = crate::traffic::coverage_gap(pic, platform.domain, pts) {
+        x.hold("SEP_PICTURE_DEGRADED", gap);
+    }
+    // our altitude above mean sea level: the cruise height above home, and home's height (where
+    // the vehicle's own altitudes say it); the surface has none
+    let alt = (platform.domain == Domain::Air).then(|| {
+        let home = match (v.alt_msl_m.as_ref(), di.traffic.get(uid).and_then(|t| t.alt_m)) {
+            (Some(msl), Some(rel)) => msl.value - rel,
+            _ => 0.0,
+        };
+        platform.typical_alt_m.unwrap_or(0.0) + home
+    });
+    let horizon = if platform.domain == Domain::Surface { k.surface_horizon_s.max(k.horizon_s) } else { k.horizon_s };
+    let samples = crate::traffic::trajectory(pts, speed, alt, d.separation.step_s, horizon);
+    let refs = crate::traffic::reference_points(spec, world);
+    let relevant_km = d.separation.relevant_km;
+    // under way (in the air, or a boat making way): inside a minimum and leaving it is not a conflict
+    let own = di.traffic.get(uid);
+    let under_way = match platform.domain {
+        Domain::Air => own.and_then(|t| t.alt_m).is_some_and(|a| a > 5.0),
+        _ => own.and_then(|t| t.speed_mps).is_some_and(|s| s > 0.5),
+    };
+    let a = crate::traffic::assess(&samples, pts, speed, platform.domain, under_way, pic, world.t, &k, d.separation.surface_surface_m, |t| {
+        crate::traffic::relevant(t, &refs, relevant_km)
+    });
+    // one sentence per reason code: its first conflict, and how many more
+    let mut by_code: Vec<(&'static str, Vec<&crate::traffic::Conflict>)> = Vec::new();
+    for c in &a.conflicts {
+        match by_code.iter_mut().find(|(code, _)| *code == c.code) {
+            Some((_, v)) => v.push(c),
+            None => by_code.push((c.code, vec![c])),
+        }
+    }
+    for (code, cs) in by_code {
+        let more = if cs.len() > 1 { format!(" (and {} more)", cs.len() - 1) } else { String::new() };
+        let then = match code {
+            "SEP_SHIP_AHEAD" | "SEP_SHIP_CPA" => "the boat waits or takes another way",
+            "SEP_TRAFFIC_NONCOOP" => "what it is is not known: the vehicle waits or takes another route",
+            _ => "it has the right of way: the vehicle waits or takes another route",
+        };
+        x.hold(code, format!("{}{more}; {then}", cs[0].words()));
+    }
+    let closest = a.closest.as_ref().map(|c| {
+        format!("; closest {} at {:.1} of its widened minimum at +{:.0} s", c.who(), c.ratio, c.dt_s)
+    });
+    let qnh = if pic.qnh_hpa.is_none() { "; QNH not known: pressure altitudes taken at standard pressure, their uncertainty widened" } else { "" };
+    x.note(format!(
+        "other traffic: {} track(s) near the route checked{}{qnh}",
+        a.checked,
+        closest.unwrap_or_default()
+    ));
 }
 
 fn my_alt_speed(speed: f64) -> f64 {
