@@ -30,7 +30,8 @@ actually be). The default scenario clock is `FLEETMESH_AT=2026-06-14T17:00:00Z` 
 The existing example files `sim/areas/golden-gate.geojson` (an approved area and two no-go areas)
 and `sim/fleets/delivery-demo.toml` (8 vehicles) are starting points. Scenario files go in
 `sim/scenarios/<name>/` with: `scenario.toml` (clock, tidewater scenario, fleet file, policy file,
-seed), a fleet file, `dispatch.toml` (hubs, drop zones, parcels or demand), `areas.geojson`,
+seed), a fleet file (each unit with its `home_hub`, [fleet-organisation.md](fleet-organisation.md)),
+`dispatch.toml` (hubs, the sites that group them, drop zones, parcels or demand), `areas.geojson`,
 `events.toml` (link, GNSS and restriction events) and `reference.toml` (the scripted decisions).
 
 ```toml

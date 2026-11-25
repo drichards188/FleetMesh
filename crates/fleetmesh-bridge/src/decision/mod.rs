@@ -67,6 +67,7 @@ mod lost_link_read;
 pub mod queue;
 pub mod snapshot;
 pub mod delivery_rt;
+pub mod fleet;
 pub(crate) mod terrain;
 pub mod traffic;
 #[cfg(test)]

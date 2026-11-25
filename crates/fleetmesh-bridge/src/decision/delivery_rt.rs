@@ -10,9 +10,13 @@
 //!    and the link predicted along a vehicle's trip, main and backup;
 //! 2. follows the orders it has proposed (a pickup, a deliver, a return to the hub, a battery
 //!    swap) and moves the parcels and the vehicles on: loaded, delivered, free again;
-//! 3. runs the greedy assigner ([`fleetmesh_decide::dispatch::assign`]) every `tick_s` and proposes
-//!    the first order of each assignment as the agent `dispatcher`, through the same port as any
-//!    agent's proposal: policy routes it, a person decides what policy holds;
+//! 3. runs the greedy assigner ([`fleetmesh_decide::dispatch::assign_under`]) every `tick_s` and
+//!    proposes the first order of each assignment as the agent `dispatcher`, through the same port
+//!    as any agent's proposal: policy routes it, a person decides what policy holds. From rules 4
+//!    ([`fleetmesh_decide::HOME_BASE_SINCE`], docs/design/fleet-organisation.md) every vehicle has
+//!    a home base: the assigner costs the way back to it, a vehicle goes home after a delivery
+//!    ([`Decision::return_target`]), and one idle at another base goes home
+//!    ([`Decision::send_visitors_home`]);
 //! 4. watches every vehicle's navigation trust (`nav-monitor`): a fall to untrusted proposes the
 //!    safe order for its kind (delivery-rules.md section 9), through the engine.
 //!
@@ -145,6 +149,18 @@ struct DispatchToml {
     demand: Option<DemandToml>,
     observations: ObsToml,
     automation: Automation,
+    site: Vec<Site>,
+}
+
+/// A site: bases (hubs) that work together at one place, as a Marina's drone pads and its car kerb
+/// (`[[site]]` of a scenario's dispatch file; docs/design/fleet-organisation.md). The console groups
+/// the bases under it; nothing the rules or the dispatcher read.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Site {
+    pub id: String,
+    pub name: String,
+    pub hubs: Vec<String>,
 }
 
 /// What automation does on its own before a person is told (`[automation]` of a scenario's
@@ -290,6 +306,8 @@ pub struct Scenario {
     wx: WeatherToml,
     store: fleetmesh_weather::Store,
     pub automation: Automation,
+    /// The sites its bases are grouped under (display only).
+    pub sites: Vec<Site>,
 }
 
 /// SplitMix64: a small seeded generator whose stream is the same on every host.
@@ -403,6 +421,7 @@ impl Scenario {
             wx: ev.weather,
             store,
             automation: d.automation,
+            sites: d.site,
         })
     }
 
@@ -619,6 +638,10 @@ pub struct Runtime {
     noncoop_seen: BTreeMap<String, (LonLat, i64)>,
     /// Rules 3: when each non-cooperative track was first near a drone (ms).
     noncoop_first: BTreeMap<String, i64>,
+    /// Each vehicle's state as the fleet view last gave it (`super::fleet`), and since when (ms).
+    pub(super) fleet_since: BTreeMap<DUid, (&'static str, i64)>,
+    /// Rules 4: since when a vehicle has been idle at a hub other than its home base (ms).
+    visiting_since: BTreeMap<DUid, i64>,
 }
 
 /// Rules 3: a vehicle automation keeps clear of other traffic.
@@ -640,6 +663,17 @@ pub struct TrafficWait {
 /// A return to a hub that fails (a mission upload with no answer, a link that drops mid-exchange)
 /// is proposed again this many times before the person is told.
 const RETURN_TRIES: u32 = 3;
+
+/// A vehicle at a hub with its battery under this, percent, gets a battery swap before its next
+/// parcel (and the fleet view counts it as charging).
+pub const SWAP_BELOW_PCT: f64 = 45.0;
+
+/// Rules 4: a vehicle idle this long at a hub other than its home base, with no parcel waiting
+/// there, is sent home, s (Zipline's software sends each aircraft to the dock that suits it).
+pub const REBASE_AFTER_S: i64 = 60;
+
+/// Rules 4: at most this many vehicles are sent home in one plan tick.
+const REBASE_PER_TICK: usize = 4;
 
 impl Runtime {
     pub fn new(scenario: Option<Scenario>) -> Runtime {
@@ -997,7 +1031,13 @@ impl Decision {
             if d > hub_catchment(hub.radius_m) {
                 continue;
             }
-            out.push(Candidate { uid: uid.clone(), hub: hub.id.clone(), platform, kind: ap, battery_pct: batt.value });
+            // rules 4: its home base, which the assigner costs the way back to
+            let home = if self.rules.at_least(fleetmesh_decide::HOME_BASE_SINCE) {
+                self.home_hub(uid, v.home.as_ref().map(|h| h.value))
+            } else {
+                None
+            };
+            out.push(Candidate { uid: uid.clone(), hub: hub.id.clone(), platform, kind: ap, battery_pct: batt.value, home });
         }
         out
     }
@@ -1635,8 +1675,10 @@ impl Decision {
         // rules 2: nothing goes to a zone that is not an approved delivery point
         let open = self.hold_for_unapproved_zones(open, &world, &busy, now).await;
         // a swap for a vehicle that came home low, before the next parcel
-        let swap_below = 45.0;
+        let swap_below = SWAP_BELOW_PCT;
         self.propose_swaps(&world, &busy, swap_below, now).await;
+        // rules 4: a vehicle idle at another base than its own, with no parcel waiting there, goes home
+        let busy = self.send_visitors_home(&world, busy, &open, swap_below, now).await;
         if open.is_empty() {
             return;
         }
@@ -1681,7 +1723,7 @@ impl Decision {
                 parcels,
                 vehicles: vehicles.iter().filter(|v| key.contains(&v.uid) && !taken.contains(&v.uid)).cloned().collect(),
             };
-            let plan = fleetmesh_decide::dispatch::assign(&input);
+            let plan = fleetmesh_decide::dispatch::assign_under(&input, &self.rules);
             taken.extend(plan.assignments.iter().map(|a| a.vehicle.clone()));
             plans.push((input, plan));
         }
@@ -1997,18 +2039,22 @@ impl Decision {
         }
     }
 
-    /// Send a vehicle to its nearest hub; with `parcel`, one it is bringing back undelivered.
-    /// Returns the hub. A hold automation waits out holds it where it is (a safety order is
-    /// never delayed for long: after hold_retry_max_s it goes as it is).
+    /// Send a vehicle back to a hub: from rules 4 its home base ([`Self::return_target`]), before
+    /// them the nearest; with `parcel`, one it is bringing back undelivered. Returns the hub. A
+    /// hold automation waits out holds it where it is (a safety order is never delayed for long:
+    /// after hold_retry_max_s it goes as it is).
     async fn propose_return(&self, uid: &DUid, now: Time, parcel: Option<&str>) -> Option<String> {
         let b = bridge_uid(uid)?;
-        let pos = self.world.vehicles().into_iter().find(|c| c.uid == b).and_then(|c| c.read(|v| v.pos))?;
-        let (hub, _) = self.places.nearest_hub(LonLat::new(pos.1, pos.0))?;
-        let hub = hub.id.clone();
+        let (pos, ap_home) = self.world.vehicles().into_iter().find(|c| c.uid == b).map(|c| c.read(|v| (v.pos, v.home)))?;
+        let pos = LonLat::new(pos?.1, pos?.0);
+        let (hub, home) = self.return_target(uid, pos, ap_home.map(|h| LonLat::new(h.1, h.0))).await?;
         let params = TaskParams { hub: Some(hub.clone()), ..TaskParams::default() };
-        let why = match parcel {
-            Some(p) => format!("dispatcher: {uid} could not deliver {p}: back to {hub} with it"),
-            None => format!("dispatcher: {uid} is done: back to {hub}"),
+        let here = self.vehicle_hub(uid).filter(|h| *h != hub);
+        let why = match (parcel, &here) {
+            (Some(p), _) => format!("dispatcher: {uid} could not deliver {p}: back to {hub} with it"),
+            (None, Some(h)) => format!("dispatcher: {uid} is idle at {h}, away from its base: home to {hub}"),
+            (None, None) if home => format!("dispatcher: {uid} is done: home to {hub}"),
+            (None, None) => format!("dispatcher: {uid} is done: back to {hub}"),
         };
         let req = IntentRequest {
             task: "return_to_hub".into(),
@@ -2063,6 +2109,177 @@ impl Decision {
             }
         }
         Some(hub)
+    }
+
+    /// Where a vehicle goes back to, and whether that is its home base. From rules 4
+    /// ([`fleetmesh_decide::HOME_BASE_SINCE`]) its home base, unless the way there would not go at
+    /// once (its dry run is refused, or held for a limit a person judges: the battery, the
+    /// weather): then the hub nearest it, as before rules 4.
+    async fn return_target(&self, uid: &DUid, pos: LonLat, ap_home: Option<LonLat>) -> Option<(String, bool)> {
+        let nearest = self.places.nearest_hub(pos).map(|(h, _)| h.id.clone());
+        if !self.rules.at_least(fleetmesh_decide::HOME_BASE_SINCE) {
+            return nearest.map(|h| (h, false));
+        }
+        let Some(home) = self.home_hub(uid, ap_home).filter(|h| self.places.hubs.get(h).is_some_and(|x| x.open)) else {
+            return nearest.map(|h| (h, false));
+        };
+        if nearest.as_deref() == Some(home.as_str()) {
+            return Some((home, true));
+        }
+        let b = bridge_uid(uid)?;
+        let req = IntentRequest {
+            task: "return_to_hub".into(),
+            uids: vec![b],
+            params: TaskParams { hub: Some(home.clone()), ..TaskParams::default() },
+            constraints: Default::default(),
+            rationale: Some(format!("dispatcher: {uid} home to {home}")),
+            group: None,
+        };
+        self.publish_parcels();
+        let goes = match self.agent_dry_run(&AgentId::new(DISPATCHER), &req).await {
+            Ok(p) if p.would_reach == State::AutoApproved => true,
+            // held only for what automation waits out (traffic near the hub, a stale reading)
+            Ok(p) if p.would_reach == State::PendingApproval => p
+                .checks
+                .iter()
+                .filter(|c| matches!(c.outcome, fleetmesh_decide::Outcome::Hold | fleetmesh_decide::Outcome::Unverified))
+                .all(|c| !c.codes.is_empty() && c.codes.iter().all(|x| WAIT_OUT.contains(&x.as_str()))),
+            _ => false,
+        };
+        if goes {
+            return Some((home, true));
+        }
+        let back = nearest?;
+        self.log_delivery(
+            "home",
+            Some(uid),
+            None,
+            &format!("{uid} cannot go home to {home} at once (its checks would not let it): back to {back} instead"),
+            json!({ "home": home, "hub": back }),
+        );
+        Some((back, false))
+    }
+
+    /// Rules 4: a vehicle idle at a hub other than its home base, with no parcel waiting at that
+    /// hub, for [`REBASE_AFTER_S`], is sent home (a `return_to_hub` the dispatcher proposes, routed
+    /// by policy like any return). Returns `busy` with the ones sent.
+    async fn send_visitors_home(
+        &self,
+        world: &fleetmesh_decide::WorldSnapshot,
+        mut busy: BTreeSet<DUid>,
+        open: &[OpenParcel],
+        below: f64,
+        now: Time,
+    ) -> BTreeSet<DUid> {
+        if !self.rules.at_least(fleetmesh_decide::HOME_BASE_SINCE) {
+            return busy;
+        }
+        let waiting: BTreeSet<&str> = open.iter().map(|p| p.hub.as_str()).collect();
+        let visiting: BTreeSet<DUid> = self
+            .free_vehicles(world, &busy, below)
+            .into_iter()
+            .filter(|v| {
+                v.home.as_ref().is_some_and(|h| *h != v.hub && self.places.hubs.get(h).is_some_and(|x| x.open)) && !waiting.contains(v.hub.as_str())
+            })
+            .map(|v| v.uid)
+            .collect();
+        let due: Vec<DUid> = {
+            let mut rt = self.rt();
+            rt.visiting_since.retain(|u, _| visiting.contains(u));
+            let mut due = Vec::new();
+            for u in &visiting {
+                let since = *rt.visiting_since.entry(u.clone()).or_insert(now.0);
+                if now.0 - since >= REBASE_AFTER_S * 1000 {
+                    due.push(u.clone());
+                }
+            }
+            due
+        };
+        for u in due.into_iter().take(REBASE_PER_TICK) {
+            // tried again after another wait, whatever comes of it
+            self.rt().visiting_since.insert(u.clone(), now.0);
+            let Some(b) = bridge_uid(&u) else { continue };
+            let Some((pos, ap_home)) = self.world.vehicles().into_iter().find(|c| c.uid == b).map(|c| c.read(|v| (v.pos, v.home))) else { continue };
+            let Some(pos) = pos.map(|p| LonLat::new(p.1, p.0)) else { continue };
+            // only when it can go home now (else it stays where it is, ready, and is tried again)
+            if !matches!(self.return_target(&u, pos, ap_home.map(|h| LonLat::new(h.1, h.0))).await, Some((_, true))) {
+                continue;
+            }
+            if self.propose_return(&u, now, None).await.is_some() {
+                busy.insert(u);
+            }
+        }
+        busy
+    }
+
+    /// The dispatcher's work on each vehicle and what automation waits out for it, for the fleet
+    /// view ([`super::fleet`]).
+    pub(super) fn fleet_work(&self, now: Time) -> (BTreeMap<DUid, super::fleet::Work>, BTreeMap<DUid, String>) {
+        let (jobs, parcels, mut holds) = {
+            let rt = self.rt();
+            let jobs: Vec<(DUid, Job)> = rt.jobs.iter().map(|(u, j)| (u.clone(), j.clone())).collect();
+            let parcels: BTreeMap<String, (String, String)> = rt.parcels.iter().map(|(id, p)| (id.clone(), (p.spec.from.clone(), p.spec.to.clone()))).collect();
+            let mut holds: BTreeMap<DUid, String> = BTreeMap::new();
+            // rules 3: kept clear of other traffic, on the ground or under way
+            for (u, w) in &rt.traffic_waits {
+                if w.until_ms.is_none_or(|t| now.0 < t) {
+                    holds.insert(u.clone(), w.did.clone());
+                }
+            }
+            // a vehicle waiting a moment before it loads (a hold automation waits out)
+            for (u, until) in &rt.cooldown {
+                if now.0 < *until
+                    && let Some(said) = rt.waits_said.get(u)
+                {
+                    holds.entry(u.clone()).or_insert_with(|| said.clone());
+                }
+            }
+            (jobs, parcels, holds)
+        };
+        let mut work = BTreeMap::new();
+        for (u, j) in jobs {
+            let stage = match j.stage {
+                Stage::Pickup => super::fleet::Stage::Pickup,
+                Stage::Deliver => super::fleet::Stage::Deliver,
+                Stage::Return => super::fleet::Stage::Return,
+                Stage::Swap => super::fleet::Stage::Swap,
+            };
+            let (running, hub) = match j.intent {
+                Some(id) => {
+                    let core = self.lock();
+                    core.engine.intent(id).map_or((false, None), |i| {
+                        let hub = match &i.spec().task {
+                            fleetmesh_decide::Task::ReturnToHub { hub: Some(h) } => h.id.clone(),
+                            fleetmesh_decide::Task::SwapBattery { hub, .. } => Some(hub.clone()),
+                            _ => None,
+                        };
+                        (i.state() == State::Dispatched, hub)
+                    })
+                }
+                None => (false, None),
+            };
+            let route = j.parcel.as_ref().and_then(|p| parcels.get(p)).cloned();
+            let to = match stage {
+                super::fleet::Stage::Deliver => route.as_ref().map(|r| r.1.clone()),
+                super::fleet::Stage::Pickup => route.as_ref().map(|r| r.0.clone()),
+                _ => hub,
+            };
+            let zone_at = (stage == super::fleet::Stage::Deliver)
+                .then(|| to.as_ref().and_then(|z| self.places.drop_zones.get(z)).map(|z| z.at()))
+                .flatten();
+            if j.waiting_since_ms.is_some() && !j.escalated {
+                let look = !j.waiting_on.is_empty() && j.waiting_on.iter().all(|c| LOOK_CODES.contains(&c.as_str()));
+                let what = match (look, &to) {
+                    (true, Some(z)) => format!("waits for {z} to look clear"),
+                    _ if for_traffic(&j.waiting_on) => "keeps clear of other traffic".to_string(),
+                    _ if j.waiting_on.is_empty() => "waits a moment and tries again".to_string(),
+                    _ => format!("waits out {}", j.waiting_on.join(", ")),
+                };
+                holds.entry(u.clone()).or_insert(what);
+            }
+            work.insert(u, super::fleet::Work { stage, running, parcel: j.parcel.clone(), to, zone_at });
+        }
+        (work, holds)
     }
 
     /// A vehicle at a hub with its battery under `below` gets a swap, if the hub has a pack (a

@@ -47,6 +47,22 @@
 .tb-feeds td { padding: 1px 6px 1px 0; font-family: var(--font-data); white-space: nowrap; }
 .tb-feeds tr.bad td { color: var(--bad); }
 .tb-feeds tr.warn td { color: var(--warn); }
+/* the key (the bar's Key chip, right): each symbol beside what it means, in plain words */
+.traffic-bar .tb-key-chip { margin-left: auto; }
+.tb-key { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid #2e3f52; display: grid; grid-template-columns: 54px 1fr; gap: 3px 8px; align-items: center; line-height: var(--leading-label); }
+.tb-key dt { display: flex; align-items: center; gap: 2px; min-height: 18px; }
+.tb-key dd { margin: 0; color: var(--muted); }
+.tb-key dd b { color: var(--text); font-weight: 600; }
+.tb-key-sym { display: inline-flex; line-height: 0; }
+/* the speed leader: from the symbol's middle, under it, as on the map */
+.tb-key-vec { position: relative; margin-right: 22px; }
+.tb-key-vec svg { position: relative; z-index: 1; }
+.tb-key-vec::before { content: ''; position: absolute; z-index: 0; left: 50%; top: 50%; width: 28px; height: 1.5px; background: var(--traffic-air); transform: rotate(-22deg); transform-origin: left center; }
+.tb-key-ring { padding: 2px; border: 2px solid var(--bad); border-radius: 50%; }
+.tb-key-wedge { position: relative; display: inline-block; width: 48px; height: 18px; }
+.tb-key-wedge path { fill: #c7b5ff1f; stroke: #c7b5ff8c; stroke-width: 1; }
+.tb-key-wedge line { stroke: var(--traffic-air); stroke-width: 1.5; }
+.tb-key-wedge .tb-key-sym { position: absolute; left: 19px; top: 3px; }
 .tb-truth { margin: 5px 0 0; color: #ffd6f5; line-height: var(--leading-label); }
 .tb-truth i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--traffic-truth); vertical-align: -1px; margin-right: 4px; }
 /* while the truth overlay is on: said at the top of the map too, whatever else is open */

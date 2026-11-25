@@ -72,6 +72,19 @@ pub struct Manifest {
     pub ports: HashMap<u16, (Uid, u8)>,
     /// Its swarms (`crate::swarms`); none in a manifest from before Saturation.
     pub swarms: Arc<crate::swarms::Swarms>,
+    /// Where each vehicle belongs (docs/design/fleet-organisation.md): the home hub the fleet file
+    /// names for it (`home_hub`), and where it was launched (`home`), from which the bridge takes
+    /// the hub it started at when the file names none.
+    pub bases: BTreeMap<Uid, ManifestBase>,
+}
+
+/// A vehicle's home base as the manifest gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ManifestBase {
+    /// The fleet file's `home_hub` for its unit, if it names one.
+    pub home_hub: Option<String>,
+    /// Where it was launched, (lon, lat): the manifest's `home` (`[lat, lon, alt, heading]`).
+    pub launched: Option<(f64, f64)>,
 }
 
 impl Manifest {
@@ -102,6 +115,11 @@ impl Manifest {
                 );
             }
             m.identities.insert(uid, Arc::new(identity));
+            let home_hub = entry.get("home_hub").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+            let launched = entry.get("home").and_then(Value::as_array).and_then(|h| Some((h.get(1)?.as_f64()?, h.first()?.as_f64()?)));
+            if home_hub.is_some() || launched.is_some() {
+                m.bases.insert(uid, ManifestBase { home_hub, launched });
+            }
             if let Some(port) = entry
                 .get("port")
                 .and_then(Value::as_u64)

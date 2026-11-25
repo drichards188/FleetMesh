@@ -6,6 +6,7 @@ count = 24
 sim = "standin"
 spacing_m = 5
 spawn = [37.8057, -122.4370, 3, 0]
+home_hub = "hub-marina"
 
 [[unit]]
 platform = "delivery_car"
@@ -14,6 +15,7 @@ sim = "standin"
 spacing_m = 6
 # at the Marina car kerb (hub-marina-kerb), clear of the drone pads
 spawn = [37.8045, -122.4360, 4, 0]
+home_hub = "hub-marina-kerb"
 
 [[unit]]
 platform = "delivery_plane"
@@ -21,6 +23,7 @@ count = 2
 sim = "standin"
 spacing_m = 40
 spawn = [37.8061, -122.4360, 3, 90]
+home_hub = "hub-marina"
 
 [[unit]]
 platform = "delivery_drone"
@@ -28,6 +31,7 @@ count = 16
 sim = "standin"
 spacing_m = 5
 spawn = [37.8089, -122.4105, 3, 0]
+home_hub = "hub-pier"
 
 [[unit]]
 platform = "delivery_boat"
@@ -35,3 +39,4 @@ count = 4
 sim = "standin"
 spacing_m = 20
 spawn = [37.8100, -122.4095, 0, 90]
+home_hub = "hub-pier-dock"

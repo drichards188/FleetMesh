@@ -148,13 +148,22 @@ or its confirmation is rejected; the keep-out monitor holds a vehicle for a rest
 moves the energy cost enough that the rule would now hold (the dispatcher uses preview for this
 before each tick, so it learns from the rules without knowing them).
 
+**Home bases (rules 4).** Every vehicle belongs to a home base, the hub it returns to
+([fleet-organisation.md](fleet-organisation.md)). From rules 4 (`HOME_BASE_SINCE`) the assigner
+costs a trip's way back to the candidate's home base (or to the hub nearest the zone when the
+battery would not cover the way home), so a vehicle based where the parcel waits wins over a
+visitor; the dispatcher sends a vehicle home after a delivery (the nearest hub only when the way
+home would not go at once), and sends a visitor idle for 60 s at another hub home. Before rules 4
+the way back, and the return, went to the hub nearest the vehicle.
+
 ## 5. What is deterministic and logged
 
 `assign` is deterministic: all sorting is stable, ties break by id, no randomness, no wall clock,
 no hash-map iteration. Parcel generation uses a seeded PRNG (ChaCha) whose seed and stream
 position are logged.
 
-Logged, so replay re-derives the plan:
+Logged, so replay re-derives the plan (under the rules the log was made under: from rules 4 each
+candidate in `input.vehicles` names its `home` base):
 
 ```jsonc
 {"type": "dispatch.plan", "t": 1796132410000, "tick": 142,

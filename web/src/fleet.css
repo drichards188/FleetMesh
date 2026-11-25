@@ -1,0 +1,51 @@
+/* The Fleet list organised by base (FleetPanel.tsx, fleetModel.ts): item heights are fleetModel.ts
+   ITEM_H (head 32, base 52, state 26, row 56) and must stay in step with it. */
+
+.fleet-filters { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; flex-wrap: wrap; }
+.ff-types { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.ff-chip {
+  font: 500 var(--text-label)/var(--leading-label) var(--font-ui); text-transform: capitalize;
+  padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer;
+}
+.ff-chip span { font-family: var(--font-data); margin-left: 3px; color: var(--text); }
+.ff-chip:hover { border-color: #3c5068; color: var(--text); }
+.ff-chip.on { border-color: var(--air); color: var(--text); background: #16263a; }
+.ff-state { font: 500 var(--text-label)/var(--leading-label) var(--font-ui); max-width: 11rem; }
+.fleet-derived { margin: 0 12px 6px; font-size: var(--text-label); }
+
+.fleet-list .vlist-head.fl-needs { color: var(--bad); }
+
+.fl-base-item { height: 52px; }
+.fl-base {
+  width: 100%; height: 48px; margin-top: 2px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  padding: 4px 8px; text-align: left; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); color: var(--text); cursor: pointer;
+}
+.fl-base:hover { border-color: #3c5068; }
+.fl-base.open { border-color: #3c5068; background: #182330; }
+.fl-base-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.fl-chev { color: var(--muted); width: 10px; flex-shrink: 0; }
+.fl-base-name { font: 600 var(--text-body)/var(--leading-title) var(--font-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fl-base-n { font: 600 var(--text-label)/var(--leading-label) var(--font-data); color: var(--muted); }
+.fb-chips { display: flex; gap: 3px; overflow: hidden; white-space: nowrap; padding-left: 16px; }
+.fb-chip { font: 500 11px/1.3 var(--font-data); padding: 0 4px; border-radius: 3px; border: 1px solid currentColor; flex-shrink: 0; }
+
+.fl-state {
+  position: absolute; left: 0; right: 0; box-sizing: border-box; padding: 6px 6px 0 18px; display: flex; align-items: center; gap: 6px;
+  font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase;
+}
+.fl-state span { font-family: var(--font-data); color: var(--text); }
+.fl-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.vlist-item.fl-in-base { padding-left: 10px; box-sizing: border-box; }
+
+/* each state's colour: the problems red and grey, automation's waits amber, the cycle blue and green */
+.fs-attention { color: var(--bad); }
+.fs-offline { color: #ff8a7a; }
+.fs-out_of_service { color: #8a96a3; }
+.fs-holding { color: var(--warn); }
+.fs-ready { color: var(--ok); }
+.fs-loading { color: #a9d0ff; }
+.fs-outbound { color: var(--air); }
+.fs-delivering { color: var(--sea); }
+.fs-returning { color: #9fb2c6; }
+.fs-charging { color: var(--violet); }
+.fs-tasked { color: var(--muted); }

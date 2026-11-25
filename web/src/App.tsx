@@ -72,6 +72,12 @@ import { buildTrafficLayers, trafficLabelCandidates, trafficTooltip, TRAFFIC_PIC
 import { trackTitle, trackTooltip } from './trafficText'
 import { domainOf } from './types'
 import { useTraffic, useTrafficSensors, useTrafficTruth } from './useTraffic'
+// the fleet by home base (docs/design/fleet-organisation.md): the Fleet list's and the map's
+import { useFleet } from './useFleet'
+import { fallbackFleet, type FleetDoc } from './fleetModel'
+import { baseLabelCandidates, type BaseMarker, collapseAtBases, EXPAND_ZOOM, SITE_ZOOM, toggleExpanded } from './fleetMap'
+import { BASE_PICK_LAYERS, buildBaseLayers } from './fleetMapLayers'
+import { latestOrders } from './orderWords'
 
 /** The bridge's scenario clock (scenarioClock.ts, `scenario` in GET /api/weather): asked once the
  *  bridge answers, again on each reconnect (a restarted bridge has a new start) and each minute. A
@@ -318,6 +324,30 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   useEffect(() => {
     if (mapView) setView({ bounds: mapView.bounds, zoom: mapView.zoom, pin: pins })
   }, [mapView, pins, setView])
+  // ---- the fleet by home base (docs/design/fleet-organisation.md): the bridge's view
+  // (/api/fleet), or the console's own coarser one from a bridge without it; on the map, the
+  // vehicles parked at their own base collapse into its marker (fleetMap.ts)
+  const fleetFeed = useFleet()
+  const fleetOrders = useMemo(() => (fleetFeed.doc ? null : latestOrders(state?.taskings ?? [], new Map((allIntents ?? []).map((i) => [i.id, i])))), [fleetFeed.doc, state?.taskings, allIntents])
+  const fleetAlerts = decisions?.inbox.alerts
+  const fleetDoc = useMemo<FleetDoc>(() => {
+    if (fleetFeed.doc) return fleetFeed.doc
+    const waiting = new Set<number>()
+    for (const i of pending ?? []) for (const u of i.uids) if (Number.isFinite(Number(u))) waiting.add(Number(u))
+    for (const a of fleetAlerts ?? []) if (a.uid) waiting.add(a.uid)
+    // said to be coarse only once the bridge has answered that it has no fleet view
+    return { ...fallbackFleet(allVehicles, delivery.places.hubs, fleetOrders ?? new Map(), waiting), derived: fleetFeed.missing }
+  }, [fleetFeed.doc, fleetFeed.missing, fleetOrders, allVehicles, delivery.places.hubs, pending, fleetAlerts])
+  // the bases opened on the map (a click on a marker), and the zoom's band (sites, bases, every
+  // vehicle on its own): the markers change with the band, not with every step of a zoom
+  const [openBases, setOpenBases] = useState<Set<string>>(() => new Set())
+  const zoomBand = mapView == null ? null : mapView.zoom < SITE_ZOOM ? SITE_ZOOM - 1 : mapView.zoom < EXPAND_ZOOM ? SITE_ZOOM : EXPAND_ZOOM
+  const pinSet = useMemo(() => new Set(pins), [pins])
+  const baseMap = useMemo(() => {
+    const placed = new Set(allVehicles.flatMap((v) => (v.position ? [v.uid] : [])))
+    return collapseAtBases(fleetDoc, placed, { keep: pinSet, expanded: openBases, zoom: zoomBand })
+  }, [fleetDoc, allVehicles, pinSet, openBases, zoomBand])
+  const mapVehicles = useMemo(() => (baseMap.collapsed.size ? allVehicles.filter((v) => !baseMap.collapsed.has(v.uid)) : allVehicles), [allVehicles, baseMap])
   const selIntent = inboxSel?.kind === 'intent' ? inboxSel.id : null
   const preview = useMemo(
     () => (pending && pending.length ? previewFeatures(pending, vehicles, selIntent) : EMPTY_PREVIEW),
@@ -432,6 +462,19 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     }),
     [],
   )
+  // a click on a base marker opens its bases (their vehicles drawn one by one), on an open one's
+  // closes them again; a click on a track as above
+  const trafficOn = trafficInput != null
+  const mapPick = useMemo(
+    () => ({
+      layers: [...BASE_PICK_LAYERS, ...(trafficOn ? TRAFFIC_PICK_LAYERS : [])],
+      onPick: (layer: string, o: unknown) => {
+        if (BASE_PICK_LAYERS.includes(layer)) setOpenBases((s) => toggleExpanded(s, o as BaseMarker))
+        else trafficPick.onPick(layer, o)
+      },
+    }),
+    [trafficOn, trafficPick],
+  )
   const onMapHover = useCallback((layer: string | null, object: unknown) => {
     const id = layer && TRAFFIC_PICK_LAYERS.includes(layer) && object ? (object as ShownTrack).track.id : null
     setTrackHover((h) => (h === id ? h : id))
@@ -446,14 +489,18 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       ...buildOrderLayers({ queued: queuedIntents ?? [], intents: allIntents ?? [], taskings: state?.taskings ?? [], vehicles, nowMs: now() }, plan),
       ...stationLayers,
       ...(deliveryData ? buildDeliveryLayers(deliveryData, drawn, plan, screen) : []),
+      // the bases' markers, under our vehicles
+      ...buildBaseLayers(baseMap.markers, plan),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [trafficInput, nodeRegionLayers, estimateLayers, stationLayers, deliveryData, drawn, queuedIntents, allIntents, state?.taskings, vehicles, orderTick],
+    [trafficInput, nodeRegionLayers, estimateLayers, stationLayers, deliveryData, drawn, queuedIntents, allIntents, state?.taskings, vehicles, orderTick, baseMap],
   )
   // every text layer's labels for the one label budget (declutter.ts), with our vehicles' (MapView's):
   // the same data and ticks as the layers above, so a new plan comes with them
   const mapLabels = useCallback(
     (screen: MapScreen) => [
+      // the bases' markers first: their room is taken before the hubs' names and the vehicles'
+      ...baseLabelCandidates(baseMap.markers, screen),
       ...(silent.length ? estimateLabelCandidates({ vehicles: silent, nowMs: now(), focus: detailsUid, inFocus: vehicleFocus, showAll: estimateAll }, screen) : []),
       ...orderLabelCandidates({ queued: queuedIntents ?? [], intents: allIntents ?? [], taskings: state?.taskings ?? [], vehicles, nowMs: now() }, screen),
       ...(deliveryData ? deliveryLabelCandidates(deliveryData, drawn, screen) : []),
@@ -461,7 +508,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       ...(trafficInput ? trafficLabelCandidates(trafficInput, screen) : []),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [silent, estimateTick, detailsUid, vehicleFocus, estimateAll, queuedIntents, allIntents, state?.taskings, vehicles, orderTick, deliveryData, drawn, trafficInput],
+    [silent, estimateTick, detailsUid, vehicleFocus, estimateAll, queuedIntents, allIntents, state?.taskings, vehicles, orderTick, deliveryData, drawn, trafficInput, baseMap],
   )
   // the full block of a coverage station mark or an estimate under the pointer, while its label is not
   const pictureT = picture?.t ?? 0
@@ -469,7 +516,9 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     (layer: string, object: unknown) =>
       layer === EXCLUDED_PICK_LAYER
         ? { key: `x:${(object as ExcludedMark).uid}`, text: (object as ExcludedMark).text }
-        : (trafficTooltip(layer, object, (t) => trackTooltip(t, pictureT, nameOf)) ?? deliveryTooltip(layer, object, delivery.parcels.elapsed_s, nameOf) ?? estimateTooltip(layer, object)),
+        : BASE_PICK_LAYERS.includes(layer)
+          ? { key: `fb:${(object as BaseMarker).id}`, text: `${(object as BaseMarker).text} (click to ${(object as BaseMarker).open ? 'gather them again' : 'show them one by one'})` }
+          : (trafficTooltip(layer, object, (t) => trackTooltip(t, pictureT, nameOf)) ?? deliveryTooltip(layer, object, delivery.parcels.elapsed_s, nameOf) ?? estimateTooltip(layer, object)),
     [delivery.parcels.elapsed_s, nameOf, pictureT],
   )
   // the reference views behind the top bar's one Layers button
@@ -808,7 +857,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
         <ErrorBoundary name="Map" className="floating">
           <MapView
             taskings={taskings}
-            vehicles={allVehicles}
+            vehicles={mapVehicles}
             selected={selected}
             draft={draft}
             focus={focus}
@@ -828,7 +877,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
             linkRoute={linkRoute}
             coverage={coverageImage}
             weather={showCoverage ? null : weatherView}
-            pick={trafficInput ? trafficPick : null}
+            pick={mapPick}
             onHover={onMapHover}
           />
         </ErrorBoundary>
@@ -951,7 +1000,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     parcelsPanel: parcelsPanel(false),
     fleet: (
       <ErrorBoundary name="Fleet list" className="slot fleet">
-        <FleetPanel vehicles={vehicles} selected={selected} onToggle={toggle}
+        <FleetPanel vehicles={vehicles} fleet={fleetDoc} selected={selected} onToggle={toggle}
           onDeselect={deselect}
           detailsUid={detailsUid}
           onDetails={(uid) => {

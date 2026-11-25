@@ -3,7 +3,7 @@ import { FloatGrip } from './FloatingPanel'
 import { useFloatBar } from './floating'
 import { ageS, isBearingOnly, type ShownTrack, type TrafficSensor, type TruthMatch } from './traffic'
 import { ageText, altDetail, classWords, climbText, courseText, distText, flagLines, sourceLine, speedText, stateWords, staticRows, trackCode, trackName, trackTitle, uncertaintyText } from './trafficText'
-import { trafficSvg } from './trafficSymbols'
+import { trackSvg } from './trafficSymbols'
 import './traffic.css'
 
 /** A selected traffic track's details: who it is (callsign or name, its address, or anonymous),
@@ -52,7 +52,7 @@ export function TrafficDetails({
     <aside className="vdetails tdetails" aria-label={`Traffic: ${trackTitle(t)}`}>
       <header className="vd-head" {...bar}>
         <FloatGrip />
-        <span className="vd-sym td-sym" dangerouslySetInnerHTML={{ __html: trafficSvg(t.class, t.domain, t.state === 'tentative', 30) }} />
+        <span className="vd-sym td-sym" dangerouslySetInnerHTML={{ __html: trackSvg(t, 20) }} />
         <div className="vd-title">
           <div className="vd-name">
             {trackTitle(t)} <span className="td-not-ours">not ours</span>

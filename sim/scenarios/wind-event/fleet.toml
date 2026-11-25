@@ -6,3 +6,4 @@ count = 40
 sim = "standin"
 spacing_m = 4
 spawn = [37.8068, -122.4462, 3, 0]
+home_hub = "hub-crissy"

@@ -46,6 +46,15 @@ def test_every_vehicle_carries_its_backup_link(platforms):
         assert v["link"] == platforms[v["platform"]]["link"]
 
 
+def test_a_units_home_hub_is_in_the_manifest_and_only_when_it_names_one(platforms):
+    fleet = {"unit": [unit("delivery_drone", count=2, home_hub="hub-marina"), unit("delivery_car")]}
+    vehicles = swarm.plan(fleet, platforms)
+    assert [v.get("home_hub") for v in vehicles] == ["hub-marina", "hub-marina", None]
+    assert "home_hub" not in vehicles[2], "a fleet without home hubs writes the manifest it always did"
+    with pytest.raises(SystemExit, match="home_hub is a hub id"):
+        swarm.plan({"unit": [unit("delivery_drone", home_hub=3)]}, platforms)
+
+
 def test_callsigns_number_per_platform(platforms):
     fleet = {"unit": [unit("delivery_drone", count=2), unit("delivery_car"), unit("delivery_drone")]}
     assert [v["callsign"] for v in swarm.plan(fleet, platforms)] == ["DRONE 1", "DRONE 2", "CAR 1", "DRONE 3"]

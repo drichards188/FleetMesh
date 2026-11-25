@@ -96,6 +96,19 @@ radius_m = 60
 pads = 4
 packs = 4
 
+# Sites: the bases (hubs) that work together at one place, for the console's Fleet list and map
+# (docs/design/fleet-organisation.md); the Marina's drone pads and its car kerb, the Pier's drone pads
+# and its boat dock. Nothing the rules or the dispatcher read.
+[[site]]
+id = "marina"
+name = "Marina"
+hubs = ["hub-marina", "hub-marina-kerb"]
+
+[[site]]
+id = "pier-39"
+name = "Pier 39"
+hubs = ["hub-pier", "hub-pier-dock"]
+
 [[dropzone]]
 id = "dz-fort-mason-3"
 kind = "doorstep"

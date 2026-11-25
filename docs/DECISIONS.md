@@ -280,3 +280,82 @@ may give a hub its own zones (`zones_by_hub`).
 
 Rules 1 and 2 logs replay under their own rules; `RULES_MARKERS` flags a log that claims rules 2 but
 carries the picture or the traffic figures.
+
+## 2026-11-25: The fleet is organised by home base, and each vehicle goes back to its own (rules 4)
+
+The maintainer: "There also needs to be a way to organize the fleet. It's a mess of individual
+nodes right now. Look up how these nodes would actually be organized and implement that." The
+console listed 54 vehicles flat (grouped only by domain) and drew 54 icons, piled at each hub. The
+dispatcher sent every vehicle back to the hub nearest it: in a live harbour-city run 13 of 22 returns
+went to another base than the vehicle's own (drones to the car kerb, a plane to the boat dock, boats
+towards a land hub the domain rule refuses).
+
+How real delivery fleets are organised (researched 2026-11-25):
+
+- **Bases.** Every vehicle belongs to a home base, and the base is the unit of organisation. Wing
+  runs "nests" at stores: an enclosure where drones park and charge, with an autoloader where staff
+  load orders (dronexl.co/2026/10/06/wing-walmart-bentonville-drone-nest-permit;
+  wing.com/news/wing-and-walmart-announce-world-s-largest-drone-delivery-expansion-ever). Zipline
+  runs hubs serving about a 10-mile radius in hub-and-spoke mode, or a dock-to-dock network in which
+  its software sends each aircraft to the dock that suits it, for charging or a pickup
+  (freightwaves.com/news/zipline-drone-delivery-just-got-a-massive-upgrade). Robotaxi fleets run
+  depots where vehicles are cleaned, inspected and charged to be "deployment-ready"
+  (axios.com/2026/04/29/robotaxis-depots-land-infrastructure-charging).
+- **Fleet software's hierarchy.** DJI FlightHub 2 organises an organisation, then projects, then
+  devices and docks, and its "grid deployment" dispatches the most suitable nearby dock for a task
+  (enterprise.dji.com/flighthub-2/faq; enterprise-insights.dji.com/blog/new-update-flighthub2-april).
+- **Operational state matters more than identity.** What operators watch is uptime: how many
+  vehicles are ready, out on a task, returning, charging or swapping, or out of service, per base.
+- **Supervision.** A central operations centre watches many sites; operators hand vehicles off to
+  one another, and NASA's m:N work studies dividing vehicles among operators
+  (skydio.com/remote-flight-deck; ntrs.nasa.gov/citations/20240001820;
+  wing.com/news/wing-unveils-first-of-its-kind-remote).
+
+What changed (docs/design/fleet-organisation.md):
+
+- **Home base.** Each vehicle has one: the hub its fleet file names for its unit (`home_hub`,
+  carried by the manifest), else the hub it was launched at. harbour-city names its four (the
+  Marina's drone pads and car kerb, the Pier's drone pads and boat dock); a scenario may group bases
+  into sites (`[[site]]` in its dispatch file) for the console. Sites are display only.
+- **Operational state.** The bridge derives one state per vehicle from what it already knows (the
+  dispatcher's jobs, the orders running and waiting, link, navigation, battery, alerts and issues):
+  needs attention, offline, out of service, holding, ready, loading, outbound, delivering, returning,
+  charging, on another order. `GET /api/fleet` serves them with each base's counts. There is no
+  maintenance state, since nothing in a run takes a vehicle in for service. Read-only, never logged.
+- **Console.** The Fleet list puts what needs a person first, whatever its base, then each site's
+  bases with their counts by state, each opening to its vehicles by state; filters by type and
+  state. On the map, the vehicles parked at their own base collapse into one marker per base (per
+  site zoomed out) with its counts; a click or zooming in opens it; anything away from its base,
+  under way, in trouble, selected or followed stays on its own.
+- **Dispatch, rules 4 (`HOME_BASE_SINCE`).** The assigner costs a trip's way back to the vehicle's
+  home base (the nearest hub when the battery would not cover the way home), so the vehicle based
+  where the parcel waits wins over a visitor; the plan's input logs each candidate's `home`, and
+  replay re-runs the assigner under the log's rules. The dispatcher sends a vehicle home after a
+  delivery when a dry run says the way home would go at once (else the nearest hub, as before), and
+  sends a visitor idle for 60 s at another hub home. No check, threshold or policy key changed; the
+  policy schema stays 3. In the headless harbour-city run every return (15 of 15) went home, and the
+  log replays.
+
+Rules 1 to 3 logs replay under their own rules (`--min-rules`); `RULES_MARKERS` flags a
+`dispatch.plan` that carries a `home` under a header that claims rules 3.
+
+## 2026-11-25: Other traffic is drawn in standard symbology, with civil identities only
+
+The maintainer asked for traffic icons "like murmur had for its contacts" so that a user can
+"quickly and easily understand what they are seeing"; the console's outline pictograms were hard to
+read at a glance. Each track is now a standard map symbol (MIL-STD-2525D / APP-6D number codes,
+drawn by milsymbol, MIT, as the earlier project drew its contacts): a frame whose colour and shape
+say how far it is identified, and a glyph for what kind it is, from the civilian function codes
+only and not over-specific (every airplane is civilian fixed wing). Why the standard rather than
+pictograms of our own: it keeps who-is-it apart from what-is-it, it is learnt once and read on
+other traffic displays, and its frames stay legible at the sizes a busy map allows. Our own
+vehicles keep their round delivery icons, so the fleet and the traffic never look alike.
+
+Only the neutral, unknown and pending identities are used, never friend or hostile (or assumed
+friend or suspect): neutral (green) for traffic that broadcasts (ADS-B, AIS, Remote ID) and says
+who it is, unknown (yellow) for what only our sensors see or what broadcasts no identity, pending
+(hollow) while a track is tentative; a coasting or stale track's frame is dashed (status
+anticipated). The traffic is the public's: a side would claim what a delivery company cannot know
+and has no business implying. The console's words avoid the standard's terms: the Key says
+"identified, broadcasting" and "unidentified or not broadcasting". Detail: docs/design/traffic.md,
+section 9.

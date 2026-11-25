@@ -7,6 +7,7 @@ sim = "standin"
 spacing_m = 30
 # at the Pier 39 boat dock (hub-pier-dock), in the marina basin
 spawn = [37.8098, -122.4090, 0, 90]
+home_hub = "hub-pier-dock"
 
 [[unit]]
 platform = "delivery_drone"
@@ -14,6 +15,7 @@ count = 6
 sim = "standin"
 spacing_m = 5
 spawn = [37.8089, -122.4105, 3, 0]
+home_hub = "hub-pier"
 
 [[unit]]
 platform = "delivery_plane"
@@ -21,3 +23,4 @@ count = 1
 sim = "standin"
 spacing_m = 40
 spawn = [37.8092, -122.4110, 3, 90]
+home_hub = "hub-pier"

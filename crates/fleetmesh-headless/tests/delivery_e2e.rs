@@ -269,6 +269,34 @@ fn harbour_city_delivers_parcels_and_its_log_replays() {
     assert!(places["body"]["drop_zones"].as_array().is_some_and(|z| !z.is_empty() && z[0]["at"].is_array()), "places: {places}");
     let nav = ep.api("GET", "/api/nav", None);
     assert!(nav["body"]["vehicles"].as_object().is_some_and(|v| !v.is_empty()), "nav: {nav}");
+    // the fleet by home base (docs/design/fleet-organisation.md): every vehicle has the base its
+    // fleet file names and one state, and the counts add up
+    let fleet = ep.api("GET", "/api/fleet", None)["body"].clone();
+    let vs = fleet["vehicles"].as_array().cloned().unwrap_or_default();
+    assert!(!vs.is_empty() && vs.iter().all(|v| v["base"].is_string() && v["state"].is_string() && v["why"].is_string()), "fleet: {fleet}");
+    let counted: u64 = fleet["counts"].as_object().map_or(0, |m| m.values().filter_map(Value::as_u64).sum());
+    assert_eq!(counted as usize, vs.len(), "fleet: {fleet}");
+    assert!(fleet["sites"].as_array().is_some_and(|s| s.len() == 2), "harbour-city's two sites: {fleet}");
+    // rules 4: the dispatcher sends a vehicle home to its own base, never a car or a drone to a
+    // base of another kind (the nearest hub was a boat dock or a car kerb as often as not)
+    let base: std::collections::BTreeMap<String, String> =
+        vs.iter().map(|v| (v["uid"].to_string(), v["base"].as_str().unwrap_or("").to_string())).collect();
+    let intents = ep.api("GET", "/api/intents", None);
+    let (mut home, mut away) = (0, Vec::new());
+    for i in intents["body"]["intents"].as_array().into_iter().flatten() {
+        if i["kind"] != json!("return_to_hub") || i["source"]["id"] != json!("dispatcher") {
+            continue;
+        }
+        let uid = i["uids"][0].as_str().unwrap_or("").to_string();
+        let hub = i["params"]["hub"]["id"].as_str().unwrap_or("").to_string();
+        if base.get(&uid) == Some(&hub) {
+            home += 1;
+        } else {
+            away.push((uid, hub));
+        }
+    }
+    eprintln!("returns home {home}, elsewhere {away:?}");
+    assert!(home >= 1 && away.len() * 4 <= home, "returns home {home}, elsewhere {away:?}");
     // the weather panel reads the weather the rules read: the grid says so, with a wind in every region
     let wx = ep.api("GET", "/api/weather/grid?bbox=-122.6,37.7,-122.3,37.9", None);
     assert_eq!(wx["body"]["available"], json!(true), "weather grid: {wx}");

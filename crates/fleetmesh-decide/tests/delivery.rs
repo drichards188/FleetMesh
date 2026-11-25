@@ -1896,9 +1896,17 @@ fn spec_for(task: Task, uid: &str) -> IntentSpec {
     s
 }
 
+/// A policy as a rules 3 build logged it: rules version 3 (the traffic figures and the picture,
+/// no home bases).
+fn v3_rig() -> Rig {
+    let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+    p.rules.rules_version = fleetmesh_decide::TRAFFIC_SEPARATION_SINCE;
+    Rig::with_policy(p)
+}
+
 #[test]
 fn a_rules_3_log_replays_with_no_mismatch() {
-    let mut r = Rig::new();
+    let mut r = v3_rig();
     let t = r.world.t;
     di(&mut r.world).picture = Some(picture(t, Vec::new()));
     let (first, second) = deliveries(&mut r);
@@ -1908,7 +1916,8 @@ fn a_rules_3_log_replays_with_no_mismatch() {
     let text = r.log.text();
     assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":3,") && l.contains("\"policy_schema\":3")), "a rules 3 header");
     assert!(text.contains("\"picture\"") && text.contains("ship_cpa_m"), "the picture and the traffic figures are logged");
-    let report = r.replays();
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
     assert_eq!(report.rules_version, fleetmesh_decide::TRAFFIC_SEPARATION_SINCE);
 }
 
@@ -1943,4 +1952,87 @@ fn a_rules_2_log_given_a_rules_3_header_is_found() {
     let rep = fleetmesh_decide::replay::replay(&events);
     // rules 3's separation says what it checked of other traffic; rules 2's said nothing of it
     assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
+}
+
+// ---- rules 4: home bases in the assigner (docs/design/fleet-organisation.md) -----------------
+
+/// The assigner's input for one parcel at the Presidio hub, bound for the Marina kerb, and two
+/// drones waiting there for it: "drone-1" based at the Pier hub (a visitor) and "drone-2" based at
+/// the Presidio. `based`: whether the candidates name their home bases (rules 4 logs them).
+fn assign_input(t: Time, based: bool) -> fleetmesh_decide::dispatch::AssignInput {
+    use fleetmesh_decide::dispatch::{AssignInput, Candidate, DispatchParams, OpenParcel};
+    let drone = catalog().get("delivery_drone").cloned().expect("platform");
+    let cand = |uid: &str, home: &str| Candidate {
+        uid: Uid::new(uid),
+        hub: "hub-presidio".into(),
+        platform: drone.clone(),
+        kind: AutopilotKind::Copter,
+        battery_pct: 95.0,
+        home: based.then(|| home.to_string()),
+    };
+    AssignInput {
+        t,
+        params: DispatchParams::default(),
+        energy: Default::default(),
+        places: places(),
+        // still air: the costs are the distances
+        weather: vec![],
+        parcels: vec![OpenParcel {
+            id: "p-9".into(),
+            hub: "hub-presidio".into(),
+            zone: "dz-marina-kerb".into(),
+            mass_kg: 1.0,
+            class: "normal".into(),
+            priority: 1,
+            due: t.plus_ms(1_800_000),
+        }],
+        vehicles: vec![cand("drone-1", "hub-pier"), cand("drone-2", "hub-presidio")],
+    }
+}
+
+#[test]
+fn a_rules_4_dispatch_plan_replays_and_sends_the_parcel_with_the_drone_based_at_its_hub() {
+    let mut r = Rig::new();
+    let input = assign_input(r.world.t, true);
+    let plan = fleetmesh_decide::dispatch::assign(&input);
+    assert_eq!(plan.assignments[0].vehicle.as_str(), "drone-2", "the drone based at the Presidio: {plan:?}");
+    r.engine.record_dispatch_plan(1, input, plan).expect("logged");
+    let text = r.log.text();
+    assert!(text.contains("\"home\":\"hub-pier\""), "each candidate's home base is logged");
+    let report = r.replays();
+    assert_eq!(report.rules_version, fleetmesh_decide::HOME_BASE_SINCE);
+}
+
+#[test]
+fn a_rules_3_dispatch_plan_replays_under_its_own_rules() {
+    let mut r = v3_rig();
+    let input = assign_input(r.world.t, false);
+    let rules3 = r.engine.policy().rules.clone();
+    let plan = fleetmesh_decide::dispatch::assign_under(&input, &rules3);
+    // rules 3 costs both back to the hub nearest the kerb: a tie, the lower uid takes it
+    assert_eq!(plan.assignments[0].vehicle.as_str(), "drone-1", "{plan:?}");
+    r.engine.record_dispatch_plan(1, input, plan).expect("logged");
+    let text = r.log.text();
+    assert!(!text.contains("\"home\":\"hub-"), "nothing rules 4 added");
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
+    assert_eq!(report.rules_version, fleetmesh_decide::TRAFFIC_SEPARATION_SINCE);
+}
+
+#[test]
+fn a_rules_4_dispatch_plan_given_a_rules_3_header_is_found() {
+    let mut r = Rig::new();
+    let input = assign_input(r.world.t, true);
+    let plan = fleetmesh_decide::dispatch::assign(&input);
+    r.engine.record_dispatch_plan(1, input, plan).expect("logged");
+    let mut events = fleetmesh_decide::audit::parse_log(&r.log.text()).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(fleetmesh_decide::TRAFFIC_SEPARATION_SINCE);
+    let opts = fleetmesh_decide::replay::ReplayOptions { rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1), ..Default::default() };
+    let rep = fleetmesh_decide::replay::replay_with(&events, &opts);
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("vehicles.home")), "{:?}", rep.mismatches);
+    // rules 3 costs the way back to the nearest hub: the visitor wins, not the plan logged
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("dispatch plan differs")), "{:?}", rep.mismatches);
 }

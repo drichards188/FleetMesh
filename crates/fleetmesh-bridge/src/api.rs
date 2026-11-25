@@ -92,6 +92,7 @@ pub fn router(app: App) -> Router {
         .route("/api/swarms", get(swarms))
         .route("/api/parcels", get(parcels))
         .route("/api/hubs", get(hubs))
+        .route("/api/fleet", get(fleet))
         .route("/api/places", get(places))
         .route("/api/nav", get(nav))
         .route("/api/traffic", get(traffic))
@@ -146,6 +147,12 @@ async fn parcels(State(app): State<App>) -> Response {
 /// `GET /api/hubs`: the hubs with the charged packs each has now. Read-only.
 async fn hubs(State(app): State<App>) -> Response {
     Json(app.decision.hubs_json()).into_response()
+}
+
+/// `GET /api/fleet`: the fleet by home base, each vehicle's operational state and why
+/// (docs/design/fleet-organisation.md). Read-only.
+async fn fleet(State(app): State<App>) -> Response {
+    Json(app.decision.fleet_json()).into_response()
 }
 
 /// `GET /api/places`: hubs with their packs, drop zones with the latest look at each. Read-only.

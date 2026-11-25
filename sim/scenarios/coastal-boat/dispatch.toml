@@ -60,6 +60,12 @@ radius_m = 60
 pads = 4
 packs = 4
 
+# the Pier's drone pads and its boat dock, one site (docs/design/fleet-organisation.md)
+[[site]]
+id = "pier-39"
+name = "Pier 39"
+hubs = ["hub-pier", "hub-pier-dock"]
+
 [[dropzone]]
 id = "dz-harbour-01"
 kind = "doorstep"

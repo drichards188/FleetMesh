@@ -212,7 +212,7 @@ the operator-load numbers.
 
 `web/src`: `traffic.ts` (types, declutter, fade, the bearing-only wedge, prediction, truth
 matching, feed health; checked by `traffic.check.ts`), `trafficText.ts` (words), `trafficSymbols.ts`
-(icons), `trafficLayers.ts` (deck.gl layers and label candidates), `useTraffic.ts` (the store),
+(the symbols, drawn by milsymbol through `milsymbolCore.js`), `trafficLayers.ts` (deck.gl layers and label candidates), `useTraffic.ts` (the store),
 `TrafficBar.tsx` (toggles, counts, picture health, coverage, truth), `TrafficDetails.tsx` (a
 selected track), the four alert kinds in `decisions.ts`, `bluf.ts` and `InboxPanel.tsx`.
 
@@ -245,11 +245,30 @@ routes (vessels), mid (smaller, fainter, no label) within 8 km and below 1,500 m
 far (small and faint) otherwise; an airliner above 3,000 m is always far. Flagged tracks
 (`sensor_disagree`, `position_jump`, `emergency`), the selected one and those an alert names are
 near wherever they are. At most 40 are drawn in full, the nearest. Coasting tracks draw at half
-strength, stale ones at two thirds, tentative ones dashed and unfilled. Traffic labels never
-displace our vehicles' (lowest priority in the one label budget). Aircraft labels give metres, as
-the fleet's do, with the reference (`baro` for pressure altitude, `MSL` for geometric); the details
-give feet too. A bearing-only track is a sector on the surface (its range interval, two bearing
+strength, stale ones at two thirds (both with a dashed frame), tentative ones hollow and dotted.
+Traffic labels never displace our vehicles' (lowest priority in the one label budget). Aircraft
+labels give metres, as the fleet's do, with the reference (`baro` for pressure altitude, `MSL` for
+geometric); the details give feet too. A bearing-only track is a sector on the surface (its range interval, two bearing
 sigmas either side) with its line of sight in 3D when selected or hovered, never a point.
+
+Symbols (2026-11-25, DECISIONS.md). Each track is a standard map symbol (MIL-STD-2525D / APP-6D
+number codes, drawn by milsymbol, MIT, as the earlier project drew its contacts): the frame says how
+far it is identified, a glyph inside what kind it is, from civilian functions only and not
+over-specific (`TRAFFIC_FUNCTION`: every airplane civilian fixed wing, a helicopter rotary wing, a
+drone unmanned; cargo, tanker, passenger, ferry, tug, fishing, sailing and motor leisure craft their
+own; a pilot boat, which the standard lacks, the general merchant ship; unknown aircraft, small
+craft and unknown vessels the frame alone). Only three identities are written: neutral (green
+square) for traffic that broadcasts and says who it is, unknown (yellow; a cloud in the air, four
+lobes on the water) for what only our sensors see or what broadcasts no identity, pending (hollow,
+dotted) while tentative; never friend or hostile. Coasting or stale: status anticipated, a dashed
+frame. Symbols stand upright (the speed leader, as before, shows the course), at milsymbol sizes
+20, 16 and 10 by tier, far ones the frame alone (a glyph would be a few pixels). An unidentified
+track out of focus (not near, selected, hovered or flagged) draws at 60 % of its strength. A
+bearing-only track keeps its wedge, with a small plain unknown-air frame on its line: something in
+the air along it, not a position. Labels and rings fit each frame's own extent. The bar's Key says
+what the frames, the dashed frame, the line ahead, the glyphs, the red ring and the wedge mean, in
+plain words, and that the round icons are ours: no traffic frame is round or in our colours. Only
+milsymbol's air and sea surface sets are bundled (about 110 kB minified of its 840 kB).
 
 ## 10. The bridge and the engine (phase 3, as built 2026-11-25)
 

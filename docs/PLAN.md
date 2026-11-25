@@ -15,7 +15,7 @@ makes the answer measurable.
 | 1 | Vehicle-side port | done | [link-and-gnss.md](design/link-and-gnss.md), [WEATHER.md](WEATHER.md) |
 | 2 | Engine, bridge and console port | done | [delivery-orders.md](design/delivery-orders.md), [rules-versioning.md](design/rules-versioning.md) |
 | 3 | Delivery orders and rules | done (rules v2: standing approvals, management by exception) | [delivery-orders.md](design/delivery-orders.md), [delivery-rules.md](design/delivery-rules.md) |
-| 4 | Dispatch, parcels, hubs | done, batching not built | [dispatch.md](design/dispatch.md) |
+| 4 | Dispatch, parcels, hubs | done, batching not built; home bases (rules 4) | [dispatch.md](design/dispatch.md), [fleet-organisation.md](design/fleet-organisation.md) |
 | 5 | Keep-out prediction | next | [keep-out.md](design/keep-out.md) |
 | 6 | Link and GNSS delivery models | next | [link-and-gnss.md](design/link-and-gnss.md) |
 | 7 | Scenarios and console delivery UI | done (harbour-city, wind-event, coastal-boat) | [scenarios.md](design/scenarios.md) |
@@ -73,7 +73,10 @@ documents are updated in the same change.
 ## 4. Dispatch (done, except batching)
 
 Parcels, hubs, drop zones, the deterministic greedy assigner with energy and wind costs, the plan
-log event, and the proposals the dispatcher makes as an agent. v2 (optional): an adapter to VROOM
+log event, and the proposals the dispatcher makes as an agent. The fleet is organised by home base
+(rules 4, [fleet-organisation.md](design/fleet-organisation.md)): every vehicle returns to its base,
+the assigner costs the way back to it, and the console lists and maps the fleet by base and by
+operational state. v2 (optional): an adapter to VROOM
 or OR-Tools as a second proposer.
 
 Design: [dispatch.md](design/dispatch.md).

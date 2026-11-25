@@ -1,6 +1,9 @@
+import { useState } from 'react'
+import { symbolSvg } from './symbols'
 import { feedRows, type Picture, type TrafficSensor } from './traffic'
 import { ageText, distText, sourceKindWords } from './trafficText'
 import { COVERAGE_MAX_M } from './trafficLayers'
+import { classSvg, type Frame } from './trafficSymbols'
 import './traffic.css'
 
 export interface TrafficToggles {
@@ -13,8 +16,8 @@ export interface TrafficToggles {
 
 /** The map's traffic bar: the layer on or off, each domain with how many tracks the picture has
  *  in it, how many are near the fleet, the picture's health (ok, or degraded with its reasons,
- *  each feed's state a click away), the receivers' coverage, and, in a dev run only, the
- *  simulator's truth beside the picture. */
+ *  each feed's state a click away), the receivers' coverage, the key to its symbols, and, in a dev
+ *  run only, the simulator's truth beside the picture. */
 export function TrafficBar({
   available,
   toggles,
@@ -48,6 +51,7 @@ export function TrafficBar({
   open: boolean
   setOpen: (f: (o: boolean) => boolean) => void
 }) {
+  const [keyOpen, setKeyOpen] = useState(false)
   const degraded = picture?.state === 'degraded'
   const feeds = feedRows(picture, pictureT)
   const far = (sensors ?? []).filter((s) => s.owner === 'company' && s.nominal_range_m > COVERAGE_MAX_M)
@@ -135,8 +139,12 @@ export function TrafficBar({
               Simulator truth
             </button>
           )}
+          <button className={`chip tb-key-chip ${keyOpen ? 'on' : ''}`} aria-expanded={keyOpen} onClick={() => setKeyOpen((o) => !o)} title="What the traffic symbols mean">
+            Key
+          </button>
         </div>
       )}
+      {toggles.on && keyOpen && <TrafficKey />}
       {toggles.on && toggles.coverage && farKinds.length > 0 && <p className="tb-cov">Not drawn, they reach past any view of the bay: {farKinds.join(', ')}.</p>}
       {toggles.on && toggles.truth && truthAllowed && (
         <p className="tb-truth" role="note">
@@ -145,5 +153,100 @@ export function TrafficBar({
         </p>
       )}
     </aside>
+  )
+}
+
+// ---- the key ----------------------------------------------------------------------------------
+
+const KEY_SIZE = 12
+const NEUTRAL: Frame = { identity: 'neutral', dashed: false }
+const UNKNOWN: Frame = { identity: 'unknown', dashed: false }
+let keySvgs: Record<string, string> | null = null
+/** the key's examples, drawn once */
+function keySymbols(): Record<string, string> {
+  keySvgs ??= {
+    idAir: classSvg('ga', 'air', NEUTRAL, KEY_SIZE),
+    idSea: classSvg('ferry', 'surface', NEUTRAL, KEY_SIZE),
+    unAir: classSvg('unknown_air', 'air', UNKNOWN, KEY_SIZE),
+    unSea: classSvg('unknown_surface', 'surface', UNKNOWN, KEY_SIZE),
+    coasting: classSvg('tug', 'surface', { identity: 'neutral', dashed: true }, KEY_SIZE),
+    tentative: classSvg('unknown_surface', 'surface', { identity: 'pending', dashed: false }, KEY_SIZE),
+    heli: classSvg('helicopter', 'air', NEUTRAL, KEY_SIZE),
+    drone: classSvg('drone', 'air', NEUTRAL, KEY_SIZE),
+    cargo: classSvg('cargo', 'surface', NEUTRAL, KEY_SIZE),
+    bearing: classSvg('unknown_air', 'air', UNKNOWN, 8, false),
+    ours: symbolSvg({ kind: 'copter' }, { stale: false, size: 20 }).svg,
+  }
+  return keySvgs
+}
+
+const Sym = ({ svg, className = '' }: { svg: string; className?: string }) => <span className={`tb-key-sym ${className}`} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />
+
+/** What the traffic symbols mean, in plain words: the two frame colours, a dashed frame, the line
+ *  ahead, the mark inside, the red ring, a wedge, and that the round icons are ours. */
+function TrafficKey() {
+  const k = keySymbols()
+  return (
+    <dl className="tb-key" aria-label="Traffic key">
+      <dt>
+        <Sym svg={k.idAir} />
+        <Sym svg={k.idSea} />
+      </dt>
+      <dd>
+        <b>Identified, broadcasting:</b> it sends its position and who it is.
+      </dd>
+      <dt>
+        <Sym svg={k.unAir} />
+        <Sym svg={k.unSea} />
+      </dt>
+      <dd>
+        <b>Unidentified or not broadcasting:</b> seen only by our sensors, or no identity. A cloud in the air, four lobes on the water.
+      </dd>
+      <dt>
+        <Sym svg={k.coasting} />
+        <Sym svg={k.tentative} />
+      </dt>
+      <dd>
+        <b>Dashed:</b> no fresh report, position extrapolated. <b>Hollow:</b> not yet confirmed.
+      </dd>
+      <dt>
+        <Sym svg={k.idAir} className="tb-key-vec" />
+      </dt>
+      <dd>
+        <b>The line:</b> where it will be in 30 s (aircraft) or 60 s (vessels).
+      </dd>
+      <dt>
+        <Sym svg={k.heli} />
+        <Sym svg={k.drone} />
+        <Sym svg={k.cargo} />
+      </dt>
+      <dd>
+        <b>Inside:</b> plane, rotor (helicopter), V (drone); a hull, lettered A cargo, O tanker, P passenger, F ferry, T tug. Far off, the frame alone.
+      </dd>
+      <dt>
+        <Sym svg={k.idSea} className="tb-key-ring" />
+      </dt>
+      <dd>
+        <b>Red ring:</b> something is wrong: a broadcast our sensors contradict, a jump, an emergency.
+      </dd>
+      <dt>
+        <span className="tb-key-wedge" aria-hidden="true">
+          <svg width="48" height="18" viewBox="0 0 52 18">
+            <path d="M1 9 L51 1 L51 17 Z" />
+            <line x1="1" y1="9" x2="51" y2="9" />
+          </svg>
+          <Sym svg={k.bearing} />
+        </span>
+      </dt>
+      <dd>
+        <b>Wedge:</b> seen along a line of sight only, somewhere in it.
+      </dd>
+      <dt>
+        <Sym svg={k.ours} />
+      </dt>
+      <dd>
+        <b>Round icons are ours.</b> Other traffic is never round.
+      </dd>
+    </dl>
   )
 }

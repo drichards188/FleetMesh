@@ -9,6 +9,8 @@
 //                           (where it can be, seen from above); never a point. Selected or
 //                           hovered, traffic-sight adds the line of sight in 3D, rising with its
 //                           elevation from the sensor on our vehicle
+//   traffic-bearing-marks   on its line, a small plain unknown-air frame: an unidentified aircraft
+//                           somewhere along it (far size, faint, no glyph: not a position)
 //   traffic-stems           an aircraft drawn at its height: a thin stem to the surface, as ours
 //   traffic-leaders         the speed leader: where it will be in 30 s (aircraft) or 60 s (vessels)
 //   traffic-predict(-sigma) the selected or hovered track's predicted path (constant velocity,
@@ -16,8 +18,10 @@
 //   traffic-disagree        a broadcast the company's sensors contradict, joined to where they see it
 //   traffic-alarm           a red ring round a flagged track (sensor_disagree, position_jump,
 //                           emergency); traffic-selected the selected one's ring
-//   traffic-icons           the icon by class (trafficSymbols.ts), turned to its course, sized and
-//                           faded by how much it matters and how fresh it is (traffic.ts declutter)
+//   traffic-icons           the standard symbol (trafficSymbols.ts): its frame says how far it is
+//                           identified, its glyph what kind it is (none far away); upright, the
+//                           leader shows the course; sized and faded by how much it matters and
+//                           how fresh it is (traffic.ts declutter)
 //   traffic-labels          its name, and in full its altitude or speed: only where the label budget
 //                           placed it (declutter.ts), only for the near ones and the flagged
 //   traffic-truth(-links, -names)  dev runs only, off by default: the simulator's truth beside it
@@ -30,9 +34,9 @@ import { type LabelCandidate, type LabelPlan, ALL_FULL, rightOf, textBox } from 
 import { circle } from './geo'
 import { HEIGHT_EXAGGERATION, NO_NEAR_GROWTH } from './map3d'
 import { perfPush } from './perf'
-import { bearingWedge, courseOf, drawAltM, isBearingOnly, leaderEnd, predictPath, type ShownTrack, type Track, type TrafficSensor, type TruthMatch } from './traffic'
+import { bearingWedge, drawAltM, isBearingOnly, leaderEnd, predictPath, type ShownTrack, type Tier, type Track, type TrafficSensor, type TruthMatch } from './traffic'
 import { classWords, distText, labelLines, sourceKindWords, trackTitle } from './trafficText'
-import { AIR_TRAFFIC_RGB, ICON_PX, orients, SURFACE_TRAFFIC_RGB, trafficIcon } from './trafficSymbols'
+import { AIR_TRAFFIC_RGB, bearingIcon, frameOf, iconExtent, SURFACE_TRAFFIC_RGB, symbolAlpha, trackIcon, type TrafficIcon } from './trafficSymbols'
 import type { LngLat } from './types'
 
 type RGBA = [number, number, number, number]
@@ -43,6 +47,7 @@ export const TRAFFIC_LAYER = {
   coverageNames: 'traffic-coverage-names',
   wedges: 'traffic-wedges',
   lines: 'traffic-bearing-lines',
+  bearingMarks: 'traffic-bearing-marks',
   sight: 'traffic-sight',
   stems: 'traffic-stems',
   leaders: 'traffic-leaders',
@@ -59,7 +64,7 @@ export const TRAFFIC_LAYER = {
 } as const
 
 /** layer ids whose object is a ShownTrack: a click selects it, the pointer over it hovers it */
-export const TRAFFIC_PICK_LAYERS: string[] = [TRAFFIC_LAYER.icons, TRAFFIC_LAYER.wedges, TRAFFIC_LAYER.labels]
+export const TRAFFIC_PICK_LAYERS: string[] = [TRAFFIC_LAYER.icons, TRAFFIC_LAYER.wedges, TRAFFIC_LAYER.bearingMarks, TRAFFIC_LAYER.labels]
 
 const OUTLINE: RGBA = [11, 15, 20, 255]
 const BAD: RGBA = [255, 93, 93, 255]
@@ -94,50 +99,25 @@ export interface TrafficLayerInput {
 interface Placement {
   /** rendered metres (the map's exaggeration applied): its height, or 0 at its foot */
   z: Map<string, number>
-  /** the icon's turn, degrees counter-clockwise on the screen (deck.gl's getAngle) */
-  angle: Map<string, number>
-  /** bumped whenever a z or an angle changes: the layers' update trigger */
+  /** bumped whenever a z changes: the layers' update trigger */
   version: number
 }
 
-let placed: { shown: ShownTrack[]; z: Map<string, number>; angle: Map<string, number>; version: number } | null = null
+let placed: { shown: ShownTrack[]; z: Map<string, number>; version: number } | null = null
 const byScreen = new WeakMap<MapScreen, Placement>()
-
-/** The angle on the screen of a course `deg` true at (lon, lat, z): through the camera, so it holds
- *  in a tilted and turned view. */
-function screenAngle(screen: MapScreen, at: LngLat, z: number, deg: number): number | null {
-  const p0 = screen.at(at[0], at[1], z)
-  const k = Math.cos((at[1] * Math.PI) / 180)
-  const r = (deg * Math.PI) / 180
-  const d = 50 // metres ahead
-  const p1 = screen.at(at[0] + (d * Math.sin(r)) / (111_320 * k), at[1] + (d * Math.cos(r)) / 111_320, z)
-  if (!p0 || !p1) return null
-  const dx = p1[0] - p0[0]
-  const dy = p1[1] - p0[1]
-  if (Math.hypot(dx, dy) < 0.01) return null
-  // clockwise from screen up, then deck.gl's counter-clockwise
-  return -((Math.atan2(dx, -dy) * 180) / Math.PI)
-}
 
 function placement(shown: ShownTrack[], screen: MapScreen): Placement {
   const hit = byScreen.get(screen)
   if (hit && placed?.shown === shown) return hit
   const z = new Map<string, number>()
-  const angle = new Map<string, number>()
   for (const { track: t } of shown) {
     const alt = drawAltM(t.domain, t.alt_m) * HEIGHT_EXAGGERATION
-    const zz = alt > 0 && screen.aloft(t.lon, t.lat, alt) ? 0 : alt
-    z.set(t.id, zz)
-    const c = courseOf(t)
-    if (c != null && orients(t.class, t.domain) && !isBearingOnly(t)) {
-      const a = screenAngle(screen, [t.lon, t.lat], zz, c) ?? -c
-      angle.set(t.id, Math.round(a / 3) * 3)
-    }
+    z.set(t.id, alt > 0 && screen.aloft(t.lon, t.lat, alt) ? 0 : alt)
   }
   const same = (a: Map<string, number>, b: Map<string, number>) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v)
-  const version = placed && placed.shown === shown && same(z, placed.z) && same(angle, placed.angle) ? placed.version : (placed?.version ?? 0) + 1
-  placed = { shown, z, angle, version }
-  const p = { z, angle, version }
+  const version = placed && placed.shown === shown && same(z, placed.z) ? placed.version : (placed?.version ?? 0) + 1
+  placed = { shown, z, version }
+  const p = { z, version }
   byScreen.set(screen, p)
   return p
 }
@@ -146,6 +126,22 @@ const zOf = (p: Placement, t: Track) => p.z.get(t.id) ?? 0
 /** where a track is drawn: a bearing-only one at the middle of its interval, on the surface with
  *  its footprint */
 const posOf = (p: Placement, t: Track): XYZ => (isBearingOnly(t) ? [t.lon, t.lat, 0] : [t.lon, t.lat, zOf(p, t)])
+
+// ---- the symbol each track is drawn with --------------------------------------------------------
+
+/** the tier a track is drawn at: the selected one in full wherever it is */
+const tierOf = (r: ShownTrack, selected: string | null): Tier => (r.track.id === selected ? 'near' : r.rel.tier)
+/** its icon and tier: a bearing-only track's small mark on its line (far size), else its symbol */
+function symbolOf(r: ShownTrack, selected: string | null): { icon: TrafficIcon; tier: Tier } {
+  if (isBearingOnly(r.track)) return { icon: bearingIcon(r.track), tier: 'far' }
+  const tier = tierOf(r, selected)
+  return { icon: trackIcon(r.track, tier), tier }
+}
+/** how far right of its position its frame reaches, CSS px: where its label starts */
+const frameRight = (r: ShownTrack, selected: string | null) => {
+  const { icon, tier } = symbolOf(r, selected)
+  return iconExtent(icon, tier).right
+}
 
 // ---- labels -----------------------------------------------------------------------------------
 
@@ -166,7 +162,7 @@ export function trafficLabelCandidates(input: TrafficLayerInput, screen: MapScre
   for (const r of order) {
     const t = r.track
     const [lon, lat, z] = posOf(p, t)
-    const half = isBearingOnly(t) ? 4 : ICON_PX[r.rel.tier] / 2
+    const half = frameRight(r, input.selected)
     const short = labelLines(t, false)
     const full = labelLines(t, true)
     const mine = t.id === input.selected
@@ -188,7 +184,7 @@ export function trafficLabelCandidates(input: TrafficLayerInput, screen: MapScre
 }
 
 /** The full label's lines are drawn from the top of the block, just above the icon's middle. */
-const labelOffset = (r: ShownTrack, full: boolean): [number, number] => [(isBearingOnly(r.track) ? 4 : ICON_PX[r.rel.tier] / 2) + 4, full ? -LABEL_PX * 0.75 : 0]
+const labelOffset = (r: ShownTrack, selected: string | null, full: boolean): [number, number] => [frameRight(r, selected) + 4, full ? -LABEL_PX * 0.75 : 0]
 
 // ---- the layers -------------------------------------------------------------------------------
 
@@ -231,7 +227,7 @@ const flat = (pts: [number, number, number][]): XYZ[] => pts.map(([lon, lat]) =>
 export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = ALL_FULL, screen: MapScreen | null = null) {
   const t0 = performance.now()
   const parts = partition(input.shown)
-  const p: Placement = screen ? placement(input.shown, screen) : { z: new Map(), angle: new Map(), version: -1 }
+  const p: Placement = screen ? placement(input.shown, screen) : { z: new Map(), version: -1 }
   const pos = (r: ShownTrack) => posOf(p, r.track)
   const trig = { getPosition: p.version }
   const layers = []
@@ -299,6 +295,22 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
         parameters: onTop,
       }),
     )
+  // always there, empty or not, as traffic-icons is: an icon layer torn down while its icons load
+  // has them written into a deleted texture
+  layers.push(
+    new IconLayer<Parts['wedges'][number]>({
+      id: TRAFFIC_LAYER.bearingMarks,
+      data: parts.wedges,
+      pickable: true,
+      getPosition: pos,
+      getIcon: (w) => bearingIcon(w.track),
+      getSize: (w) => iconExtent(bearingIcon(w.track), 'far').height,
+      sizeUnits: 'pixels',
+      getColor: (w) => [255, 255, 255, Math.round(Math.min(0.85, w.alpha) * 255)],
+      extensions: NO_NEAR_GROWTH,
+      parameters: onTop,
+    }),
+  )
   // the selected or hovered bearing-only track's line of sight in 3D: from the sensor on our vehicle,
   // up (or down) its elevation, the wedge's near and far ends at their heights
   const sights = parts.wedges.filter((w) => w.track.id === input.selected || w.track.id === input.hovered)
@@ -414,7 +426,10 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
         id: TRAFFIC_LAYER.alarm,
         data: parts.alarms,
         getPosition: pos,
-        getRadius: (r) => ICON_PX[r.rel.tier] / 2 + 5,
+        getRadius: (r) => {
+          const { icon, tier } = symbolOf(r, input.selected)
+          return iconExtent(icon, tier).reach + 4
+        },
         radiusUnits: 'pixels',
         billboard: true,
         stroked: true,
@@ -422,7 +437,7 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
         getLineColor: BAD,
         getLineWidth: 2,
         lineWidthUnits: 'pixels',
-        updateTriggers: trig,
+        updateTriggers: { getPosition: p.version, getRadius: input.selected },
         extensions: NO_NEAR_GROWTH,
         parameters: onTop,
       }),
@@ -435,7 +450,7 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
         id: TRAFFIC_LAYER.selected,
         data: [sel],
         getPosition: pos,
-        getRadius: ICON_PX.near / 2 + 8,
+        getRadius: iconExtent(trackIcon(sel.track, 'near'), 'near').reach + 6,
         radiusUnits: 'pixels',
         billboard: true,
         stroked: true,
@@ -455,12 +470,15 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
       data: parts.points,
       pickable: true,
       getPosition: pos,
-      getIcon: (r) => trafficIcon(r.track.class, r.track.domain, r.provisional),
-      getSize: (r) => (r.track.id === input.selected ? ICON_PX.near : ICON_PX[r.rel.tier]),
+      getIcon: (r) => symbolOf(r, input.selected).icon,
+      getSize: (r) => {
+        const { icon, tier } = symbolOf(r, input.selected)
+        return iconExtent(icon, tier).height
+      },
       sizeUnits: 'pixels',
-      getAngle: (r) => p.angle.get(r.track.id) ?? 0,
-      getColor: (r) => [255, 255, 255, Math.round(r.alpha * 255)],
-      updateTriggers: { getPosition: p.version, getAngle: p.version, getSize: input.selected },
+      // in focus: near the fleet (the selected one is), hovered or flagged
+      getColor: (r) => [255, 255, 255, Math.round(symbolAlpha(r.alpha, frameOf(r.track), tierOf(r, input.selected) === 'near' || r.track.id === input.hovered || r.alarm) * 255)],
+      updateTriggers: { getPosition: p.version, getIcon: input.selected, getSize: input.selected, getColor: `${input.selected}|${input.hovered}` },
       extensions: NO_NEAR_GROWTH,
       parameters: onTop,
     }),
@@ -482,14 +500,14 @@ export function buildTrafficLayers(input: TrafficLayerInput, plan: LabelPlan = A
         getColor: (r) => (r.alarm ? BAD : withA(rgb(r.track), Math.max(0.55, r.alpha))),
         getTextAnchor: 'start',
         getAlignmentBaseline: (r) => (full(r) ? 'top' : 'center'),
-        getPixelOffset: (r) => labelOffset(r, full(r)),
+        getPixelOffset: (r) => labelOffset(r, input.selected, full(r)),
         fontFamily: FONT,
         fontWeight: 600,
         outlineWidth: 3,
         outlineColor: OUTLINE,
         fontSettings: FONT_SETTINGS,
         characterSet: 'auto',
-        updateTriggers: { getPosition: p.version, getText: key, getAlignmentBaseline: key, getPixelOffset: key, getColor: key },
+        updateTriggers: { getPosition: p.version, getText: key, getAlignmentBaseline: key, getPixelOffset: `${key}|${input.selected}`, getColor: key },
         extensions: NO_NEAR_GROWTH,
         parameters: onTop,
       }),

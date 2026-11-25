@@ -19,6 +19,14 @@
 //! with the energy and the legs' ground speed taken from the same trip model the energy rule
 //! uses ([`crate::delivery_rules::trip_legs`]), so a headwind changes the winner. Not in v1:
 //! batching for cars and boats, the expected-hold penalty (it needs a dry run) and wear.
+//!
+//! Rules 4 ([`HOME_BASE_SINCE`]): every vehicle belongs to a home base (its home hub,
+//! [`Candidate::home`]) and goes back there after a delivery, so the way back a trip is costed
+//! with goes to its home hub, or to the hub nearest the zone when the battery would not cover the
+//! way home (where automation would send it then). A vehicle away from its base is therefore
+//! dearer than one based where the parcel waits, unless the parcel lies on its way home. Under
+//! rules 3 the way back went to the hub nearest the zone always ([`assign_under`] decides under
+//! the rules it is given; replay gives it the log's).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,6 +36,7 @@ use crate::catalog::{AutopilotKind, Domain, PlatformFacts};
 use crate::delivery::{DropZone, EnergyKnobs, Places, Surface2, WxFact};
 use crate::geo::LonLat;
 use crate::ids::Uid;
+use crate::rules::{HOME_BASE_SINCE, RulesConfig};
 use crate::time::Time;
 
 /// The assigner's knobs (`[dispatch]` of a scenario's dispatch file), logged with every plan.
@@ -87,6 +96,11 @@ pub struct Candidate {
     pub platform: PlatformFacts,
     pub kind: AutopilotKind,
     pub battery_pct: f64,
+    /// Rules 4: its home base, the hub it belongs to and returns to (the fleet file's
+    /// `home_hub`, else the hub it started at). Absent before rules 4, and for a vehicle with no
+    /// base (then the way back goes to the hub nearest the zone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -133,9 +147,15 @@ fn r3(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
 }
 
-/// One candidate's trip for one parcel: the energy it costs (out and back to the nearest hub)
-/// and the time to the zone, or why not.
-fn trip_cost(inp: &AssignInput, v: &Candidate, zone: &DropZone, hub_at: LonLat, mass_kg: f64) -> Result<(f64, f64), String> {
+/// Where a vehicle goes back to from `zone` when it has no home base to go to: the open hub
+/// nearest the zone (its origin hub when there is none).
+fn nearest_back(inp: &AssignInput, zone: &DropZone, hub_at: LonLat) -> LonLat {
+    inp.places.nearest_hub(zone.at()).map_or(hub_at, |(h, _)| h.at())
+}
+
+/// One candidate's trip for one parcel: the energy it costs (out to the zone, then back to
+/// `back` with nothing aboard) and the time to the zone, or why not.
+fn trip_cost(inp: &AssignInput, v: &Candidate, zone: &DropZone, hub_at: LonLat, back: LonLat, mass_kg: f64) -> Result<(f64, f64), String> {
     let platform = &v.platform;
     let (Some(cruise), Some(endurance_h)) = (
         platform.cruise_mps.filter(|c| *c > 0.0),
@@ -163,11 +183,7 @@ fn trip_cost(inp: &AssignInput, v: &Candidate, zone: &DropZone, hub_at: LonLat, 
     if matches!(v.kind, AutopilotKind::Copter) {
         energy += inp.energy.drop_hover_s / 3600.0 * per_h * mult;
     }
-    // back to the nearest open hub from the zone, with nothing aboard
-    let back = inp
-        .places
-        .nearest_hub(zone.at())
-        .map_or(hub_at, |(h, _)| h.at());
+    // back with nothing aboard
     let ret = crate::delivery_rules::trip_legs(&[zone.at(), back], platform, &wx, min_frac);
     for l in &ret {
         if l.gs_mps.is_none() {
@@ -178,8 +194,16 @@ fn trip_cost(inp: &AssignInput, v: &Candidate, zone: &DropZone, hub_at: LonLat, 
     Ok((energy, eta))
 }
 
-/// The plan for `inp`: pure and deterministic.
+/// The plan for `inp` under this build's rules: pure and deterministic.
 pub fn assign(inp: &AssignInput) -> Plan {
+    assign_under(inp, &RulesConfig::default())
+}
+
+/// The plan for `inp` under `rules` (a run's, or the version a replayed log was made under):
+/// pure and deterministic.
+pub fn assign_under(inp: &AssignInput, rules: &RulesConfig) -> Plan {
+    // rules 4: the way back goes to the vehicle's home base
+    let home_base = rules.at_least(HOME_BASE_SINCE);
     let mut plan = Plan::default();
     let mut order: Vec<&OpenParcel> = inp.parcels.iter().collect();
     order.sort_by(|a, b| {
@@ -229,11 +253,27 @@ pub fn assign(inp: &AssignInput) -> Plan {
                 fail("DZ_WRONG_SURFACE".into(), &mut rejected, &mut reasons);
                 continue;
             }
-            match trip_cost(inp, v, zone, hub.at(), p.mass_kg) {
+            let reserve = inp.energy.reserve_pct.get(v.kind);
+            let fits = |energy: f64| energy <= inp.params.max_range_frac * 100.0 && v.battery_pct - energy >= reserve;
+            let nearest = nearest_back(inp, zone, hub.at());
+            let home = if home_base {
+                v.home.as_ref().and_then(|h| inp.places.hubs.get(h)).filter(|h| h.open).map(|h| h.at())
+            } else {
+                None
+            };
+            let costed = match home {
+                // home, unless the battery would not cover the way there: then the hub nearest the
+                // zone, where automation would send it
+                Some(home_at) => match trip_cost(inp, v, zone, hub.at(), home_at, p.mass_kg) {
+                    Ok((energy, eta)) if fits(energy) => Ok((energy, eta)),
+                    _ => trip_cost(inp, v, zone, hub.at(), nearest, p.mass_kg),
+                },
+                None => trip_cost(inp, v, zone, hub.at(), nearest, p.mass_kg),
+            };
+            match costed {
                 Err(why) => fail(why.split(':').next().unwrap_or("ENERGY").to_string(), &mut rejected, &mut reasons),
                 Ok((energy, eta)) => {
-                    let reserve = inp.energy.reserve_pct.get(v.kind);
-                    if energy > inp.params.max_range_frac * 100.0 || v.battery_pct - energy < reserve {
+                    if !fits(energy) {
                         fail("ENERGY_INSUFFICIENT".into(), &mut rejected, &mut reasons);
                         continue;
                     }
@@ -305,6 +345,11 @@ mod tests {
             "h".into(),
             Hub { id: "h".into(), name: String::new(), lon: -122.46, lat: 37.80, radius_m: 50.0, pads: 2, packs: 2, open: true },
         );
+        // a second base 3.3 km north, farther than "h" from every zone below
+        p.hubs.insert(
+            "k".into(),
+            Hub { id: "k".into(), name: String::new(), lon: -122.46, lat: 37.83, radius_m: 50.0, pads: 2, packs: 2, open: true },
+        );
         for (id, lon, lat, surface) in [("near", -122.455, 37.80, Surface2::Land), ("far", -122.40, 37.80, Surface2::Land), ("wet", -122.455, 37.81, Surface2::Water)] {
             p.drop_zones.insert(
                 id.into(),
@@ -341,7 +386,17 @@ mod tests {
     }
 
     fn cand(uid: &str, plat: PlatformFacts, battery: f64) -> Candidate {
-        Candidate { uid: Uid::new(uid), hub: "h".into(), platform: plat, kind: AutopilotKind::Copter, battery_pct: battery }
+        Candidate { uid: Uid::new(uid), hub: "h".into(), platform: plat, kind: AutopilotKind::Copter, battery_pct: battery, home: None }
+    }
+
+    /// `c` based at `home` (rules 4).
+    fn based(mut c: Candidate, home: &str) -> Candidate {
+        c.home = Some(home.into());
+        c
+    }
+
+    fn rules(version: u32) -> RulesConfig {
+        RulesConfig { rules_version: version, ..RulesConfig::default() }
     }
 
     fn parcel(id: &str, zone: &str, mass: f64, priority: u8, due_s: i64) -> OpenParcel {
@@ -431,5 +486,50 @@ mod tests {
         let windy = assign(&inp);
         assert_eq!(windy.assignments[0].vehicle.as_str(), "2", "{windy:?}");
         assert!(windy.assignments[0].rejected.iter().any(|(u, w)| u.as_str() == "1" && w == "ENERGY_WIND_NO_HEADWAY"));
+    }
+
+    #[test]
+    fn from_rules_4_the_way_back_goes_home_so_the_vehicle_based_at_the_parcels_hub_wins() {
+        // two drones waiting at "h" for a parcel near it: "2" is based there, "1" is visiting from
+        // "k". Rules 3 costs both back to the hub nearest the zone, a tie the lower uid takes;
+        // rules 4 costs the visitor's way home to "k", and the one based at "h" carries it
+        let d = platform("drone", Domain::Air, 12.0, 2.5);
+        let inp = input(vec![parcel("p", "near", 1.0, 1, 3000)], vec![based(cand("1", d.clone(), 95.0), "k"), based(cand("2", d, 95.0), "h")]);
+        let old = assign_under(&inp, &rules(crate::rules::TRAFFIC_SEPARATION_SINCE));
+        assert_eq!(old.assignments[0].vehicle.as_str(), "1", "{old:?}");
+        let new = assign_under(&inp, &rules(HOME_BASE_SINCE));
+        assert_eq!(new.assignments[0].vehicle.as_str(), "2", "{new:?}");
+        assert!(new.assignments[0].beat[0].1 > new.assignments[0].cost, "the visitor costs more: {new:?}");
+        assert_eq!(assign(&inp), new, "this build decides under rules 4");
+        // with no base named, rules 4 decides as rules 3 did
+        let mut none = inp.clone();
+        none.vehicles.iter_mut().for_each(|v| v.home = None);
+        assert_eq!(assign_under(&none, &rules(HOME_BASE_SINCE)), assign_under(&none, &rules(crate::rules::TRAFFIC_SEPARATION_SINCE)));
+    }
+
+    #[test]
+    fn the_way_back_is_the_nearest_hub_when_the_battery_would_not_cover_the_way_home() {
+        let d = platform("drone", Domain::Air, 12.0, 2.5);
+        let mut inp = input(vec![parcel("p", "near", 1.0, 1, 3000)], vec![based(cand("1", d, 95.0), "k")]);
+        let to_nearest = assign_under(&inp, &rules(crate::rules::TRAFFIC_SEPARATION_SINCE)).assignments[0].terms.energy_pct;
+        let to_home = assign_under(&inp, &rules(HOME_BASE_SINCE)).assignments[0].terms.energy_pct;
+        assert!(to_home > to_nearest + 5.0, "home is farther: {to_home} against {to_nearest}");
+        // a battery that covers the trip back to "h" but not home to "k"
+        let reserve = inp.energy.reserve_pct.get(AutopilotKind::Copter);
+        inp.vehicles[0].battery_pct = reserve + (to_nearest + to_home) / 2.0;
+        let plan = assign_under(&inp, &rules(HOME_BASE_SINCE));
+        assert_eq!(plan.assignments.len(), 1, "{plan:?}");
+        assert_eq!(plan.assignments[0].terms.energy_pct, to_nearest, "costed back to the nearest hub");
+    }
+
+    #[test]
+    fn a_candidate_with_no_base_serializes_as_before_rules_4() {
+        let d = platform("drone", Domain::Air, 12.0, 2.5);
+        let v = serde_json::to_value(cand("1", d.clone(), 90.0)).expect("json");
+        assert!(v.get("home").is_none(), "{v}");
+        let v = serde_json::to_value(based(cand("1", d, 90.0), "h")).expect("json");
+        assert_eq!(v["home"], "h");
+        let back: Candidate = serde_json::from_value(v).expect("round trip");
+        assert_eq!(back.home.as_deref(), Some("h"));
     }
 }

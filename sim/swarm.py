@@ -13,7 +13,10 @@ leaves it where it is until it first arms), and may group them into swarms (`[[s
 tables, "swarms" below: a swarm's members laid out as a block, a ring or a line, each vehicle's
 manifest entry naming its swarm), and a unit or a swarm may give its stand-ins one starting task
 (`start`, "starting tasks" below: the previous watch's order, which they start on station for and
-the bridge hands over at the start). Platforms run as real ArduPilot SITL processes, or as
+the bridge hands over at the start). A unit or a swarm may name its vehicles' home base, the hub
+they belong to and return to (`home_hub = "hub-marina"`, a hub of the scenario's dispatch file;
+docs/design/fleet-organisation.md); without one the bridge takes the hub a vehicle starts at.
+Platforms run as real ArduPilot SITL processes, or as
 MAVLink-speaking stand-ins in one process (a unit's `sim = "standin"`, which load tests use): the Rust engine, crates/fleetmesh-standins (target/release/fleetmesh-standins, built
 here if cargo is around; FLEETMESH_STANDINS_BIN overrides the binary). It reads tidewater
 conditions from FLEETMESH_TIDEWATER_URL, FLEETMESH_AT and FLEETMESH_RATE in the environment.
@@ -153,10 +156,10 @@ SWARM_LAYOUTS = ("block", "ring", "line")
 SWARM_KEYS = {
     "id", "name", "role", "color", "platform", "mix", "count", "sim", "cruise_alt_m", "moored", "layout",
     "center", "columns", "spacing_m", "row_spacing_m", "heading_deg", "radius_m", "from", "to", "alt_m", "start",
-    "slots", "lanes",
+    "slots", "lanes", "home_hub",
 }
 # what a swarm passes on to each member unit
-SWARM_UNIT_KEYS = ("sim", "cruise_alt_m", "moored")
+SWARM_UNIT_KEYS = ("sim", "cruise_alt_m", "moored", "home_hub")
 _SWARM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -555,6 +558,12 @@ def plan(fleet, platforms):
                 # the swarm it belongs to (fleet_swarms): only when it has one, so a fleet without
                 # swarms writes the manifest it always did
                 vehicles[-1]["swarm"] = unit["swarm"]
+            if unit.get("home_hub"):
+                # its home base (docs/design/fleet-organisation.md): the hub it belongs to and
+                # returns to; without one the bridge takes the hub it starts at
+                if not isinstance(unit["home_hub"], str):
+                    sys.exit(f"{where}: home_hub is a hub id, as the scenario's dispatch file names it")
+                vehicles[-1]["home_hub"] = unit["home_hub"]
             if start is not None:
                 # its starting task (decision rules 29), moved with it as its place is, and where
                 # it starts: only when it has one, so every other entry is as before

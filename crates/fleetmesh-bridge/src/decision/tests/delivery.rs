@@ -170,6 +170,7 @@ async fn a_pickup_on_the_hubs_pads_loads_where_the_vehicle_stands() {
 // ---- rules 3: the picture of other traffic ---------------------------------------------------------
 
 /// An SBS-1 airborne position (`MSG,3`) and velocity (`MSG,4`) as a receiver serves them.
+#[allow(clippy::too_many_arguments)]
 fn sbs_pair(session: u32, hex: &str, t_ms: i64, lat: f64, lon: f64, alt_ft: u32, kt: u32, track: u32) -> [String; 2] {
     let d = chrono::DateTime::from_timestamp_millis(t_ms).expect("time");
     let (date, time) = (d.format("%Y/%m/%d"), d.format("%H:%M:%S%.3f"));
@@ -229,4 +230,52 @@ async fn the_picture_of_other_traffic_is_what_a_decision_reads_and_what_the_api_
     let sep = preview.checks.iter().find(|c| c.rule == fleetmesh_decide::RuleId::Separation).expect("separation");
     assert!(sep.codes.iter().any(|c| c == "SEP_TRAFFIC_CONFLICT"), "{sep:?}");
     assert!(sep.codes.iter().all(|c| WAIT_OUT.contains(&c.as_str())), "a conflict with traffic is automation's to wait out: {sep:?}");
+}
+
+/// The fleet view (docs/design/fleet-organisation.md): each vehicle at its home base (the
+/// manifest's `home_hub`, else where it was launched), in one state with why, the problems
+/// first; a base counts its own vehicles by state and what is parked at it, visitors included.
+#[tokio::test(start_paused = true)]
+async fn the_fleet_view_puts_each_vehicle_at_its_base_in_one_state_with_why() {
+    let r = waiting_rig();
+    let hub = r.d.places().hubs["hub-presidio"].clone();
+    // two at the Presidio hub: 7 launched there, 9 based at the Marina by its fleet file; 8 away
+    r.vehicle(7, Firmware::Copter, "delivery_drone", (hub.lat, hub.lon));
+    r.vehicle(9, Firmware::Copter, "delivery_drone", (hub.lat + 0.0002, hub.lon));
+    r.vehicle(8, Firmware::Copter, "delivery_drone", (LAT, LON));
+    r.world.manifest().bases.insert(7, crate::world::ManifestBase { home_hub: None, launched: Some((hub.lon, hub.lat)) });
+    r.world.manifest().bases.insert(9, crate::world::ManifestBase { home_hub: Some("hub-marina".into()), launched: Some((hub.lon, hub.lat)) });
+    sleep(Duration::from_secs(2)).await;
+    let f = r.d.fleet_json();
+    let v = |uid: u64| f["vehicles"].as_array().and_then(|l| l.iter().find(|x| x["uid"] == json!(uid)).cloned()).expect("listed");
+    assert_eq!((v(7)["base"].clone(), v(7)["at_hub"].clone()), (json!("hub-presidio"), json!("hub-presidio")));
+    assert_eq!(v(7)["state"], json!("ready"), "{}", v(7));
+    assert_eq!((v(9)["base"].clone(), v(9)["at_hub"].clone()), (json!("hub-marina"), json!("hub-presidio")), "the fleet file's base");
+    assert_eq!(v(8)["base"], json!(null), "launched away from every hub: no base");
+    assert_eq!(v(8)["state"], json!("attention"));
+    assert_eq!(v(8)["why"], json!("stopped away from a hub with no order"));
+    let base = |id: &str| f["bases"].as_array().and_then(|l| l.iter().find(|b| b["id"] == json!(id)).cloned()).expect("a base");
+    assert_eq!(base("hub-presidio")["vehicles"], json!(1));
+    assert_eq!(base("hub-presidio")["here"], json!(2));
+    assert_eq!(base("hub-presidio")["visitors"], json!(1));
+    assert_eq!(base("hub-presidio")["parked"]["ready"], json!(2));
+    assert_eq!(base("hub-marina")["counts"]["ready"], json!(1), "9 counts at its own base");
+    assert_eq!(f["counts"]["attention"], json!(1));
+    let states: Vec<&str> = f["states"].as_array().expect("states").iter().filter_map(|s| s["id"].as_str()).collect();
+    assert_eq!(states.first(), Some(&"attention"), "problems first");
+    // an order that waits for a person (a platform with no endurance rating): its vehicle needs
+    // attention, saying why
+    r.vehicle(10, Firmware::Copter, "delivery_unrated", (hub.lat, hub.lon + 0.0002));
+    sleep(Duration::from_millis(500)).await;
+    let out = r.d.submit(&op1(), orbit(10)).await.expect("submit");
+    assert_eq!(out.state, State::PendingApproval);
+    let f = r.d.fleet_json();
+    let ten = f["vehicles"].as_array().and_then(|l| l.iter().find(|x| x["uid"] == json!(10)).cloned()).expect("10");
+    assert_eq!(ten["state"], json!("attention"));
+    assert_eq!(ten["why"], json!("its orbit order waits for your decision"));
+    // display only: reading it logs nothing
+    let before = r.log.lines().len();
+    let _ = r.d.fleet_json();
+    assert_eq!(r.log.lines().len(), before, "the fleet view is display only");
+    r.replays();
 }

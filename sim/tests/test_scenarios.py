@@ -59,6 +59,32 @@ def test_parcels_and_demand_name_places_that_exist(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_every_unit_has_a_home_base_its_vehicles_start_at(name):
+    """Each unit names its home base (docs/design/fleet-organisation.md), a hub of the scenario, and
+    starts at it (within the bridge's catchment, max(3 x radius, 150 m)), so the hub it is based at
+    is the hub it starts at; each site groups hubs of the scenario, each hub at most once."""
+    import math
+    sc = load(name, "scenario.toml")
+    d = load(name, "dispatch.toml")
+    hubs = {h["id"]: h for h in d["hub"]}
+    fleet = swarm.load_fleet(ROOT / "scenarios" / name / sc["fleet"])
+    for u in fleet["unit"]:
+        assert u.get("home_hub") in hubs, u
+        h = hubs[u["home_hub"]]
+        lat, lon = u["spawn"][0], u["spawn"][1]
+        dn = (lat - h["lat"]) * 111_320
+        de = (lon - h["lon"]) * 111_320 * math.cos(math.radians(lat))
+        assert math.hypot(dn, de) <= max(3 * h.get("radius_m", 50), 150), (u, h)
+    vehicles = swarm.plan(fleet, swarm.load_platforms())
+    assert all(v["home_hub"] in hubs for v in vehicles)
+    seen = set()
+    for site in d.get("site", []):
+        assert set(site) == {"id", "name", "hubs"}, site
+        assert set(site["hubs"]) <= set(hubs) and not set(site["hubs"]) & seen, site
+        seen |= set(site["hubs"])
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_events_are_in_the_formats_the_readers_take(name):
     ev = load(name, "events.toml")
     for e in ev.get("event", []):

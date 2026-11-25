@@ -181,7 +181,7 @@ pub enum UnknownEndurance {
 /// with the rules it was produced under. `run.started` records it. FleetMesh starts at 1;
 /// new behaviour is gated on a named `*_SINCE` constant set to the version that adds it
 /// (never a literal), and replay is taught the same gate in the same change.
-pub const RULES_VERSION: u32 = TRAFFIC_SEPARATION_SINCE;
+pub const RULES_VERSION: u32 = HOME_BASE_SINCE;
 
 /// Rules 2: delivery points are approved ahead of time and a person is asked only about an
 /// exception (docs/DECISIONS.md, 2026-11-25, "Routine deliveries need no person"). A drop zone
@@ -205,6 +205,15 @@ pub const STANDING_APPROVALS_SINCE: u32 = 2;
 /// the figures (policy schema 3).
 pub const TRAFFIC_SEPARATION_SINCE: u32 = 3;
 
+/// Rules 4: every vehicle belongs to a home base, a hub, as a delivery fleet's vehicles belong to
+/// their nest, hub or depot (docs/design/fleet-organisation.md, docs/DECISIONS.md 2026-11-25,
+/// "The fleet is organised by home base"). The assigner's input names each candidate's home hub
+/// (`dispatch.plan`'s `input.vehicles[].home`), and the way back of a trip it costs goes to that
+/// hub, or to the hub nearest the drop zone when the battery would not cover the way home (under
+/// rules 3 it went to the nearest hub always). No check reads it, and the policy file does not
+/// change.
+pub const HOME_BASE_SINCE: u32 = 4;
+
 /// The fields each rules version added to what a log carries: (the version that added it, where
 /// it is). Replay flags a log whose `run.started` claims an older version but that carries one of
 /// them (an event that could not have existed then: a newer log given an older header).
@@ -213,6 +222,7 @@ pub const RULES_MARKERS: &[(u32, &str)] = &[
     (STANDING_APPROVALS_SINCE, "check.result.inputs.delivery.places.drop_zones.approval"),
     (TRAFFIC_SEPARATION_SINCE, "policy.rules.delivery.separation.traffic"),
     (TRAFFIC_SEPARATION_SINCE, "check.result.inputs.delivery.picture"),
+    (HOME_BASE_SINCE, "dispatch.plan.input.vehicles.home"),
 ];
 
 /// The newest decision rules this build can decide under and replay: [`RULES_VERSION`] itself,

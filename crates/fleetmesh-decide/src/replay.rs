@@ -3345,7 +3345,23 @@ fn replay_inner<S: AsRef<str>>(
             EventBody::VehicleEvent { .. } => {}
             // dispatch: the plan is a function of the input it logged
             EventBody::DispatchPlan { input, plan, tick } => {
-                let again = crate::dispatch::assign(input);
+                // under the rules the log was made under (rules 4: the way back goes home)
+                let rules = policy.as_ref().map_or_else(
+                    || crate::rules::RulesConfig { rules_version: r.rules_version, ..Default::default() },
+                    |p| p.rules.clone(),
+                );
+                // rules 4: a candidate's home base, a field rules 3 did not log
+                if !rules.at_least(crate::rules::HOME_BASE_SINCE) && input.vehicles.iter().any(|v| v.home.is_some()) {
+                    bad(
+                        &mut r,
+                        e,
+                        None,
+                        "a field newer than the log's rules version (rules markers)",
+                        "dispatch.plan.input.vehicles.home".into(),
+                        format!("absent before rules {}", crate::rules::HOME_BASE_SINCE),
+                    );
+                }
+                let again = crate::dispatch::assign_under(input, &rules);
                 if &again != plan {
                     bad(
                         &mut r,
