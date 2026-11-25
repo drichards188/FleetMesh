@@ -1,0 +1,13 @@
+[package]
+name = "fleetmesh-tracker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Company-side traffic picture for FleetMesh: decoders for SBS-1, AIVDM and the Remote ID and sensor JSON lines, and a multi-source tracker"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

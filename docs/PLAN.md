@@ -14,14 +14,16 @@ makes the answer measurable.
 | --- | --- | --- | --- |
 | 1 | Vehicle-side port | done | [link-and-gnss.md](design/link-and-gnss.md), [WEATHER.md](WEATHER.md) |
 | 2 | Engine, bridge and console port | done | [delivery-orders.md](design/delivery-orders.md), [rules-versioning.md](design/rules-versioning.md) |
-| 3 | Delivery orders and rules | done (rules v1) | [delivery-orders.md](design/delivery-orders.md), [delivery-rules.md](design/delivery-rules.md) |
+| 3 | Delivery orders and rules | done (rules v2: standing approvals, management by exception) | [delivery-orders.md](design/delivery-orders.md), [delivery-rules.md](design/delivery-rules.md) |
 | 4 | Dispatch, parcels, hubs | done, batching not built | [dispatch.md](design/dispatch.md) |
 | 5 | Keep-out prediction | next | [keep-out.md](design/keep-out.md) |
 | 6 | Link and GNSS delivery models | next | [link-and-gnss.md](design/link-and-gnss.md) |
 | 7 | Scenarios and console delivery UI | done (harbour-city, wind-event, coastal-boat) | [scenarios.md](design/scenarios.md) |
 | 8 | Evaluation and attention cost | next | [attention-cost.md](design/attention-cost.md) |
 | 9 | Fast forward | optional, after 8 | [FASTFORWARD.md](FASTFORWARD.md) |
-| 10 | Rename and first commit | rename done; first commit not made | [DECISIONS.md](DECISIONS.md) |
+| 10 | Rename and first commit | done (first commit 5c1003c) | [DECISIONS.md](DECISIONS.md) |
+| 11 | Other traffic and the company's picture of it | in progress | [traffic.md](design/traffic.md) |
+| 12 | External interfaces (identity broadcasts, UTM, ATC and VTS, city and responders) | backlog | [external-interfaces.md](design/external-interfaces.md) |
 
 ## 1. Vehicle-side port (done)
 
@@ -170,6 +172,14 @@ fresh checkout, `docs/` carries no reference to removed features.
 - The catalog decisions in `CATALOG.tsv` (many applied as `auto-judged`) need the maintainer's review.
 - The research citations in [attention-cost.md](design/attention-cost.md) need checking.
 - bd has no database in this repository yet (no `.beads/`); these items should be filed there first.
+- External interfaces a real delivery operator's command and control speaks, and FleetMesh does
+  not yet: the fleet's own identity broadcasts (Remote ID, ADS-B Out and transponder codes, AIS),
+  UTM strategic deconfliction (ASTM F3548 with the InterUSS DSS), NOTAM, TFR and METAR inputs,
+  simulated ATC and VTS counterparts, drop-zone video and remote assistance, first-responder
+  geofencing directives and curb data, and link authorization; and control real fleet software
+  exercises that FleetMesh does not (fleet and zone pauses, vehicle-initiated guidance requests,
+  flight termination). The researched, ordered backlog is
+  [external-interfaces.md](design/external-interfaces.md).
 
 ## Ordering and risks
 

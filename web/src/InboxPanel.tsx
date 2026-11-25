@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import type { Alert, Check, Decisions, Intent } from './decisions'
-import { ALERT_LABEL, useAlertMemory, useOperator, verdict } from './decisions'
+import { ALERT_LABEL, ALERT_RESPONSE, useAlertMemory, useOperator, verdict } from './decisions'
 import { Bluf } from './Bluf'
 import { RefusalFold } from './RefusalFold'
 import { alertParts } from './bluf'
@@ -106,6 +106,7 @@ function AlertCard({
         className="ix-adetail"
         parts={alertParts({ kind: a.kind, detail: plainText(a.detail, { nameOf: name, when: agoWhen(now()) }) }, `${Math.max(1, Math.round(age / 60))} min`, who)}
       />
+      <IssueLines alert={a} />
       {a.intent_id != null && <p className="ix-link"><span className="ix-id">i{a.intent_id}</span></p>}
       <footer className="ix-actions" onClick={(e) => e.stopPropagation()}>
         {muted ? (
@@ -128,6 +129,27 @@ function AlertCard({
         )}
       </footer>
     </article>
+  )
+}
+
+/** An issue's three parts: what happened, what automation already did, the recommended response
+ *  (an issue automation raised says them itself; a derived alert's come from its kind). */
+function IssueLines({ alert: a }: { alert: Alert }) {
+  const r = a.issue ?? ALERT_RESPONSE[a.kind]
+  if (!r) return null
+  return (
+    <dl className="ix-issue">
+      {a.issue && (
+        <>
+          <dt>What happened</dt>
+          <dd>{a.issue.problem}</dd>
+        </>
+      )}
+      <dt>What automation did</dt>
+      <dd>{r.did}</dd>
+      <dt>Recommended</dt>
+      <dd>{r.recommend}</dd>
+    </dl>
   )
 }
 

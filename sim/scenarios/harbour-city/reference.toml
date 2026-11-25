@@ -1,14 +1,18 @@
-# harbour-city: the decisions a careful operator should reach (docs/design/scenarios.md, section 6)
+# harbour-city: the decisions a careful operator should reach (docs/design/scenarios.md, section 6).
+# From rules 2 (management by exception) routine deliveries reach no one: the crowd at
+# dz-fort-mason-3 is automation's (the vehicle waits, keeps the parcel and the person is told by a
+# drop_not_clear alert), and no zone needs a confirmation. r-01 and r-02 are decisions only under
+# the strict comparison procedure (POLICY=sim/policy-strict.toml).
 [[item]]
 id = "r-01"
 when = { at_s = 900, window_s = 300 }
 match = { kind = "deliver", reason = "DZ_PEOPLE_NEAR" }
 reference = "reject"
-note = "a crowd at dz-fort-mason-3"
+note = "a crowd at dz-fort-mason-3 (strict procedure only; from rules 2 an alert, not a decision)"
 
 [[item]]
 id = "r-02"
 when = { at_s = 0, window_s = 3600 }
 match = { kind = "deliver", reason = "DZ_UNCONFIRMED" }
 reference = "approve"
-note = "a first delivery to a doorstep that the latest look finds clear"
+note = "a first delivery to a doorstep that the latest look finds clear (strict procedure only)"

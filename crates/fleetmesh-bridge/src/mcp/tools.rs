@@ -123,8 +123,8 @@ pub struct IntentParams {
     /// reroute (replace the route of the running order), return_to_hub (go to a hub and land or
     /// dock), land_now (land or stop as soon as it is safe), abort (stop an order and do
     /// something safe instead), swap_battery (replace a landed vehicle's battery at a hub) and
-    /// confirm_drop_zone (a person's judgement that a drop zone is fit: always waits for a
-    /// person, never an agent's to decide). Also orbit, patrol and transit (fly a route once and
+    /// confirm_drop_zone (a person's approval of a new delivery point, one not approved ahead of
+    /// time, which then stands: always waits for a person, never an agent's to decide). Also orbit, patrol and transit (fly a route once and
     /// hold at its end) and rtl (the vehicle's own way home). Read get_places for the hubs and
     /// drop zones, get_fleet for the vehicles.
     pub task: String,

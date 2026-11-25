@@ -5,7 +5,12 @@ events, its areas, its policy, its clock and, when tidewater's data for it is in
 tidewater scenario that gives real tide, current and wind.
 
     eval "$(.venv/bin/python scripts/scenario_env.py harbour-city)"
+
+`POLICY` in the environment replaces the scenario's policy file: `make start SCENARIO=harbour-city
+POLICY=sim/policy-strict.toml` runs the same scenario under the strict drop-zone procedure (a person
+confirms each zone every hour), the comparison setting of docs/DECISIONS.md (2026-11-25).
 """
+import os
 import shlex
 import sys
 import tomllib
@@ -31,7 +36,7 @@ def env_for(name):
         "FLEETMESH_RATE": str(sc.get("rate", 1)),
         "FLEETMESH_FLEET": str(rel / sc.get("fleet", "fleet.toml")),
         "FLEETMESH_AREAS": str(rel / sc.get("areas", "areas")),
-        "FLEETMESH_POLICY": sc.get("policy", "sim/policy.toml"),
+        "FLEETMESH_POLICY": os.environ.get("POLICY") or sc.get("policy", "sim/policy.toml"),
     }
     events = d / sc.get("events", "events.toml")
     if events.exists():

@@ -147,6 +147,47 @@ fn run(task: Task, w: &WorldSnapshot) -> Vec<CheckResult> {
     rules::evaluate(&spec(task), w, &cfg())
 }
 
+/// The shipped comparison policy (`sim/policy-strict.toml`): the rules 1 drop-zone procedure, a
+/// person's confirmation of each zone within `confirm_valid_s`.
+fn strict() -> Policy {
+    Policy::load(&root().join("sim/policy-strict.toml")).expect("the strict policy")
+}
+
+fn run_with(task: Task, w: &WorldSnapshot, cfg: &RulesConfig) -> Vec<CheckResult> {
+    rules::evaluate(&spec(task), w, cfg)
+}
+
+/// Rules 1: the rules config of a run under rules version 1 (a log made before standing approvals).
+fn rules_v1() -> RulesConfig {
+    RulesConfig { rules_version: 1, ..RulesConfig::default() }
+}
+
+/// `zone` as a new delivery point: no standing approval (rules 2).
+fn new_point(w: &mut WorldSnapshot, zone: &str) {
+    di(w).places.drop_zones.get_mut(zone).expect("zone").approval = None;
+}
+
+/// Every fact of the rig's world restamped at its clock (`ms` later), with calm weather and a
+/// clear look at `dz-harbour-17`, as a later decision would read them.
+fn later(r: &mut Rig, ms: i64) {
+    r.clock.advance_ms(ms);
+    r.world.t = r.world.t.plus_ms(ms);
+    let t = r.world.t;
+    for f in r.world.vehicles.values_mut() {
+        f.position = f.position.as_ref().map(|p| Fact::new(p.value, t));
+        f.battery_pct = f.battery_pct.as_ref().map(|p| Fact::new(p.value, t));
+        f.autopilot = f.autopilot.as_ref().map(|p| Fact::new(p.value, t));
+        f.nav_ready = f.nav_ready.as_ref().map(|p| Fact::new(p.value, t));
+        f.gps_fix = f.gps_fix.as_ref().map(|p| Fact::new(p.value, t));
+        f.gps_glitch = f.gps_glitch.as_ref().map(|p| Fact::new(p.value, t));
+        f.home = f.home.as_ref().map(|p| Fact::new(p.value, t));
+        f.velocity_mps = f.velocity_mps.as_ref().map(|p| Fact::new(p.value, t));
+        f.lost_link = f.lost_link.as_ref().map(|p| Fact::new(p.value.clone(), t));
+    }
+    di(&mut r.world).weather = vec![calm(t)];
+    di(&mut r.world).observations.insert("dz-harbour-17".into(), DzObservation { t, state: ObservedState::Clear, count: 0 });
+}
+
 fn result(rs: &[CheckResult], rule: RuleId) -> &CheckResult {
     rs.iter().find(|r| r.rule == rule).unwrap_or_else(|| panic!("no {rule:?} result in {rs:#?}"))
 }
@@ -364,8 +405,63 @@ fn pickup_preconditions_refuse_an_unknown_parcel_a_taken_one_and_an_unknown_hub(
 }
 
 #[test]
-fn deliver_to_an_unconfirmed_zone_waits_and_its_approval_is_the_confirmation() {
+fn deliver_to_a_standing_approved_point_goes_at_once_with_no_person() {
+    // rules 2: dz-harbour-17 is a doorstep the customer chose (`approval = "customer"`)
     let mut r = Rig::new();
+    let id = r.agent(deliver());
+    assert_eq!(r.state(id), State::AutoApproved, "{:?}", r.engine.intent(id).expect("i").checks());
+    assert_eq!(r.tier(id).1, "routine-delivery");
+    assert!(!r.codes(id).iter().any(|c| c.starts_with("DZ_")), "{:?}", r.codes(id));
+    r.run_out(id);
+    // and hours later still: a standing approval has no time limit
+    later(&mut r, 3 * 3_600_000);
+    let again = r.agent(deliver());
+    assert_eq!(r.state(again), State::AutoApproved, "{:?}", r.engine.intent(again).expect("i").checks());
+    let report = r.replays();
+    assert_eq!(report.rules_version, 2);
+}
+
+#[test]
+fn deliver_to_a_new_delivery_point_waits_and_its_approval_stands_from_then_on() {
+    let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
+    let id = r.agent(deliver());
+    assert_eq!(r.state(id), State::PendingApproval, "{:?}", r.engine.intent(id).expect("i").checks());
+    assert!(r.codes(id).contains(&"DZ_NOT_APPROVED".to_string()), "{:?}", r.codes(id));
+    assert!(!r.codes(id).contains(&"DZ_UNCONFIRMED".to_string()), "{:?}", r.codes(id));
+    assert_eq!(r.tier(id), (Tier::Human, "everything-else".into()), "not the routine tier: the point is not approved");
+    assert_eq!(r.approve(id), State::Approved);
+    r.run_out(id);
+    // the approval approved the point: the next delivery there goes at once, and so does one
+    // long after the hour a confirmation used to last
+    later(&mut r, 10_000);
+    let again = r.agent(deliver());
+    assert_eq!(r.state(again), State::AutoApproved, "{:?}", r.engine.intent(again).expect("i").checks());
+    assert_eq!(r.tier(again).1, "routine-delivery");
+    r.run_out(again);
+    later(&mut r, 2 * 3_600_000);
+    let much_later = r.agent(deliver());
+    assert_eq!(r.state(much_later), State::AutoApproved, "{:?}", r.engine.intent(much_later).expect("i").checks());
+    r.replays();
+}
+
+#[test]
+fn a_withdrawn_approval_needs_a_person_again() {
+    let mut w = world();
+    di(&mut w).places.drop_zones.get_mut("dz-harbour-17").expect("zone").approval =
+        Some(fleetmesh_decide::delivery::StandingApproval::Withdrawn);
+    let rs = run(deliver(), &w);
+    expect(&rs, RuleId::Dropzone, Outcome::Hold, Some("DZ_NOT_APPROVED"));
+    assert!(result(&rs, RuleId::Dropzone).detail.contains("withdrawn"), "{}", result(&rs, RuleId::Dropzone).detail);
+    // a person's approval of it stands again
+    di(&mut w).confirmed.insert("dz-harbour-17".into(), t0().plus_ms(-5 * 3_600_000));
+    expect_pass(&run(deliver(), &w), RuleId::Dropzone);
+}
+
+#[test]
+fn under_the_strict_procedure_a_deliver_to_an_unconfirmed_zone_waits_and_its_approval_is_the_confirmation() {
+    // sim/policy-strict.toml: the standing approval is not read; a person confirms each zone
+    let mut r = Rig::with_policy(strict());
     let id = r.agent(deliver());
     assert_eq!(r.state(id), State::PendingApproval, "{:?}", r.engine.intent(id).expect("i").checks());
     assert!(r.codes(id).contains(&"DZ_UNCONFIRMED".to_string()), "{:?}", r.codes(id));
@@ -373,26 +469,18 @@ fn deliver_to_an_unconfirmed_zone_waits_and_its_approval_is_the_confirmation() {
     assert_eq!(r.approve(id), State::Approved);
     r.run_out(id);
     // the approval stood as the drop zone's confirmation: the next delivery there goes at once
-    r.clock.advance_ms(10_000);
-    r.world.t = r.world.t.plus_ms(10_000);
-    for f in r.world.vehicles.values_mut() {
-        f.position = f.position.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.battery_pct = f.battery_pct.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.autopilot = f.autopilot.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.nav_ready = f.nav_ready.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.gps_fix = f.gps_fix.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.gps_glitch = f.gps_glitch.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.home = f.home.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.velocity_mps = f.velocity_mps.as_ref().map(|p| Fact::new(p.value, r.world.t));
-        f.lost_link = f.lost_link.as_ref().map(|p| Fact::new(p.value.clone(), r.world.t));
-    }
-    let t = r.world.t;
-    di(&mut r.world).weather = vec![calm(t)];
-    di(&mut r.world).observations.insert("dz-harbour-17".into(), DzObservation { t, state: ObservedState::Clear, count: 0 });
+    later(&mut r, 10_000);
     let again = r.agent(deliver());
     assert_eq!(r.state(again), State::AutoApproved, "{:?}", r.engine.intent(again).expect("i").checks());
     assert_eq!(r.tier(again).1, "routine-delivery");
-    r.replays();
+    r.run_out(again);
+    // and an hour later it has lapsed: a person again
+    later(&mut r, 3_600_000);
+    let lapsed = r.agent(deliver());
+    assert_eq!(r.state(lapsed), State::PendingApproval, "{:?}", r.engine.intent(lapsed).expect("i").checks());
+    assert!(r.codes(lapsed).contains(&"DZ_UNCONFIRMED".to_string()), "{:?}", r.codes(lapsed));
+    let report = r.replays();
+    assert_eq!(report.rules_version, 2, "the strict procedure is a setting of rules 2, logged with the policy");
 }
 
 #[test]
@@ -405,6 +493,7 @@ fn deliver_to_a_hub_pad_needs_no_confirmation() {
 #[test]
 fn confirm_drop_zone_is_always_a_persons_and_stands_for_the_zone_once_approved() {
     let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
     let held = r.agent(deliver());
     assert_eq!(r.state(held), State::PendingApproval);
     // an agent's confirmation waits
@@ -427,19 +516,33 @@ fn confirm_drop_zone_is_always_a_persons_and_stands_for_the_zone_once_approved()
 }
 
 #[test]
-fn confirm_drop_zone_needs_a_deliver_waiting_and_an_open_zone() {
+fn confirm_drop_zone_approves_a_point_with_no_delivery_waiting_and_needs_an_open_zone() {
+    // rules 2: it approves a delivery point, which no delivery need wait for
     let mut w = world();
+    new_point(&mut w, "dz-harbour-17");
     let c = confirm("dz-harbour-17");
-    expect(&run(c.clone(), &w), RuleId::Order, Outcome::Fail, Some("ORDER_NO_DELIVER_WAITING"));
-    di(&mut w).waiting_deliver = Some(IntentId(7));
     expect_pass(&run(c.clone(), &w), RuleId::Order);
     di(&mut w).places.drop_zones.get_mut("dz-harbour-17").expect("zone").closed = true;
     expect(&run(c, &w), RuleId::Order, Outcome::Fail, Some("DZ_CLOSED"));
 }
 
 #[test]
+fn under_the_strict_procedure_and_rules_1_confirm_drop_zone_needs_a_deliver_waiting() {
+    for cfg in [strict().rules, rules_v1()] {
+        let mut w = world();
+        let c = confirm("dz-harbour-17");
+        expect(&run_with(c.clone(), &w, &cfg), RuleId::Order, Outcome::Fail, Some("ORDER_NO_DELIVER_WAITING"));
+        di(&mut w).waiting_deliver = Some(IntentId(7));
+        expect_pass(&run_with(c.clone(), &w, &cfg), RuleId::Order);
+        di(&mut w).places.drop_zones.get_mut("dz-harbour-17").expect("zone").closed = true;
+        expect(&run_with(c, &w, &cfg), RuleId::Order, Outcome::Fail, Some("DZ_CLOSED"));
+    }
+}
+
+#[test]
 fn a_rejected_confirmation_voids_the_delivery_that_waited() {
     let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
     let held = r.agent(deliver());
     let c = r.agent(confirm("dz-harbour-17"));
     let s = r.engine.open_operator_session(OperatorId::new("op-2")).expect("session");
@@ -452,6 +555,7 @@ fn a_rejected_confirmation_voids_the_delivery_that_waited() {
 #[test]
 fn a_confirmation_nobody_decides_expires_and_voids_the_delivery() {
     let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
     let held = r.agent(deliver());
     let c = r.agent(confirm("dz-harbour-17"));
     r.clock.advance_ms(121_000);
@@ -656,6 +760,7 @@ fn a_new_delivery_order_voids_a_queued_older_one_and_supersedes_a_running_one() 
 #[test]
 fn an_approval_that_would_now_fail_voids_the_order() {
     let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
     let id = r.agent(deliver());
     assert_eq!(r.state(id), State::PendingApproval);
     // the weather worsens between the proposal and the approval: a hard limit
@@ -703,8 +808,19 @@ fn the_shipped_policy_routes_every_delivery_kind_as_the_design_says() {
     assert_eq!(q.expire_s(TaskKind::Reroute), 60);
     assert_eq!(q.expire_s(TaskKind::SwapBattery), 900);
     assert!(q.queues(TaskKind::Deliver));
-    // the policy's delivery numbers are the code's defaults: one set, not two
-    assert_eq!(p.rules.delivery_rules(), fleetmesh_decide::delivery::DeliveryRules::default());
+    // the policy's delivery numbers are the code's defaults: one set, not two (it writes out
+    // rules 2's standing approvals, which the code's default leaves implied)
+    let mut defaults = fleetmesh_decide::delivery::DeliveryRules::default();
+    defaults.dropzone.standing_approvals = Some(true);
+    assert_eq!(p.rules.delivery_rules(), defaults);
+    assert!(p.rules.standing_approvals());
+    // the strict comparison policy is the same but for that one key
+    let s = strict();
+    assert!(!s.rules.standing_approvals());
+    let mut s_rules = s.rules.delivery_rules();
+    s_rules.dropzone.standing_approvals = Some(true);
+    assert_eq!(s_rules, defaults);
+    assert_eq!(s.tiers, p.tiers);
     assert!(p.tiers.iter().any(|t| t.name == "confirm-is-human" && t.locked == Some(true) && t.tier == Tier::Human));
 }
 
@@ -734,7 +850,7 @@ fn the_policy_loader_refuses_a_file_that_loosens_confirm_drop_zone() {
     assert_ne!(added, text);
     assert!(Policy::from_toml(&added).is_err());
     // a locked tier that is not human
-    let locked = text.replace("reason = \"a person judges the drop zone\"\nlocked = true", "reason = \"a person judges the drop zone\"\nlocked = true\n[[tier]]\nname = \"x\"\ntier = \"auto\"\nlocked = true\nreason = \"x\"\nwhen = { kind = [\"hold\"] }");
+    let locked = text.replace("reason = \"a person approves a new delivery point\"\nlocked = true", "reason = \"a person approves a new delivery point\"\nlocked = true\n[[tier]]\nname = \"x\"\ntier = \"auto\"\nlocked = true\nreason = \"x\"\nwhen = { kind = [\"hold\"] }");
     assert_ne!(locked, text);
     let e = Policy::from_toml(&locked).expect_err("a locked auto tier").to_string();
     assert!(e.contains("locked"), "{e}");
@@ -1188,15 +1304,27 @@ fn confirmed(w: &mut WorldSnapshot, zone: &str) {
 #[test]
 fn the_drop_zone_rule_covers_each_branch() {
     let mut w = world();
-    confirmed(&mut w, "dz-harbour-17");
+    // rules 2: a standing approval passes with no confirmation at all
     expect_pass(&run(deliver(), &w), RuleId::Dropzone);
-    // unconfirmed (and not a hub pad), then confirmed too long ago
-    di(&mut w).confirmed.clear();
-    expect(&run(deliver(), &w), RuleId::Dropzone, Outcome::Hold, Some("DZ_UNCONFIRMED"));
+    // a new delivery point holds until a person approves it, and then passes with no time limit
+    new_point(&mut w, "dz-harbour-17");
+    expect(&run(deliver(), &w), RuleId::Dropzone, Outcome::Hold, Some("DZ_NOT_APPROVED"));
     di(&mut w).confirmed.insert("dz-harbour-17".into(), t0().plus_ms(-3_601_000));
-    expect(&run(deliver(), &w), RuleId::Dropzone, Outcome::Hold, Some("DZ_UNCONFIRMED"));
-    di(&mut w).confirmed.insert("dz-harbour-17".into(), t0().plus_ms(-3_599_000));
     expect_pass(&run(deliver(), &w), RuleId::Dropzone);
+    // the strict procedure and rules 1: unconfirmed (and not a hub pad), then confirmed too long
+    // ago, whatever the zone's standing approval says
+    for cfg in [strict().rules, rules_v1()] {
+        let mut v = world();
+        expect(&run_with(deliver(), &v, &cfg), RuleId::Dropzone, Outcome::Hold, Some("DZ_UNCONFIRMED"));
+        di(&mut v).confirmed.insert("dz-harbour-17".into(), t0().plus_ms(-3_601_000));
+        expect(&run_with(deliver(), &v, &cfg), RuleId::Dropzone, Outcome::Hold, Some("DZ_UNCONFIRMED"));
+        di(&mut v).confirmed.insert("dz-harbour-17".into(), t0().plus_ms(-3_599_000));
+        let rs = run_with(deliver(), &v, &cfg);
+        expect_pass(&rs, RuleId::Dropzone);
+        assert_eq!(result(&rs, RuleId::Dropzone).detail, "drop zone dz-harbour-17 is open, confirmed or a hub pad, and clear", "rules 1's words");
+        expect_pass(&run_with(deliver_to("dz-crissy-pad"), &v, &cfg), RuleId::Dropzone);
+    }
+    confirmed(&mut w, "dz-harbour-17");
     // closed
     di(&mut w).places.drop_zones.get_mut("dz-harbour-17").expect("zone").closed = true;
     expect(&run(deliver(), &w), RuleId::Dropzone, Outcome::Fail, Some("DZ_CLOSED"));
@@ -1409,6 +1537,7 @@ fn every_kind_replays_and_an_edited_reason_code_or_tier_is_found() {
     let site = Place { id: Some("hub-presidio".into()), at: hub() };
     let pickup = r.agent(Task::Pickup { parcel: "p-2".into(), site, load_by_s: Some(120) });
     r.run_out(pickup);
+    new_point(&mut r.world, "dz-harbour-17");
     let held = r.agent(deliver());
     r.approve(held);
     r.run_out(held);
@@ -1430,6 +1559,9 @@ fn every_kind_replays_and_an_edited_reason_code_or_tier_is_found() {
             r.engine.dispatch(id, &w).expect("dispatched");
         }
     }
+    // a person's confirmation has no vehicle op: done as it goes out, as the bridge does it
+    assert_eq!(r.state(confirm_zone), State::Dispatched, "rules 2: it approves the point, no delivery need wait");
+    r.engine.finish(confirm_zone, TaskOutcome::Done).expect("finished");
     di(&mut r.world).parcels.clear();
     // (a person's own: an agent's order on a vehicle with a human-approved order in play waits)
     let swap = r.human(Task::SwapBattery { hub: "hub-presidio".into(), pad: None });
@@ -1444,9 +1576,9 @@ fn every_kind_replays_and_an_edited_reason_code_or_tier_is_found() {
     // an edited reason code in a logged check is found
     let text = r.log.text();
     let lines: Vec<&str> = text.lines().collect();
-    let i = lines.iter().position(|l| l.contains("\"codes\":[\"DZ_UNCONFIRMED\"")).expect("a check with a reason code");
+    let i = lines.iter().position(|l| l.contains("\"codes\":[\"DZ_NOT_APPROVED\"")).expect("a check with a reason code");
     let mut edited: Vec<String> = lines.iter().map(ToString::to_string).collect();
-    edited[i] = edited[i].replacen("DZ_UNCONFIRMED", "DZ_CLOSED", 1);
+    edited[i] = edited[i].replacen("DZ_NOT_APPROVED", "DZ_CLOSED", 1);
     let rep = fleetmesh_decide::replay::replay_str(&edited.join("\n")).expect("parses");
     assert!(!rep.ok(), "an edited reason code goes unnoticed");
     // an edited tier is found
@@ -1464,6 +1596,7 @@ fn every_kind_replays_and_an_edited_reason_code_or_tier_is_found() {
 #[test]
 fn a_hold_outcome_logged_as_a_pass_is_found_by_replay() {
     let mut r = Rig::new();
+    new_point(&mut r.world, "dz-harbour-17");
     let held = r.agent(deliver());
     assert_eq!(r.state(held), State::PendingApproval);
     let text = r.log.text();
@@ -1486,4 +1619,114 @@ fn the_traffic_inputs_a_decision_read_are_logged_by_value() {
     let report = r.replays();
     assert!(report.ok());
     let _: BTreeMap<u8, u8> = BTreeMap::new();
+}
+
+// ---- rules versions: 1 (a person confirms each zone) and 2 (standing approvals) ------------------
+
+/// A policy as a rules 1 build logged it: rules version 1 and no `standing_approvals` key (it did
+/// not exist), and places with no standing approvals (nor did they).
+fn v1_rig() -> Rig {
+    let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+    p.rules.rules_version = 1;
+    if let Some(d) = p.rules.delivery.as_mut() {
+        d.dropzone.standing_approvals = None;
+    }
+    let mut r = Rig::with_policy(p);
+    for z in di(&mut r.world).places.drop_zones.values_mut() {
+        z.approval = None;
+    }
+    r
+}
+
+/// A short delivery run on `r`: a delivery to dz-harbour-17 (held for a person under rules 1,
+/// at once under rules 2), approved where it waits, flown and done, then a second one.
+fn deliveries(r: &mut Rig) -> (IntentId, IntentId) {
+    let first = r.agent(deliver());
+    if r.state(first) == State::PendingApproval {
+        r.approve(first);
+    }
+    r.run_out(first);
+    later(r, 10_000);
+    let second = r.agent(deliver());
+    if r.state(second) == State::PendingApproval {
+        r.approve(second);
+    }
+    r.run_out(second);
+    (first, second)
+}
+
+fn replay_any(text: &str) -> fleetmesh_decide::replay::ReplayReport {
+    let opts = fleetmesh_decide::replay::ReplayOptions {
+        rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1),
+        ..Default::default()
+    };
+    fleetmesh_decide::replay::replay_str_with(text, &opts).expect("parses")
+}
+
+#[test]
+fn a_rules_1_log_replays_with_no_mismatch_under_its_own_rules() {
+    let mut r = v1_rig();
+    let (first, second) = deliveries(&mut r);
+    assert!(r.codes(first).contains(&"DZ_UNCONFIRMED".to_string()), "rules 1 asks a person: {:?}", r.codes(first));
+    assert_eq!(r.tier(second).1, "routine-delivery", "and the confirmation stood for the hour");
+    let text = r.log.text();
+    assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":1,") && l.contains("\"policy_schema\":1")), "a rules 1 header");
+    assert!(!text.contains("standing_approvals") && !text.contains("\"approval\":\"customer\"") && !text.contains("\"approval\":\"survey\""), "nothing rules 2 added");
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
+    assert_eq!(report.rules_version, 1);
+    assert!(report.checks_recomputed >= 2, "{report:?}");
+    // the default replay accepts the current rules only: an older log needs its version named
+    let strict = fleetmesh_decide::replay::replay_str(&text).expect("parses");
+    assert!(strict.mismatches.iter().any(|m| m.what.contains("older decision rules")), "{:?}", strict.mismatches);
+}
+
+#[test]
+fn a_rules_2_log_replays_with_no_mismatch_and_its_deliveries_needed_no_person() {
+    let mut r = Rig::new();
+    let (first, second) = deliveries(&mut r);
+    for id in [first, second] {
+        assert_eq!(r.tier(id).1, "routine-delivery", "{:?}", r.codes(id));
+    }
+    let text = r.log.text();
+    assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":2,") && l.contains("\"policy_schema\":2")), "a rules 2 header");
+    let report = r.replays();
+    assert_eq!(report.rules_version, fleetmesh_decide::STANDING_APPROVALS_SINCE);
+    assert_eq!(report.approvals, 0, "no person was asked");
+}
+
+#[test]
+fn a_rules_2_log_given_a_rules_1_header_is_found() {
+    let mut r = Rig::new();
+    deliveries(&mut r);
+    let text = r.log.text();
+    let mut events = fleetmesh_decide::audit::parse_log(&text).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(1);
+    let opts = fleetmesh_decide::replay::ReplayOptions {
+        rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1),
+        ..Default::default()
+    };
+    let rep = fleetmesh_decide::replay::replay_with(&events, &opts);
+    assert!(!rep.ok());
+    // the markers name the fields rules 1 never had, and the checks recomputed under rules 1 differ
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("standing_approvals")), "{:?}", rep.mismatches);
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("drop_zones.approval")), "{:?}", rep.mismatches);
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
+}
+
+#[test]
+fn a_rules_1_log_given_a_rules_2_header_is_found() {
+    let mut r = v1_rig();
+    deliveries(&mut r);
+    let mut events = fleetmesh_decide::audit::parse_log(&r.log.text()).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(2);
+    let rep = fleetmesh_decide::replay::replay(&events);
+    // rules 2 reads the zone as a new delivery point, where rules 1 asked for a confirmation
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ" && m.logged.contains("DZ_UNCONFIRMED") && m.recomputed.contains("DZ_NOT_APPROVED")), "{:?}", rep.mismatches);
 }

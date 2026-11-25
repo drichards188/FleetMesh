@@ -484,6 +484,13 @@ impl Engine {
         self.intents.values()
     }
 
+    /// When each drop zone was confirmed by a person (an approved `confirm_drop_zone` or held
+    /// `deliver`): what the next decision reads as `confirmed` (read-only; the dispatcher asks
+    /// whether a zone needs a person's approval before it sends parcels there).
+    pub fn drop_zone_confirmations(&self) -> &BTreeMap<String, Time> {
+        &self.dz_confirmed
+    }
+
     /// Pending approvals, soonest expiry first.
     pub fn inbox(&self) -> Vec<&Intent> {
         let mut v: Vec<_> = self
@@ -1575,12 +1582,16 @@ impl Engine {
 
     /// A person's confirmation of a drop zone, from an approval: an approved `confirm_drop_zone`,
     /// or an approved `deliver` that was held for `DZ_UNCONFIRMED` (its approval counts as the
-    /// confirmation, delivery-orders.md 5.2). Valid for the policy's `confirm_valid_s`.
+    /// confirmation, delivery-orders.md 5.2). Valid for the policy's `confirm_valid_s` under rules
+    /// 1; from rules 2 ([`rules::STANDING_APPROVALS_SINCE`]) it approves the zone as a delivery
+    /// point, and so does an approved `deliver` held for `DZ_NOT_APPROVED`, from then on.
     fn note_confirmation(&mut self, id: IntentId, at: Time) {
         let Some(i) = self.intents.get(&id) else { return };
         let zone = match &i.spec().task {
             Task::ConfirmDropZone { drop_zone, .. } => Some(drop_zone.clone()),
-            Task::Deliver { drop_zone, .. } if i.checks().iter().any(|c| c.codes.iter().any(|k| k == "DZ_UNCONFIRMED")) => {
+            Task::Deliver { drop_zone, .. }
+                if i.checks().iter().any(|c| c.codes.iter().any(|k| k == "DZ_UNCONFIRMED" || k == "DZ_NOT_APPROVED")) =>
+            {
                 Some(drop_zone.clone())
             }
             _ => None,

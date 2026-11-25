@@ -26,7 +26,13 @@
 //! radius_m = 4
 //! surface = "land"     # land | water
 //! populated = true
+//! approval = "customer" # survey | customer | withdrawn; absent: a new delivery point
 //! ```
+//!
+//! Rules 2 ([`crate::rules::STANDING_APPROVALS_SINCE`]): a drop zone's `approval` says it was
+//! approved ahead of time as a delivery point, as real operators do (a surveyed delivery zone
+//! with marked points; a spot the customer chose), and stands with no time limit. A person
+//! approves any other zone once with `confirm_drop_zone`, and that approval stands too.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -121,6 +127,36 @@ pub struct DropZone {
     /// A dock's deck level above the tide datum, m.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dock_level_m: Option<f64>,
+    /// Rules 2 ([`crate::rules::STANDING_APPROVALS_SINCE`]): how the zone was approved as a
+    /// delivery point ahead of time, if it was. Absent: a new delivery point, which a person
+    /// approves once (`confirm_drop_zone`). Not read under rules 1, whose logs never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<StandingApproval>,
+}
+
+/// How a drop zone came to be an approved delivery point before any delivery to it (rules 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandingApproval {
+    /// Surveyed and marked in advance: an obstacle-free delivery zone with a reachable point in
+    /// it (as Amazon Prime Air surveys its delivery zones).
+    Survey,
+    /// The customer chose the spot in advance (as Wing's customers pick theirs: about 6 by 6 ft
+    /// with nothing overhead); it changes only when the customer picks another.
+    Customer,
+    /// It was approved and is not any more (the customer moved, the survey lapsed): a person
+    /// approves it again before a delivery goes there.
+    Withdrawn,
+}
+
+impl StandingApproval {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StandingApproval::Survey => "survey",
+            StandingApproval::Customer => "customer",
+            StandingApproval::Withdrawn => "withdrawn",
+        }
+    }
 }
 
 fn default_dz_radius() -> f64 {
@@ -130,6 +166,17 @@ fn default_dz_radius() -> f64 {
 impl DropZone {
     pub fn at(&self) -> LonLat {
         LonLat::new(self.lon, self.lat)
+    }
+
+    /// A pad at a hub: a planned landing place, approved with its hub.
+    pub fn hub_pad(&self) -> bool {
+        self.kind == DropZoneKind::Pad && self.hub.is_some()
+    }
+
+    /// Rules 2: approved ahead of time (a survey or the customer's choice) or a hub pad. A zone
+    /// whose approval was withdrawn is not.
+    pub fn standing_approved(&self) -> bool {
+        self.hub_pad() || matches!(self.approval, Some(StandingApproval::Survey | StandingApproval::Customer))
     }
 }
 
@@ -433,7 +480,9 @@ pub struct DeliveryInputs {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub link: BTreeMap<Uid, LinkAlong>,
     /// Engine-filled: when each drop zone was last confirmed (an approved `confirm_drop_zone`, or
-    /// an approved `deliver` held for `DZ_UNCONFIRMED`).
+    /// an approved `deliver` held for `DZ_UNCONFIRMED`, or from rules 2 `DZ_NOT_APPROVED`). Under
+    /// rules 1 a confirmation stands for `dropzone.confirm_valid_s`; from rules 2 it approves the
+    /// zone as a delivery point and stands from then on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub confirmed: BTreeMap<String, Time>,
     /// Engine-filled for an `abort`: the order it names.
@@ -743,11 +792,20 @@ impl Default for NavKnobs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DropZoneKnobs {
+    /// How long a person's confirmation of a drop zone stands when standing approvals are off
+    /// (rules 1, or `standing_approvals = false`).
     pub confirm_valid_s: u32,
     pub obs_max_age_s: f64,
     pub descent_gust_mps: f64,
     pub descent_gust_hard_mps: f64,
     pub max_slope_deg: f64,
+    /// Rules 2 (policy schema 2, [`crate::rules::STANDING_APPROVALS_SINCE`]): whether a drop
+    /// zone's standing approval (and a person's approval of a new delivery point) stands in for a
+    /// confirmation, with no time limit. Absent: yes from rules 2. `false` restores the rules 1
+    /// procedure, a person's confirmation within `confirm_valid_s` for every zone but a hub pad:
+    /// the comparison setting (`sim/policy-strict.toml`). Never logged under rules 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub standing_approvals: Option<bool>,
 }
 
 impl Default for DropZoneKnobs {
@@ -758,6 +816,7 @@ impl Default for DropZoneKnobs {
             descent_gust_mps: 8.0,
             descent_gust_hard_mps: 10.0,
             max_slope_deg: 10.0,
+            standing_approvals: None,
         }
     }
 }

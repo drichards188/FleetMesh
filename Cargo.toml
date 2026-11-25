@@ -9,6 +9,8 @@ members = [
     "crates/fleetmesh-auth",
     "crates/fleetmesh-bridge",
     "crates/fleetmesh-headless",
+    "crates/fleetmesh-tracker",
+    "crates/fleetmesh-traffic",
 ]
 
 [workspace.package]

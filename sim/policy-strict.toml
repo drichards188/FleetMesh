@@ -1,0 +1,18 @@
+# FleetMesh DRAFT comparison policy: the strict drop-zone procedure of rules 1, kept so that the
+# operator-attention cost of each design can be measured on the same scenario (docs/DECISIONS.md,
+# 2026-11-25, "Routine deliveries need no person").
+#
+# Everything is sim/policy.toml's except one key: a drop zone's standing approval no longer stands
+# in for a person. Every delivery to a zone other than a hub pad waits for a person's confirmation
+# of that zone within [rules.delivery.dropzone] confirm_valid_s (3600 s), as in rules 1, and the
+# dispatcher asks for one (a confirm_drop_zone) when a delivery waits for it. The drop-time look
+# stays automatic in both: a zone that does not look clear makes the vehicle wait, look again, and
+# after a bounded wait keep the parcel and come home.
+#
+# Run a scenario with it: FLEETMESH_POLICY=sim/policy-strict.toml (or POLICY= on make targets that
+# take one, and `policy = "sim/policy-strict.toml"` in an eval spec).
+
+extends = "policy.toml"
+
+[rules.delivery.dropzone]
+standing_approvals = false

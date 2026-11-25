@@ -321,6 +321,7 @@ mod tests {
                     hub: None,
                     slope_deg: None,
                     dock_level_m: None,
+                    approval: None,
                 },
             );
         }

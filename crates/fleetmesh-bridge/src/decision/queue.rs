@@ -210,6 +210,10 @@ impl Decision {
         // engine takes a start ahead for (`queue::vehicle_task`): rules 27's lay order is not one
         // of them, and the engine refuses its start logged ahead, so a lay went out failed
         order.ahead = if fleetmesh_decide::queue::vehicle_task(released.task.kind()) { self.write_ahead_hook() } else { None };
+        // a delivery looks at its drop zone before it lets go (the zone's observation feed)
+        order.look = self.drop_look_hook(&released.task);
+        // a pickup by a vehicle already on the hub's pads loads it there
+        self.pickup_in_place(&released.task, &mut order);
         let tasking = self.world.tasks.dispatch(AuthorizedOrder {
             intent: released.intent,
             order,

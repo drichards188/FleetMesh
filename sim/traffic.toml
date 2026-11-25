@@ -1,0 +1,880 @@
+# FleetMesh DRAFT: the traffic the fleet does not control, and the company's receivers and
+# sensors (crates/fleetmesh-traffic, docs/design/traffic.md). ILLUSTRATIVE: geometry is close to
+# the real Golden Gate and Bay (runway thresholds, the traffic separation scheme, the Golden Gate
+# and Central Bay traffic lanes, ferry terminals), rates are plausible for a Sunday morning in
+# June, and every name, call sign, address and MMSI is invented. Sources: the crate's README.
+#
+# Route points are [lat, lon], [lat, lon, alt_ft, kt] or [lat, lon, alt_ft, kt, hold_s]; a
+# negative altitude is on the ground or water at that height (ft). Relative paths resolve
+# against this file's directory.
+
+[world]
+lat_min = 37.45
+lat_max = 38.05
+lon_min = -122.90
+lon_max = -122.10
+# Pacific daylight time
+utc_offset_h = -7
+qnh_hpa = 1016.0
+# schedules start four hours early, so the world starts warm
+warmup_s = 14400
+horizon_s = 172800
+# geoid height above the WGS84 ellipsoid on the Bay (EGM96): Remote ID's geodetic altitude is
+# above the ellipsoid, so a drone 96 m above mean sea level reports 64 m
+geoid_n_m = -32.0
+
+[addresses]
+# Privacy ICAO Addresses (FAA PIA): one contiguous block, a fresh address every flight, and a
+# third-party callsign in place of the registration. Illustrative: the FAA does not publish its
+# pool; a tracker flags an address in this block as anonymous (fleetmesh-tracker's
+# anonymous_icao_ranges). UAT anonymous mode is separate: a self-assigned address, written
+# with a `~` on the SBS stream.
+pia_block = [0xADF800, 0xADFBFF]
+pia_callsign_prefix = "XPV"
+# US government and military aircraft (the Coast Guard helicopter)
+military_block = [0xAE0000, 0xAFFFFF]
+
+[terrain]
+# the headless link emulator's baked surface grid (max of elevation and water level, 20 m)
+grid = "terrain/golden-gate.grid.gz"
+k = 1.3333
+sample_m = 60.0
+
+# Beyond the grid: smooth domes for the high ground that shadows radio paths.
+[[terrain.hill]]
+name = "Twin Peaks"
+lat = 37.7544
+lon = -122.4477
+top_m = 281
+radius_m = 1100
+[[terrain.hill]]
+name = "Mount Sutro"
+lat = 37.7585
+lon = -122.4560
+top_m = 277
+radius_m = 800
+[[terrain.hill]]
+name = "Mount Davidson"
+lat = 37.7383
+lon = -122.4545
+top_m = 282
+radius_m = 900
+[[terrain.hill]]
+name = "Bernal Heights"
+lat = 37.7432
+lon = -122.4148
+top_m = 133
+radius_m = 600
+[[terrain.hill]]
+name = "Potrero Hill"
+lat = 37.7605
+lon = -122.4000
+top_m = 90
+radius_m = 700
+[[terrain.hill]]
+name = "San Bruno Mountain (west)"
+lat = 37.6857
+lon = -122.4339
+top_m = 402
+radius_m = 2500
+[[terrain.hill]]
+name = "San Bruno Mountain (east)"
+lat = 37.6880
+lon = -122.4100
+top_m = 350
+radius_m = 1800
+[[terrain.hill]]
+name = "Sweeney Ridge"
+lat = 37.6130
+lon = -122.4600
+top_m = 380
+radius_m = 2500
+[[terrain.hill]]
+name = "Montara Mountain"
+lat = 37.5530
+lon = -122.4790
+top_m = 579
+radius_m = 3500
+[[terrain.hill]]
+name = "Mount Tamalpais"
+lat = 37.9236
+lon = -122.5965
+top_m = 784
+radius_m = 4500
+[[terrain.hill]]
+name = "Bolinas Ridge"
+lat = 37.9700
+lon = -122.6700
+top_m = 450
+radius_m = 3500
+[[terrain.hill]]
+name = "Inverness Ridge"
+lat = 38.0500
+lon = -122.8200
+top_m = 420
+radius_m = 4000
+[[terrain.hill]]
+name = "Yerba Buena Island"
+lat = 37.8104
+lon = -122.3637
+top_m = 105
+radius_m = 600
+[[terrain.hill]]
+name = "Grizzly Peak"
+lat = 37.8820
+lon = -122.2330
+top_m = 535
+radius_m = 3000
+[[terrain.hill]]
+name = "Oakland Hills (north)"
+lat = 37.8500
+lon = -122.2050
+top_m = 450
+radius_m = 3000
+[[terrain.hill]]
+name = "Oakland Hills (Redwood Peak)"
+lat = 37.8150
+lon = -122.1850
+top_m = 460
+radius_m = 3000
+[[terrain.hill]]
+name = "Oakland Hills (south)"
+lat = 37.7800
+lon = -122.1550
+top_m = 400
+radius_m = 3000
+[[terrain.hill]]
+name = "San Leandro Hills"
+lat = 37.7400
+lon = -122.1300
+top_m = 350
+radius_m = 3000
+[[terrain.hill]]
+name = "San Pablo Ridge"
+lat = 37.9500
+lon = -122.2650
+top_m = 450
+radius_m = 3000
+
+# --- Airports: west flow (SFO landing 28L/28R, departing 01L/01R; OAK landing and departing 30).
+# Runway ends from the FAA chart supplement via SkyVector and AirNav; true headings.
+
+[[airport]]
+id = "SFO"
+elevation_m = 4.0
+airlines = [
+    ["UAL", 0.46], ["ASA", 0.10], ["DAL", 0.07], ["AAL", 0.07], ["SWA", 0.05], ["SKW", 0.04],
+    ["JBU", 0.03], ["ACA", 0.02], ["ANA", 0.015], ["JAL", 0.015], ["CPA", 0.012], ["EVA", 0.012],
+    ["KAL", 0.012], ["BAW", 0.01], ["DLH", 0.01], ["SIA", 0.01], ["AMX", 0.01], ["FDX", 0.01],
+    ["AFR", 0.008], ["QFA", 0.008], ["UPS", 0.008],
+]
+[[airport.runway]]
+id = "28L"
+lat = 37.61167
+lon = -122.35833
+heading_deg = 298.0
+length_m = 3469
+[[airport.runway]]
+id = "28R"
+lat = 37.61350
+lon = -122.35717
+heading_deg = 298.0
+length_m = 3618
+[[airport.runway]]
+id = "01L"
+lat = 37.60783
+lon = -122.38300
+heading_deg = 28.0
+length_m = 2332
+[[airport.runway]]
+id = "01R"
+lat = 37.60633
+lon = -122.38100
+heading_deg = 28.0
+length_m = 2637
+
+[[airport]]
+id = "OAK"
+elevation_m = 3.0
+airlines = [
+    ["SWA", 0.62], ["ASA", 0.08], ["FDX", 0.08], ["NKS", 0.05], ["VOI", 0.04], ["UPS", 0.04],
+    ["DAL", 0.03], ["AAY", 0.03], ["HAL", 0.03],
+]
+[[airport.runway]]
+id = "30"
+lat = 37.70149
+lon = -122.21426
+heading_deg = 310.0
+length_m = 3206
+
+[[stream]]
+name = "sfo-arrivals"
+kind = "arrivals"
+airport = "SFO"
+runways = ["28L", "28R"]
+# the staggered approaches the FAA allows since March 2026 cap SFO at about 36 an hour
+per_hour = 32
+min_gap_s = 60
+final_nm = 10
+jitter_m = 900
+mix = { airliner = 0.93, bizjet = 0.06, ga = 0.01 }
+routes = [
+    { name = "north", weight = 0.35, points = [[38.05, -122.70, 15000, 280], [37.92, -122.58, 11000, 250], [37.83, -122.47, 8000, 250], [37.76, -122.33, 6000, 230], [37.66, -122.20, 5000, 210], [37.56, -122.10, 4000, 200]] },
+    { name = "east", weight = 0.25, points = [[37.85, -122.10, 13000, 280], [37.72, -122.10, 8000, 250], [37.60, -122.08, 5000, 210], [37.55, -122.10, 4000, 190]] },
+    { name = "south", weight = 0.25, points = [[37.45, -122.05, 10000, 260], [37.48, -122.10, 6000, 230], [37.51, -122.12, 4000, 200]] },
+    { name = "west", weight = 0.15, points = [[37.50, -122.90, 12000, 280], [37.50, -122.55, 9000, 260], [37.47, -122.30, 6000, 230], [37.48, -122.15, 4500, 210]] },
+]
+
+[[stream]]
+name = "sfo-departures"
+kind = "departures"
+airport = "SFO"
+runways = ["01L", "01R"]
+per_hour = 30
+min_gap_s = 50
+final_nm = 3
+jitter_m = 900
+mix = { airliner = 0.93, bizjet = 0.06, ga = 0.01 }
+routes = [
+    { name = "north", weight = 0.35, points = [[37.70, -122.33, 4000, 230], [37.78, -122.34, 6500, 250], [37.85, -122.38, 9000, 250], [37.93, -122.52, 12000, 280], [38.05, -122.80, 17000, 300]] },
+    { name = "east", weight = 0.25, points = [[37.70, -122.30, 5000, 240], [37.74, -122.20, 8000, 250], [37.78, -122.10, 11000, 280]] },
+    { name = "south", weight = 0.25, points = [[37.70, -122.28, 5000, 240], [37.62, -122.18, 8000, 250], [37.45, -122.10, 12000, 290]] },
+    { name = "west", weight = 0.15, points = [[37.70, -122.34, 4500, 230], [37.74, -122.42, 7000, 250], [37.72, -122.60, 10000, 280], [37.65, -122.90, 14000, 300]] },
+]
+
+[[stream]]
+name = "oak-arrivals"
+kind = "arrivals"
+airport = "OAK"
+runways = ["30"]
+per_hour = 6
+min_gap_s = 150
+final_nm = 8
+jitter_m = 700
+mix = { airliner = 0.80, bizjet = 0.15, ga = 0.05 }
+routes = [
+    { name = "north", weight = 0.4, points = [[38.05, -122.40, 12000, 260], [37.92, -122.25, 8000, 240], [37.75, -122.13, 5000, 210], [37.66, -122.10, 3500, 190]] },
+    { name = "south", weight = 0.35, points = [[37.45, -122.15, 9000, 250], [37.58, -122.10, 5000, 210], [37.63, -122.11, 3000, 180]] },
+    { name = "east", weight = 0.25, points = [[37.85, -122.10, 10000, 250], [37.70, -122.10, 5000, 210], [37.65, -122.11, 3500, 190]] },
+]
+
+[[stream]]
+name = "oak-departures"
+kind = "departures"
+airport = "OAK"
+runways = ["30"]
+per_hour = 6
+min_gap_s = 150
+final_nm = 3
+jitter_m = 700
+mix = { airliner = 0.80, bizjet = 0.15, ga = 0.05 }
+routes = [
+    { name = "north", weight = 0.4, points = [[37.78, -122.32, 4000, 230], [37.90, -122.35, 8000, 250], [38.05, -122.40, 12000, 280]] },
+    { name = "south", weight = 0.35, points = [[37.75, -122.30, 3000, 220], [37.62, -122.25, 6000, 250], [37.45, -122.20, 10000, 280]] },
+    { name = "east", weight = 0.25, points = [[37.76, -122.28, 4000, 230], [37.80, -122.18, 8000, 250], [37.85, -122.10, 11000, 280]] },
+]
+
+[[stream]]
+name = "overflights"
+kind = "overflights"
+per_hour = 24
+alt_ft = [25000, 39000]
+speed_kt = [420, 490]
+mix = { airliner = 0.85, bizjet = 0.15 }
+
+# --- Low-level aircraft
+
+[[stream]]
+name = "heli-tour"
+kind = "route"
+class = "helicopter"
+per_hour = 2.0
+active_local_h = [9.0, 18.0]
+jitter_m = 250
+callsign = "n_number"
+routes = [
+    { name = "golden-gate-alcatraz", points = [[37.6300, -122.3840, -15, 0, 120], [37.6400, -122.3800, 500, 60], [37.7000, -122.3720, 1000, 100], [37.7700, -122.3800, 1000, 100], [37.8020, -122.3760, 1000, 90], [37.8150, -122.4000, 1000, 90], [37.8330, -122.4170, 1000, 80], [37.8320, -122.4310, 1000, 80], [37.8210, -122.4330, 1000, 80], [37.8180, -122.4600, 1200, 90], [37.8170, -122.4800, 1200, 90], [37.8300, -122.4870, 1200, 90], [37.8330, -122.4700, 1200, 90], [37.8200, -122.4550, 1000, 90], [37.8100, -122.4300, 1000, 90], [37.8000, -122.3900, 1000, 100], [37.7300, -122.3700, 1000, 100], [37.6450, -122.3780, 500, 60], [37.6300, -122.3840, -15, 0, 60]] },
+]
+
+[[stream]]
+name = "ga-bay-tour"
+kind = "route"
+class = "ga"
+per_hour = 3.0
+active_local_h = [9.0, 18.0]
+jitter_m = 400
+bidirectional = true
+callsign = "n_number"
+squawk = 1200
+routes = [
+    { name = "bay-tour", points = [[37.52, -122.24, 2500, 105], [37.60, -122.30, 2000, 105], [37.70, -122.36, 1500, 100], [37.79, -122.375, 1500, 100], [37.818, -122.395, 1500, 95], [37.832, -122.428, 1500, 95], [37.826, -122.470, 1500, 95], [37.822, -122.480, 1500, 95], [37.838, -122.492, 1500, 95], [37.850, -122.460, 1500, 95], [37.875, -122.440, 2000, 100], [37.92, -122.40, 2500, 105], [38.05, -122.35, 3500, 110]] },
+]
+
+[[stream]]
+name = "ga-coastal"
+kind = "route"
+class = "ga"
+per_hour = 2.5
+active_local_h = [8.0, 19.0]
+jitter_m = 600
+bidirectional = true
+callsign = "n_number"
+squawk = 1200
+routes = [
+    { name = "shoreline", points = [[37.45, -122.48, 2500, 110], [37.55, -122.52, 2000, 110], [37.65, -122.51, 1500, 110], [37.73, -122.52, 1500, 110], [37.79, -122.53, 1500, 110], [37.82, -122.56, 1500, 110], [37.88, -122.65, 2000, 110], [37.97, -122.80, 2500, 110], [38.05, -122.88, 3000, 110]] },
+]
+
+[[stream]]
+name = "seaplane"
+kind = "route"
+class = "seaplane"
+per_hour = 1.3
+active_local_h = [9.0, 17.0]
+jitter_m = 150
+callsign = "n_number"
+squawk = 1200
+routes = [
+    { name = "richardson-bay-tour", points = [[37.8770, -122.5110, -1, 0, 240], [37.8740, -122.5040, -1, 10], [37.8700, -122.4980, -1, 15], [37.8655, -122.4905, -1, 60], [37.8620, -122.4850, 300, 75], [37.8450, -122.4750, 1000, 95], [37.8250, -122.4800, 1200, 95], [37.8120, -122.4550, 1200, 95], [37.8100, -122.4200, 1200, 95], [37.8270, -122.4100, 1200, 90], [37.8380, -122.4250, 1200, 90], [37.8550, -122.4550, 1200, 90], [37.8700, -122.4800, 800, 80], [37.8740, -122.4950, 200, 65], [37.8770, -122.5020, -1, 55], [37.8790, -122.5080, -1, 10], [37.8770, -122.5110, -1, 3, 600]] },
+]
+
+[[stream]]
+name = "uscg-heli"
+kind = "route"
+class = "helicopter"
+per_hour = 0.4
+jitter_m = 300
+callsign = "prefix:C65"
+routes = [
+    { name = "coast-patrol", points = [[37.6320, -122.3890, -15, 0, 60], [37.6300, -122.4100, 500, 80], [37.6200, -122.4900, 500, 120], [37.6900, -122.5150, 500, 120], [37.7700, -122.5150, 500, 120], [37.8050, -122.5100, 500, 110], [37.8200, -122.4780, 500, 100], [37.8320, -122.5200, 500, 110], [37.8200, -122.5800, 500, 120], [37.7800, -122.5450, 500, 120], [37.7000, -122.5100, 800, 120], [37.6400, -122.4500, 800, 110], [37.6320, -122.3890, -15, 0, 60]] },
+]
+
+[[stream]]
+name = "medevac"
+kind = "route"
+class = "helicopter"
+per_hour = 0.3
+jitter_m = 300
+callsign = "n_number"
+routes = [
+    { name = "east-bay-to-mission-bay", points = [[37.95, -122.10, 2000, 130], [37.85, -122.25, 1500, 130], [37.79, -122.34, 1500, 120], [37.7700, -122.3850, 600, 60], [37.7665, -122.3905, -165, 0, 1500], [37.7700, -122.3850, 600, 60], [37.85, -122.25, 1500, 130], [37.95, -122.10, 2000, 130]] },
+]
+
+[[stream]]
+name = "drones"
+kind = "drones"
+per_hour = 9
+active_local_h = [8.0, 19.0]
+agl_m = [25, 120]
+session_min = [5, 20]
+speed_kt = [6, 22]
+spots = [
+    { name = "Crissy Field East Beach", lat = 37.8045, lon = -122.4555, ground_m = 3, weight = 2.0 },
+    { name = "Marina Green", lat = 37.8065, lon = -122.4400, ground_m = 3, weight = 2.0 },
+    { name = "Fort Mason", lat = 37.8065, lon = -122.4290, ground_m = 10, weight = 1.0 },
+    { name = "Aquatic Park", lat = 37.8075, lon = -122.4215, ground_m = 3, weight = 1.0 },
+    { name = "Embarcadero", lat = 37.8000, lon = -122.3980, ground_m = 3, weight = 1.0 },
+    { name = "Baker Beach", lat = 37.7950, lon = -122.4830, ground_m = 5, weight = 1.0 },
+    { name = "Lands End", lat = 37.7870, lon = -122.5050, ground_m = 50, weight = 0.7 },
+    { name = "Sausalito waterfront", lat = 37.8580, lon = -122.4820, ground_m = 3, weight = 1.0 },
+    { name = "Treasure Island", lat = 37.8230, lon = -122.3710, ground_m = 3, weight = 1.0 },
+    { name = "Tiburon", lat = 37.8740, lon = -122.4560, ground_m = 3, weight = 0.5 },
+    { name = "Jack London Square", lat = 37.7950, lon = -122.2780, ground_m = 3, weight = 0.5 },
+    { name = "Alameda Point", lat = 37.7800, lon = -122.3100, ground_m = 3, weight = 0.5 },
+]
+
+# --- Deep-draft ships. The traffic separation scheme off San Francisco (33 CFR 167.400-.406,
+# lane centres between the published boundaries), the pilot station near the centre of the
+# precautionary area, the bar channel, the Golden Gate and Central Bay traffic lanes
+# (33 CFR 165.1181): inbound south of Alcatraz, outbound north of it, the deep water lane
+# north towards Richmond.
+
+[ships]
+pilot_station = [37.7600, -122.6900]
+# Pier 9
+pilot_base = [37.8003, -122.3955]
+sea_kt = 14.0
+bar_inbound = [[37.7620, -122.6350, 10], [37.7790, -122.5800, 12], [37.7900, -122.5450, 12], [37.7972, -122.5133, 12], [37.8083, -122.4914, 11], [37.8130, -122.4790, 11]]
+bar_outbound = [[37.8180, -122.4790, 11], [37.8175, -122.4978, 12], [37.8083, -122.5228, 12], [37.7965, -122.5500, 12], [37.7815, -122.5880, 12], [37.7700, -122.6350, 10]]
+# the pilot launches' way out from Pier 9: off the piers, along the Cityfront, the south side of
+# the Gate and of the bar channel
+launch_route = [[37.8060, -122.3930], [37.8150, -122.4050], [37.8185, -122.4300], [37.8165, -122.4600], [37.8150, -122.4790], [37.8110, -122.5000], [37.8000, -122.5300], [37.7850, -122.5700], [37.7720, -122.6200]]
+
+[[ships.approach]]
+name = "north"
+weight = 0.45
+inbound = [[37.909, -123.092], [37.787, -122.808]]
+outbound = [[37.813, -122.786], [37.956, -123.053]]
+
+[[ships.approach]]
+name = "west"
+weight = 0.30
+inbound = [[37.596, -122.948], [37.679, -122.779]]
+outbound = [[37.706, -122.804], [37.648, -122.974]]
+
+[[ships.approach]]
+name = "south"
+weight = 0.25
+inbound = [[37.45, -122.663], [37.65, -122.663]]
+outbound = [[37.651, -122.7275], [37.45, -122.7275]]
+
+[[stream]]
+name = "ships-oakland"
+kind = "ships"
+per_hour = 0.20
+per_hour_out = 0.20
+mix = { cargo = 0.95, tanker = 0.05 }
+destination = "USOAK"
+tugs = 2
+# tugs wait in the outer harbour
+tug_base = [37.8095, -122.3290]
+tug_meet = 7
+dwell_h = [14, 30]
+inbound = [[37.8180, -122.4636, 11], [37.8193, -122.4370, 11], [37.8190, -122.4200, 10], [37.8150, -122.4000, 9], [37.8080, -122.3870, 8], [37.7985, -122.3790, 8], [37.7980, -122.3560, 7], [37.8060, -122.3420, 6], [37.8080, -122.3300, 4]]
+outbound = [[37.8080, -122.3300, 4], [37.8060, -122.3420, 6], [37.7980, -122.3560, 8], [37.7985, -122.3790, 8], [37.8080, -122.3870, 9], [37.8300, -122.4050, 10], [37.8330, -122.4250, 11], [37.8270, -122.4500, 11], [37.8235, -122.4630, 11], [37.8180, -122.4790, 11]]
+berths = [[37.8095, -122.3175, 90], [37.8105, -122.3120, 90], [37.8090, -122.3240, 90]]
+
+[[stream]]
+name = "ships-richmond"
+kind = "ships"
+per_hour = 0.12
+per_hour_out = 0.12
+mix = { tanker = 0.7, cargo = 0.3 }
+destination = "USRCH"
+tugs = 1
+tug_base = [37.9080, -122.3800]
+tug_meet = 5
+dwell_h = [10, 30]
+inbound = [[37.8319, -122.4692, 11], [37.8433, -122.4533, 11], [37.8464, -122.4406, 10], [37.8470, -122.4150, 10], [37.8580, -122.4060, 9], [37.8800, -122.3990, 8], [37.9050, -122.4030, 6], [37.9180, -122.4080, 4]]
+outbound = [[37.9180, -122.4080, 4], [37.9050, -122.4030, 6], [37.8800, -122.3990, 8], [37.8580, -122.4060, 9], [37.8470, -122.4150, 10], [37.8464, -122.4406, 10], [37.8433, -122.4533, 11], [37.8319, -122.4692, 11], [37.8180, -122.4790, 11]]
+berths = [[37.9235, -122.4115, 350], [37.9195, -122.4100, 350]]
+
+[[stream]]
+name = "ships-north-bay"
+kind = "ships"
+per_hour = 0.12
+per_hour_out = 0.12
+mix = { tanker = 0.5, cargo = 0.5 }
+destination = "USBNC"
+dwell_h = [10, 20]
+inbound = [[37.8319, -122.4692, 11], [37.8433, -122.4533, 11], [37.8464, -122.4406, 10], [37.8470, -122.4150, 10], [37.8600, -122.4050, 10], [37.8750, -122.4080, 10], [37.9200, -122.4250, 10], [37.9600, -122.4330, 10], [38.0000, -122.4250, 10], [38.0600, -122.4000, 10]]
+outbound = [[38.0600, -122.4000, 10], [38.0000, -122.4250, 10], [37.9600, -122.4330, 10], [37.9200, -122.4250, 10], [37.8750, -122.4080, 10], [37.8600, -122.4050, 10], [37.8470, -122.4150, 10], [37.8464, -122.4406, 10], [37.8433, -122.4533, 11], [37.8319, -122.4692, 11], [37.8180, -122.4790, 11]]
+berths = [[38.0700, -122.3900, 20]]
+
+[[stream]]
+name = "pilot-station"
+kind = "pilot_station"
+wander_m = 1500
+speed_kt = [2, 4]
+names = ["BAR PILOT STATION"]
+
+[[stream]]
+name = "cruise-pier27"
+kind = "moored"
+class = "passenger"
+status = "moored"
+length_m = [290, 300]
+names = ["PACIFIC VISTA"]
+destination = "USSFO"
+positions = [[37.8065, -122.4002, 45]]
+
+[[stream]]
+name = "anchorage-9"
+kind = "moored"
+mix = { cargo = 0.6, tanker = 0.4 }
+status = "anchored"
+count = 5
+area = [[37.725, -122.345], [37.745, -122.345], [37.745, -122.318], [37.725, -122.322]]
+
+[[stream]]
+name = "moored-oakland"
+kind = "moored"
+class = "cargo"
+status = "moored"
+destination = "USOAK"
+positions = [[37.8100, -122.3150, 90], [37.8000, -122.3130, 110], [37.8085, -122.3260, 90]]
+
+[[stream]]
+name = "tugs-idle"
+kind = "moored"
+class = "tug"
+status = "moored"
+positions = [[37.8040, -122.3980, 45], [37.8044, -122.3975, 45], [37.7960, -122.2860, 100], [37.7963, -122.2852, 100]]
+
+# --- Ferries: the real routes and terminals, weekend headways (illustrative timetables).
+
+[[stream]]
+name = "ferry-larkspur"
+kind = "ferry"
+headway_min = 60
+active_local_h = [7.5, 20.0]
+speed_kt = [30, 31]
+length_m = [40, 50]
+names = ["MARIN STAR", "LARKSPUR LIGHT", "GOLDEN BAY"]
+destination = "LARKSPUR"
+stops = [{ name = "Larkspur", lat = 37.9455, lon = -122.5085, dwell_min = 8 }, { name = "Ferry Building", lat = 37.7957, lon = -122.3925, dwell_min = 10 }]
+legs = [[[37.9440, -122.5000], [37.9380, -122.4850], [37.9250, -122.4650], [37.9000, -122.4350], [37.8800, -122.4180], [37.8600, -122.4040], [37.8350, -122.3980], [37.8100, -122.3880]]]
+
+[[stream]]
+name = "ferry-sausalito"
+kind = "ferry"
+headway_min = 75
+active_local_h = [7.5, 19.5]
+speed_kt = [20, 21]
+length_m = [45, 60]
+names = ["SAUSALITO DAWN", "BAY PROMISE"]
+destination = "SAUSALITO"
+stops = [{ name = "Sausalito", lat = 37.8566, lon = -122.4770, dwell_min = 8 }, { name = "Ferry Building", lat = 37.7957, lon = -122.3925, dwell_min = 10 }]
+legs = [[[37.8500, -122.4650], [37.8380, -122.4300], [37.8200, -122.4000], [37.8060, -122.3880]]]
+
+[[stream]]
+name = "ferry-tiburon"
+kind = "ferry"
+headway_min = 150
+active_local_h = [8.0, 19.0]
+speed_kt = [22, 23]
+length_m = [40, 50]
+names = ["TIBURON SPIRIT"]
+destination = "TIBURON"
+stops = [{ name = "Tiburon", lat = 37.8721, lon = -122.4555, dwell_min = 8 }, { name = "Ferry Building", lat = 37.7957, lon = -122.3925, dwell_min = 10 }]
+legs = [[[37.8680, -122.4530], [37.8600, -122.4520], [37.8540, -122.4450], [37.8380, -122.4300], [37.8200, -122.4000], [37.8060, -122.3880]]]
+
+[[stream]]
+name = "ferry-oakland-alameda"
+kind = "ferry"
+headway_min = 60
+active_local_h = [8.0, 21.0]
+speed_kt = [26, 27]
+length_m = [40, 45]
+names = ["ESTUARY RUNNER", "ALAMEDA SWIFT", "HARBOR GRACE"]
+destination = "OAKLAND"
+stops = [{ name = "Ferry Building", lat = 37.7957, lon = -122.3925, dwell_min = 8 }, { name = "Alameda Main Street", lat = 37.7905, lon = -122.2935, dwell_min = 5 }, { name = "Oakland Jack London Square", lat = 37.7950, lon = -122.2780, dwell_min = 10 }]
+legs = [[[37.7920, -122.3800], [37.7950, -122.3500], [37.7960, -122.3300], [37.7950, -122.3150], [37.7930, -122.3020]], [[37.7930, -122.2880]]]
+
+[[stream]]
+name = "ferry-richmond"
+kind = "ferry"
+headway_min = 150
+active_local_h = [9.0, 19.0]
+speed_kt = [26, 27]
+length_m = [40, 45]
+names = ["POINT RICHMOND"]
+destination = "RICHMOND"
+stops = [{ name = "Richmond", lat = 37.9125, lon = -122.3565, dwell_min = 8 }, { name = "Ferry Building", lat = 37.7957, lon = -122.3925, dwell_min = 10 }]
+legs = [[[37.9050, -122.3650], [37.8900, -122.3750], [37.8500, -122.3850], [37.8150, -122.3850], [37.8030, -122.3870]]]
+
+[[stream]]
+name = "ferry-pier41"
+kind = "ferry"
+headway_min = 90
+active_local_h = [9.0, 18.5]
+speed_kt = [18, 19]
+length_m = [35, 45]
+names = ["HARBOR LEGEND", "PIER STAR"]
+destination = "SAUSALITO TIBURON"
+stops = [{ name = "Pier 41", lat = 37.8098, lon = -122.4125, dwell_min = 10 }, { name = "Sausalito", lat = 37.8566, lon = -122.4770, dwell_min = 8 }, { name = "Tiburon", lat = 37.8721, lon = -122.4555, dwell_min = 8 }]
+legs = [[[37.8160, -122.4200], [37.8350, -122.4450], [37.8500, -122.4680]], [[37.8540, -122.4600], [37.8580, -122.4480], [37.8680, -122.4510]]]
+
+[[stream]]
+name = "ferry-angel-island"
+kind = "ferry"
+headway_min = 60
+active_local_h = [10.0, 17.0]
+speed_kt = [10, 11]
+length_m = [20, 25]
+names = ["AYALA COVE"]
+destination = "ANGEL ISLAND"
+stops = [{ name = "Tiburon", lat = 37.8721, lon = -122.4555, dwell_min = 10 }, { name = "Ayala Cove", lat = 37.8686, lon = -122.4352, dwell_min = 15 }]
+legs = [[[37.8710, -122.4480], [37.8700, -122.4400]]]
+
+[[stream]]
+name = "ferry-alcatraz"
+kind = "ferry"
+headway_min = 30
+active_local_h = [8.75, 18.5]
+speed_kt = [11, 12]
+length_m = [30, 40]
+names = ["ISLAND LANDING", "ROCK RUNNER", "CELLHOUSE"]
+destination = "ALCATRAZ"
+stops = [{ name = "Pier 33", lat = 37.8080, lon = -122.4030, dwell_min = 8 }, { name = "Alcatraz", lat = 37.8262, lon = -122.4202, dwell_min = 10 }]
+legs = [[[37.8140, -122.4080], [37.8220, -122.4160]]]
+
+[[stream]]
+name = "bay-cruise"
+kind = "route"
+class = "passenger"
+per_hour = 2.0
+active_local_h = [10.0, 17.0]
+speed_kt = [10, 12]
+length_m = [35, 50]
+jitter_m = 80
+routes = [
+    { name = "under-the-bridge", points = [[37.8095, -122.4125, 0, 3], [37.8140, -122.4150], [37.8170, -122.4500], [37.8160, -122.4700], [37.8190, -122.4790], [37.8250, -122.4800], [37.8300, -122.4650], [37.8330, -122.4350], [37.8320, -122.4180], [37.8200, -122.4120], [37.8095, -122.4125, 0, 2, 600]] },
+]
+
+# --- Tugs, fishing boats and small craft
+
+[[stream]]
+name = "tug-barge"
+kind = "route"
+class = "tug"
+per_hour = 0.4
+speed_kt = [6, 8]
+jitter_m = 100
+bidirectional = true
+routes = [
+    { name = "oakland-pier96", points = [[37.7960, -122.2850], [37.7990, -122.3200], [37.8000, -122.3500], [37.7900, -122.3700], [37.7600, -122.3700], [37.7430, -122.3730]] },
+    { name = "oakland-richmond", points = [[37.7960, -122.2850], [37.7990, -122.3200], [37.8050, -122.3500], [37.8300, -122.3600], [37.8700, -122.3800], [37.9050, -122.3750]] },
+]
+
+[[stream]]
+name = "fishing-return"
+kind = "route"
+class = "fishing"
+per_hour = 1.5
+active_local_h = [9.0, 16.0]
+speed_kt = [8, 10]
+jitter_m = 150
+routes = [
+    { name = "outside-to-wharf", points = [[37.7600, -122.7000], [37.7850, -122.5600], [37.8060, -122.5000], [37.8150, -122.4750], [37.8120, -122.4400], [37.8125, -122.4230], [37.8113, -122.4155, 0, 3, 7200]] },
+]
+
+[[stream]]
+name = "fishing-drift"
+kind = "wander"
+class = "fishing"
+per_hour = 2.0
+session_min = [120, 300]
+speed_kt = [2, 6]
+status = "fishing"
+area = [[37.8150, -122.4400], [37.8400, -122.4450], [37.8500, -122.4000], [37.8300, -122.3850]]
+avoid = [[37.8267, -122.4230, 450]]
+spots = [{ name = "Fisherman's Wharf", lat = 37.8125, lon = -122.4180, weight = 2.0 }, { name = "Sausalito", lat = 37.8580, lon = -122.4760, weight = 1.0, via = [[37.8500, -122.4650]] }]
+
+[[stream]]
+name = "sailing-cityfront"
+kind = "wander"
+class = "sailing"
+# a Sunday: the Cityfront race course and plenty of day sailors
+per_hour = 14
+session_min = [60, 240]
+speed_kt = [4, 7]
+status = "sailing"
+wander_m = 40
+area = [[37.8120, -122.4740], [37.8170, -122.4780], [37.8290, -122.4650], [37.8250, -122.4400], [37.8200, -122.4150], [37.8130, -122.4060], [37.8115, -122.4300], [37.8100, -122.4550]]
+avoid = [[37.8267, -122.4230, 450]]
+spots = [
+    { name = "St. Francis Yacht Club", lat = 37.8092, lon = -122.4460, weight = 2.0 },
+    { name = "Gashouse Cove", lat = 37.8088, lon = -122.4360, weight = 1.5 },
+    { name = "Pier 39 marina", lat = 37.8120, lon = -122.4100, weight = 1.0 },
+    { name = "Sausalito", lat = 37.8590, lon = -122.4750, weight = 0.6, via = [[37.8500, -122.4650], [37.8350, -122.4600]] },
+]
+
+[[stream]]
+name = "sailing-east-bay"
+kind = "wander"
+class = "sailing"
+per_hour = 6
+session_min = [60, 240]
+speed_kt = [4, 7]
+status = "sailing"
+wander_m = 40
+area = [[37.8450, -122.4050], [37.8750, -122.4050], [37.8800, -122.3300], [37.8500, -122.3200], [37.8350, -122.3600]]
+avoid = [[37.8625, -122.4310, 1900], [37.8240, -122.3700, 1300]]
+spots = [{ name = "Berkeley Marina", lat = 37.8665, lon = -122.3150, weight = 1.0 }, { name = "Richmond Marina Bay", lat = 37.9100, lon = -122.3500, weight = 0.7 }]
+
+[[stream]]
+name = "pleasure"
+kind = "wander"
+class = "pleasure"
+per_hour = 8
+session_min = [60, 180]
+speed_kt = [8, 22]
+area = [[37.8105, -122.4700], [37.8250, -122.4750], [37.8480, -122.4580], [37.8600, -122.4100], [37.8400, -122.3750], [37.8080, -122.3850], [37.8140, -122.4100], [37.8110, -122.4400]]
+avoid = [[37.8267, -122.4230, 450], [37.8625, -122.4310, 1900], [37.8100, -122.3640, 900], [37.8240, -122.3700, 1300]]
+spots = [
+    { name = "Gashouse Cove", lat = 37.8088, lon = -122.4360, weight = 1.0 },
+    { name = "South Beach Harbor", lat = 37.7800, lon = -122.3860, weight = 1.0, via = [[37.7850, -122.3830], [37.7960, -122.3860], [37.8080, -122.3900]] },
+    { name = "Sausalito", lat = 37.8590, lon = -122.4750, weight = 1.0, via = [[37.8500, -122.4650]] },
+    { name = "Pier 39 marina", lat = 37.8120, lon = -122.4100, weight = 0.5 },
+]
+
+[[stream]]
+name = "kayaks"
+kind = "wander"
+class = "small_craft"
+per_hour = 8
+active_local_h = [7.0, 18.0]
+session_min = [30, 100]
+speed_kt = [1.5, 3.0]
+status = "undefined"
+area = [[37.8080, -122.4262], [37.8100, -122.4280], [37.8125, -122.4270], [37.8128, -122.4200], [37.8118, -122.4205], [37.8100, -122.4225], [37.8082, -122.4232]]
+spots = [{ name = "Aquatic Park beach", lat = 37.8080, lon = -122.4245, weight = 1.0 }]
+
+# --- Equipage by class. ADS-B Out is required in the Mode C veil (14 CFR 91.225), so few
+# aircraft have none; UAT is common in light aircraft. AIS Class A is required on the larger
+# vessels (33 CFR 164.46); Class B is voluntary on small ones. Remote ID (14 CFR 89) on most
+# drones now, not all.
+
+[equipage.airliner]
+adsb_1090 = 1.0
+[equipage.bizjet]
+adsb_1090 = 1.0
+pia = 0.10
+ladd = 0.35
+[equipage.ga]
+adsb_1090 = 0.55
+uat = 0.40
+mode_s_only = 0.02
+pia = 0.01
+ladd = 0.03
+uat_anon = 0.15
+[equipage.helicopter]
+adsb_1090 = 0.70
+uat = 0.27
+mode_s_only = 0.01
+ladd = 0.05
+[equipage.seaplane]
+adsb_1090 = 0.50
+uat = 0.50
+[equipage.drone]
+rid = 0.85
+[equipage.cargo]
+ais_a = 1.0
+[equipage.tanker]
+ais_a = 1.0
+[equipage.passenger]
+ais_a = 1.0
+[equipage.ferry]
+ais_a = 1.0
+[equipage.tug]
+ais_a = 1.0
+[equipage.pilot]
+ais_a = 1.0
+[equipage.fishing]
+ais_a = 0.30
+ais_b = 0.35
+ais_off = 0.03
+type19 = 0.10
+[equipage.pleasure]
+ais_b = 0.30
+type19 = 0.05
+[equipage.sailing]
+ais_b = 0.25
+type19 = 0.05
+[equipage.small_craft]
+
+# --- The company's receivers: one of each kind at each hub in hubs.toml, on a 10 m mast.
+
+[receivers]
+hubs = "hubs.toml"
+kinds = ["adsb_1090", "adsb_uat", "ais", "rid"]
+mast_m = 10.0
+ground_m = 3.0
+
+[receivers.adsb_1090]
+range_m = 350000
+base_loss = 0.04
+latency_ms = [5, 60]
+
+[receivers.adsb_uat]
+range_m = 250000
+base_loss = 0.04
+latency_ms = [5, 60]
+
+[receivers.ais]
+range_m = 74000
+base_loss = 0.02
+latency_ms = [5, 80]
+# Class B's 2 W against Class A's 12.5 W
+class_b_range_m = 25000
+slot_factor = 0.5
+
+[receivers.rid]
+range_m = 2000
+base_loss = 0.05
+latency_ms = [10, 80]
+
+# --- Commercial aggregated feeds: many feeders on high ground, a few seconds late.
+
+[[network]]
+id = "net-adsb"
+kind = "adsb_1090"
+delay_s = [2.0, 5.0]
+base_loss = 0.02
+range_m = 350000
+ladd = true
+feeders = [
+    [37.7544, -122.4477, 300], [37.9236, -122.5965, 790], [37.8820, -122.2330, 540], [37.6857, -122.4339, 410],
+    [37.6200, -122.3800, 15], [37.8700, -122.2600, 90], [37.6600, -122.1000, 40], [37.5000, -122.4700, 40],
+    [37.7800, -122.4600, 60], [38.0000, -122.5500, 150],
+]
+
+[[network]]
+id = "net-uat"
+kind = "adsb_uat"
+delay_s = [2.0, 5.0]
+base_loss = 0.03
+range_m = 250000
+ladd = true
+feeders = [[37.7544, -122.4477, 300], [37.8820, -122.2330, 540], [37.6857, -122.4339, 410], [37.6600, -122.1000, 40]]
+
+[[network]]
+id = "net-ais"
+kind = "ais"
+delay_s = [3.0, 10.0]
+base_loss = 0.03
+range_m = 74000
+feeders = [[37.8240, -122.5290, 60], [37.8090, -122.4000, 30], [37.8000, -122.3000, 40], [37.9200, -122.3700, 40], [37.6300, -122.4950, 80], [37.9236, -122.5965, 790]]
+
+# --- Onboard sensors on own vehicles (positions from the bridge), and a ground radar.
+
+[onboard]
+rid = true
+rid_range_m = 800
+
+[onboard.daa]
+period_s = 1.0
+sigma_bearing_deg = 1.5
+sigma_elev_deg = 1.5
+slope = 6
+fov_up_deg = 30
+fov_down_deg = 30
+false_per_scan = 0.01
+latency_ms = 150
+r50_m = { airliner = 6000, bizjet = 3500, ga = 1800, helicopter = 2000, seaplane = 1800, drone = 350 }
+
+[onboard.marine_radar]
+period_s = 2.5
+sigma_bearing_deg = 1.0
+sigma_range_m = 8.0
+sigma_range_frac = 0.005
+slope = 4
+min_range_m = 30
+fov_up_deg = 15
+fov_down_deg = 15
+false_per_scan = 0.3
+latency_ms = 250
+mount_m = 3.0
+r50_m = { cargo = 16000, tanker = 16000, passenger = 14000, ferry = 8000, tug = 6500, pilot = 5000, fishing = 4500, pleasure = 3000, sailing = 2500, small_craft = 600, seaplane = 2000 }
+
+[[ground_radar]]
+id = "radar-pier"
+# off by default: a scenario that wants it turns it on here
+enabled = false
+lat = 37.8170
+lon = -122.4150
+alt_m = 20.0
+range_m = 5000
+period_s = 1.0
+sigma_bearing_deg = 0.5
+sigma_elev_deg = 1.0
+sigma_range_m = 5.0
+doppler = true
+sigma_speed_mps = 0.3
+slope = 4
+min_range_m = 50
+fov_up_deg = 60
+fov_down_deg = 10
+false_per_scan = 0.05
+latency_ms = 200
+r50_m = { airliner = 8000, bizjet = 6000, ga = 5000, helicopter = 5000, seaplane = 4500, drone = 1500, small_craft = 800, sailing = 2500, pleasure = 3000, fishing = 4000 }

@@ -6,6 +6,17 @@ max_range_frac = 0.7
 hold_reassign_s = 120
 max_proposals_per_min = 60
 
+# What automation does before a person is told (the bridge's, not a rule; docs/design/delivery-orders.md
+# section 5.2). These are the defaults, written out.
+[automation]
+depart_wait_s = 120     # loaded at the hub: wait this long for the drop zone to look clear
+hover_wait_s = 120      # over the zone: wait this long for a clear look, then keep the parcel and come home
+retry_after_s = 600     # a parcel kept undelivered is tried again after this
+max_tries = 2           # ... this many times in all
+hold_retry_s = 15       # a hold automation waits out (traffic near the hub, a stale fact) is tried again after this
+hold_retry_max_s = 300  # ... and goes to a person after this much waiting
+issue_show_s = 300      # an issue alert stays in the inbox this long
+
 [observations.busy]
 doorstep = 0.25
 kerb = 0.15
@@ -63,6 +74,7 @@ packs = 10
 [[dropzone]]
 id = "dz-fort-mason-3"
 kind = "doorstep"
+approval = "customer"
 lon = -122.429
 lat = 37.804
 radius_m = 4
@@ -72,6 +84,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-02"
 kind = "kerb"
+approval = "survey"
 lon = -122.41458
 lat = 37.80083
 radius_m = 4
@@ -80,6 +93,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-03"
 kind = "locker"
+approval = "survey"
 lon = -122.42873
 lat = 37.80144
 radius_m = 4
@@ -88,6 +102,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-04"
 kind = "doorstep"
+approval = "customer"
 lon = -122.43972
 lat = 37.80106
 radius_m = 4
@@ -97,6 +112,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-05"
 kind = "kerb"
+approval = "survey"
 lon = -122.42458
 lat = 37.80246
 radius_m = 4
@@ -105,6 +121,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-06"
 kind = "locker"
+approval = "survey"
 lon = -122.4428
 lat = 37.80002
 radius_m = 4
@@ -113,6 +130,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-07"
 kind = "doorstep"
+approval = "customer"
 lon = -122.44292
 lat = 37.80255
 radius_m = 4
@@ -122,6 +140,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-08"
 kind = "kerb"
+approval = "survey"
 lon = -122.42242
 lat = 37.79871
 radius_m = 4
@@ -130,6 +149,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-09"
 kind = "locker"
+approval = "survey"
 lon = -122.41261
 lat = 37.80332
 radius_m = 4
@@ -138,6 +158,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-10"
 kind = "doorstep"
+approval = "customer"
 lon = -122.42377
 lat = 37.80158
 radius_m = 4
@@ -147,6 +168,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-11"
 kind = "kerb"
+approval = "survey"
 lon = -122.44065
 lat = 37.79858
 radius_m = 4
@@ -155,6 +177,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-12"
 kind = "locker"
+approval = "survey"
 lon = -122.42804
 lat = 37.7988
 radius_m = 4
@@ -163,6 +186,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-13"
 kind = "doorstep"
+approval = "customer"
 lon = -122.43953
 lat = 37.79971
 radius_m = 4
@@ -172,6 +196,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-14"
 kind = "kerb"
+approval = "survey"
 lon = -122.44498
 lat = 37.80082
 radius_m = 4
@@ -180,6 +205,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-15"
 kind = "locker"
+approval = "survey"
 lon = -122.43102
 lat = 37.80271
 radius_m = 4
@@ -188,6 +214,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-16"
 kind = "doorstep"
+approval = "customer"
 lon = -122.42835
 lat = 37.8017
 radius_m = 4
@@ -197,6 +224,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-17"
 kind = "kerb"
+approval = "survey"
 lon = -122.42901
 lat = 37.80181
 radius_m = 4
@@ -205,6 +233,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-18"
 kind = "locker"
+approval = "survey"
 lon = -122.43045
 lat = 37.79989
 radius_m = 4
@@ -213,6 +242,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-19"
 kind = "doorstep"
+approval = "customer"
 lon = -122.41208
 lat = 37.80348
 radius_m = 4
@@ -222,6 +252,7 @@ populated = true
 [[dropzone]]
 id = "dz-city-20"
 kind = "kerb"
+approval = "survey"
 lon = -122.41743
 lat = 37.80204
 radius_m = 4
@@ -230,6 +261,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-21"
 kind = "locker"
+approval = "survey"
 lon = -122.43528
 lat = 37.79965
 radius_m = 4
@@ -238,6 +270,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-city-22"
 kind = "doorstep"
+approval = "customer"
 lon = -122.43617
 lat = 37.79885
 radius_m = 4
@@ -247,6 +280,7 @@ populated = true
 [[dropzone]]
 id = "dz-sausalito-pad"
 kind = "pad"
+approval = "survey"
 lon = -122.485
 lat = 37.859
 radius_m = 4
@@ -255,6 +289,7 @@ surface = "land"
 [[dropzone]]
 id = "dz-sausalito-dock"
 kind = "dock"
+approval = "survey"
 lon = -122.479
 lat = 37.857
 radius_m = 6
@@ -264,6 +299,7 @@ dock_level_m = 2.4
 [[dropzone]]
 id = "dz-angel-dock"
 kind = "dock"
+approval = "survey"
 lon = -122.432
 lat = 37.869
 radius_m = 6
@@ -273,6 +309,7 @@ dock_level_m = 1.6
 [[dropzone]]
 id = "dz-marina-pad"
 kind = "pad"
+approval = "survey"
 lon = -122.4372
 lat = 37.8059
 radius_m = 3

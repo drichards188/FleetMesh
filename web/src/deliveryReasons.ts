@@ -8,9 +8,11 @@ export interface Reason {
   title: string
   /** what it means for the person deciding */
   plain: string
+  /** the response it recommends, where the reason suggests one */
+  next?: string
 }
 
-const R = (title: string, plain: string): Reason => ({ title, plain })
+const R = (title: string, plain: string, next?: string): Reason => (next ? { title, plain, next } : { title, plain })
 
 /** Every reason code the delivery rules give (crates/fleetmesh-decide/src/delivery_rules.rs). */
 export const REASONS: Record<string, Reason> = {
@@ -25,7 +27,7 @@ export const REASONS: Record<string, Reason> = {
   // energy
   ENERGY_BATTERY_UNKNOWN: R('Battery level unknown', 'The vehicle has not reported its battery lately, so the trip cannot be checked against it.'),
   ENERGY_ENDURANCE_UNKNOWN: R('Endurance unknown', 'The platform has no endurance figure to judge the trip by.'),
-  ENERGY_MARGIN_THIN: R('Thin battery margin', 'The battery covers the trip, the return to a hub and the reserve, but only just: less spare than the hold band asks for.'),
+  ENERGY_MARGIN_THIN: R('Thin battery margin', 'The battery covers the trip, the return to a hub and the reserve, but only just: less spare than the hold band asks for.', 'Approve only a short, urgent delivery; else reject and the vehicle swaps its battery first.'),
   ENERGY_NO_HUB_REACHABLE: R('No hub to return to', 'No open hub can be reached from the end of the route with the battery left.'),
   ENERGY_INSUFFICIENT: R('Battery too low', 'The battery does not cover the trip, the return and the reserve.'),
   ENERGY_WIND_NO_HEADWAY: R('Wind too strong to make progress', 'Into this wind the vehicle could not make headway on a leg.'),
@@ -38,7 +40,7 @@ export const REASONS: Record<string, Reason> = {
   // weather
   WX_UNKNOWN: R('Weather unknown', 'There is no recent weather reading for a place the vehicle will be, and unknown is never assumed to be fine.'),
   WX_WIND_LIMIT_MARGINAL: R('Wind near the limit', 'The sustained wind is above the soft limit and under the hard one: legal, but a person judges it.'),
-  WX_GUST_LIMIT_MARGINAL: R('Gusts near the limit', 'Gusts are above the soft limit and under the hard one: legal, but a person judges it.'),
+  WX_GUST_LIMIT_MARGINAL: R('Gusts near the limit', 'Gusts are above the soft limit and under the hard one: legal, but a person judges it.', 'Approve short, light, well provisioned trips; reject the rest and they wait for the wind to drop.'),
   WX_VISIBILITY_MARGINAL: R('Poor visibility', 'Visibility is below the soft limit and above the hard one.'),
   WX_PRECIP_MARGINAL: R('Heavy rain', 'Rainfall is above the soft limit and under the hard one.'),
   WX_CURRENT_MARGINAL: R('Strong current', 'The water current is a large share of the boat’s cruise speed.'),
@@ -54,25 +56,26 @@ export const REASONS: Record<string, Reason> = {
   // separation
   SEP_TRAFFIC_UNKNOWN: R('Nearby traffic unknown', 'Another vehicle near the route has not reported lately, so separation from it cannot be checked.'),
   SEP_MARGINAL: R('Close to another vehicle', 'The route passes another vehicle at less than one and a half times the minimum separation.'),
-  SEP_HUB_ZONE: R('Two vehicles for one hub', 'Two vehicles would meet near a hub: a person decides who waits.'),
+  SEP_HUB_ZONE: R('Two vehicles for one hub', 'Two vehicles would meet near a hub. Automation waited for the other to clear and it did not: a person decides who waits.', 'Approve if the other vehicle is about to leave; else reject and the dispatcher tries again.'),
   SEP_ROUTE_CONFLICT: R('Route conflict', 'The route would lose separation with another vehicle.'),
   // drop zone
-  DZ_UNCONFIRMED: R('Drop zone not confirmed lately', 'No person has said this drop zone is fit in the last hour. Confirming it lets the delivery go.'),
-  DZ_OBSERVATION_STALE: R('No recent look at a populated zone', 'The zone is where people are, and no one has looked at it lately (or the look could not tell).'),
-  DZ_PEOPLE_NEAR: R('People at the drop zone', 'The latest look saw people at the zone: a person can judge whether it is a passer-by.'),
+  DZ_NOT_APPROVED: R('Not an approved delivery point', 'This spot is not on the list of delivery points approved ahead of time (surveyed, or chosen by the customer), or its approval was withdrawn.', 'Approve it if the spot is fit: it becomes an approved delivery point from then on, and deliveries there go with no one asked. Reject it if not.'),
+  DZ_UNCONFIRMED: R('Drop zone not confirmed lately', 'The strict procedure: no person has said this drop zone is fit in the last hour. Confirming it lets the delivery go, and others there for an hour.', 'Confirm it if the latest look is clear and the spot is fit.'),
+  DZ_OBSERVATION_STALE: R('No recent look at a populated zone', 'The zone is where people are, and no one has looked at it lately (or the look could not tell). Automation waited for a clear look and none came.', 'Reject: the parcel stays at the hub and is tried again later.'),
+  DZ_PEOPLE_NEAR: R('People at the drop zone', 'The latest look saw people at the zone. Automation waited for it to clear and it did not.', 'Reject unless you can see it is a passer-by: the vehicle also looks again before it lets go.'),
   DZ_OCCUPIED: R('Pad occupied', 'The pad is occupied.'),
   DZ_GUST_AT_ZONE: R('Gusts at the drop zone', 'A multirotor descends to a low hover to release, and the gust at the zone is above its descent limit.'),
   DZ_CLOSED: R('Drop zone closed', 'The drop zone is closed or unknown.'),
   DZ_WRONG_SURFACE: R('Wrong surface', 'The drop zone is on land or water that this vehicle cannot reach.'),
   DZ_SLOPE: R('Ground too steep', 'The slope at the drop zone is over the limit for a release.'),
   // link
-  LINK_COVERAGE_GAP: R('Link gap on the route', 'The link is predicted to drop on the route for longer than allowed, and no backup radio covers the gap.'),
+  LINK_COVERAGE_GAP: R('Link gap on the route', 'The link is predicted to drop on the route for longer than allowed, and no backup radio covers the gap.', 'Approve only if the failsafe return from the gap is acceptable; else reject.'),
   LINK_BACKUP_SLOW: R('On a slow backup link', 'The main link is down and the backup radio carries only a low data rate.'),
   LINK_PLAN_UNKNOWN: R('Failsafe not read', 'The vehicle’s lost-link failsafe has not been read, so what it does if the link drops is not known.'),
   LINK_FAILSAFE_MISMATCH: R('Failsafe is not the policy’s', 'The vehicle’s lost-link failsafe is not what policy wants.'),
   LINK_FAILSAFE_UNSAFE: R('Failsafe would strand it', 'If the failsafe trips on the route, the return from there exceeds the battery.'),
   // navigation
-  NAV_DEGRADED_ACCURACY: R('Position fix less accurate', 'The vehicle has a fix, but its accuracy is below what an order needs.'),
+  NAV_DEGRADED_ACCURACY: R('Position fix less accurate', 'The vehicle has a fix, but its accuracy is below what an order needs.', 'Reject unless the route is short and clear of people: the fix may be jammed or spoofed.'),
   NAV_LOW_SATS: R('Few satellites', 'The vehicle tracks fewer satellites than it should.'),
   NAV_HIGH_HDOP: R('Poor satellite geometry', 'The satellites it tracks are badly placed, so the fix is less certain.'),
   NAV_TRUST_UNKNOWN: R('Navigation state unknown', 'There are not enough recent position facts to say whether its navigation can be trusted.'),
@@ -104,7 +107,7 @@ export const REASONS: Record<string, Reason> = {
   ORDER_WORLD_UNKNOWN: R('Delivery facts missing', 'The places, parcels or orders the check needs are not available, so it cannot be judged.'),
   ORDER_REROUTE_JOIN: R('New route starts too far away', 'The new route starts farther from the vehicle than it may join within.'),
   ORDER_HUB_UNNAMED: R('Not a hub', 'The return names a point that is not a hub: a person decides whether it is a fit place to land.'),
-  ORDER_NO_DELIVER_WAITING: R('No delivery waits for this', 'No delivery for this parcel and zone is queued or waiting, so there is nothing to confirm.'),
+  ORDER_NO_DELIVER_WAITING: R('No delivery waits for this', 'The strict procedure: no delivery for this parcel and zone is queued or waiting, so there is nothing to confirm.'),
   ORDER_ABORT_TARGET: R('Nothing to abort', 'The order to stop is not running on this vehicle.'),
   ABORT_PARCEL_RELEASED: R('Parcel already released', 'A released parcel cannot be taken back, so the delivery cannot be aborted.'),
   INPUT_UNKNOWN: R('A fact is missing', 'A fact the rule needs is not known.'),
@@ -198,6 +201,8 @@ export function inputRows(rule: string, detail: string): InputRow[] {
     if (p) rows.push({ label: 'People seen', value: p[1] })
     const c = /was not confirmed within (\d+) s/.exec(detail)
     if (c) rows.push({ label: 'Last confirmation', value: `none in the last ${Math.round(num(c[1]) / 60)} min` })
+    const a = /is not an approved delivery point \(([^)]+)\)/.exec(detail)
+    if (a) rows.push({ label: 'Approval', value: a[1], tone: 'near' })
   }
   return rows
 }

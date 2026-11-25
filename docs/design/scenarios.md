@@ -69,8 +69,9 @@ Mason (37.8060, -122.4290) and Pier 39 (37.8100, -122.4110). The plane serves Sa
 
 **Demand.** A seeded generator: 3 parcels a minute on average for 60 minutes (about 180), mass
 from 0.2 to 4 kg (above 2.5 kg only cars, boats and the plane can carry it), 60% normal priority,
-30% high, 8% urgent, 2% low. About 40 drop zones, of which 12 are doorsteps or kerbs that start
-unconfirmed.
+30% high, 8% urgent, 2% low. About 40 drop zones, each an approved delivery point (surveyed, or
+chosen by its customer; rules 2). Under the strict comparison procedure (`sim/policy-strict.toml`)
+the doorsteps and kerbs start unconfirmed.
 
 **Policy.** The defaults in [delivery-orders.md](delivery-orders.md), section 9. The weather rule
 bands at their defaults.
@@ -91,9 +92,9 @@ The generator makes many more items; these are the scripted ones the error measu
 
 | item | cause (reason code) | reference |
 | --- | --- | --- |
-| first delivery to each of 12 unconfirmed doorsteps | `DZ_UNCONFIRMED` | **approve** where the zone is clear in the observation feed; **reject** where an observation says people near |
+| first delivery to each of 12 unconfirmed doorsteps (strict procedure only) | `DZ_UNCONFIRMED` | **approve** where the zone is clear in the observation feed; **reject** where an observation says people near |
 | delivery routed across the street fair | `GEOFENCE_TEMP_SOON` or monitor reroute held for length | **approve** reroute under 25% added distance, **reject** longer |
-| delivery to dz-fort-mason-3 during the crowd | `DZ_PEOPLE_NEAR` | **reject** (abort and return) |
+| delivery to dz-fort-mason-3 during the crowd | from rules 2 an alert, `drop_not_clear`: automation waited, kept the parcel and brought it back; under the strict procedure `DZ_PEOPLE_NEAR` | nothing to decide (rules 2); **reject** (strict) |
 | drones on LOS after failover with thin reserve | `ENERGY_MARGIN_THIN` | **approve** if margin positive and parcel urgent; **reject** otherwise |
 | boat order to Angel Island dock at low tide | `TIDE_SHALLOW` | **reject** or wait; approve only after the level rises |
 | drone with no battery reading | `ENERGY_BATTERY_UNKNOWN` | **reject**, recall the vehicle |

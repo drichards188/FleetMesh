@@ -540,21 +540,20 @@ async fn an_agent_proposes_a_delivery_that_waits_for_a_person_and_can_never_appr
     let places = r.ok(&planner(), "get_places", json!({})).await;
     assert!(places["hubs"].as_array().is_some_and(|h| h.len() >= 2), "{places}");
     assert!(places["drop_zones"].as_array().is_some_and(|z| z.iter().any(|z| z["id"] == "dz-harbour-17")), "{places}");
-    // a delivery to a zone nobody confirmed: held, so it waits in the inbox, whatever its kind's tier
+    // a delivery to a populated zone nobody has looked at lately: held, so it waits in the inbox,
+    // whatever its kind's tier (the zone itself is a standing approved delivery point, rules 2)
     let out = r.ok(&planner(), "propose_intent", deliver_order("dz-harbour-17", "Deliver p-1 with drone 5")).await;
     let id = out["id"].as_u64().expect("id");
     assert_eq!(out["state"], "pending_approval", "{out}");
     assert_eq!(out["dispatched"], false);
     let checks = out["intent"]["checks"].as_array().expect("checks");
-    let codes: Vec<&str> = checks.iter().flat_map(|c| c["codes"].as_array().cloned().unwrap_or_default()).filter_map(|c| c.as_str().map(|_| "")).collect();
-    let _ = codes;
-    assert!(
-        checks.iter().any(|c| c["codes"].as_array().is_some_and(|k| k.iter().any(|k| k == "DZ_UNCONFIRMED"))),
-        "{out}"
-    );
+    let has = |code: &str| checks.iter().any(|c| c["codes"].as_array().is_some_and(|k| k.iter().any(|k| k == code)));
+    assert!(has("DZ_OBSERVATION_STALE"), "{out}");
+    assert!(!has("DZ_UNCONFIRMED") && !has("DZ_NOT_APPROVED"), "a standing approved point needs no confirmation: {out}");
     let inbox = r.ok(&planner(), "get_inbox", json!({})).await;
     assert!(inbox["pending"].as_array().is_some_and(|p| p.iter().any(|i| i["id"] == id)), "{inbox}");
-    // a confirmation of the zone: always a person's. The agent may propose it and explain it.
+    // a confirmation of a zone (from rules 2: the approval of a delivery point): always a
+    // person's. The agent may propose it and explain it.
     let confirm = r
         .ok(
             &planner(),
@@ -1674,6 +1673,7 @@ fn lost(uid: Uid) -> crate::decision::alerts::Alert {
         since_t: 100.0 + uid as f64,
         op_id: None,
         intent_id: None,
+        issue: None,
     }
 }
 

@@ -150,6 +150,21 @@ impl Decision {
         Ok(out)
     }
 
+    /// The dispatcher's dry run (delivery_rt): what a proposal would get now (its checks, the
+    /// policy's tier, the state it would reach), with no intent created, so a hold that
+    /// automation waits out never reaches the inbox. Read as [`Self::agent_propose`] reads the
+    /// world; logged as `agent.action intent.preview`.
+    pub(super) async fn agent_dry_run(&self, agent: &AgentId, req: &IntentRequest) -> Result<fleetmesh_decide::engine::Preview, DecisionError> {
+        let proposal = self.agent_proposal(req)?;
+        self.prefetch_grouped(&proposal.task, &proposal.uids, proposal.group.as_ref()).await;
+        let mut guard = self.lock();
+        guard
+            .engine
+            .agent_port(agent.clone())
+            .preview(proposal, &self.snapshot(), &self.terrain.oracle())
+            .map_err(engine_err)
+    }
+
     /// Withdraw one of the agent's own intents before dispatch. Another agent's or a
     /// human's intent is refused (403); so is one already dispatched or ended (409). With
     /// `if_state` (`withdraw_intent`'s), a state name (an unknown one is 400), the intent's

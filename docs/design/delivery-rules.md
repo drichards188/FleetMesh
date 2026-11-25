@@ -40,8 +40,14 @@ hub: if a rule returns `NotEvaluated` for these, the order is refused. Fail clos
    `abort` skip the energy, payload and weather rules (they may still be refused by geofence
    and navigation rules that make them impossible). A vehicle that cannot take a delivery can
    still be told to stop.
-6. **Rules are versioned.** All rules below are rules version 1. Changing any of them after the
-   first commit means a new `*_SINCE` constant ([rules-versioning.md](rules-versioning.md)).
+6. **Rules are versioned.** The rules below are rules version 1 except where a section says
+   "from rules 2". Changing any of them means a new `*_SINCE` constant
+   ([rules-versioning.md](rules-versioning.md)); rules 2 is `STANDING_APPROVALS_SINCE` (standing
+   approved delivery points, section 10).
+7. **A person is asked about exceptions only.** Routine deliveries run with no person (rules 2,
+   docs/DECISIONS.md 2026-11-25). What real operations automate (a stale fact read again,
+   departures sequenced round other traffic, the drop-time look) is automation's: the dispatcher
+   waits it out before anything reaches the inbox, and no check's threshold moved for it.
 
 ## 3. Rule list and applicability
 
@@ -377,7 +383,16 @@ elevation_m = 3.1          # optional; terrain gives it otherwise
 confirmed_t = ""           # last confirmation time, set by the engine from approved confirm_drop_zone
 closed = false
 populated = true
+approval = "customer"      # rules 2: survey | customer | withdrawn; absent: a new delivery point
 ```
+
+**Standing approvals (rules 2).** Real operators approve delivery spots ahead of time: Amazon
+surveys obstacle-free delivery zones and marks reachable delivery points in them, and Wing delivers
+to a spot the customer chose (about 6 by 6 ft, nothing overhead) until the customer picks another.
+Nobody authorises individual drops. A zone's `approval` records how it became an approved delivery
+point: `survey`, `customer`, or `withdrawn` (it was, and is not now). A hub pad is approved with its
+hub. A person approves any other point once (`confirm_drop_zone`, or by approving a delivery held
+for it), and that approval stands from then on.
 
 **Inputs.** The drop-zone record; the area set (is the zone in a `populated` area); the terrain and
 tide at the zone; the weather sample at the zone; the latest observation of the zone (scenario
@@ -393,20 +408,30 @@ last confirmation.
 - latest observation `occupied` and recent (`dropzone.obs_max_age_s`, 30): refuse `DZ_OCCUPIED` for
   a pad, hold `DZ_PEOPLE_NEAR` for a doorstep or kerb (a person could judge it a passer-by);
 - observation unknown or older than the limit, and the zone is `populated`: hold `DZ_OBSERVATION_STALE`;
-- zone not confirmed within `dropzone.confirm_valid_s` (3600) and its kind is not `pad` at a hub:
-  hold `DZ_UNCONFIRMED`;
+- from rules 2, with `dropzone.standing_approvals` (the default): the zone is not an approved
+  delivery point (no standing approval, not a hub pad, not approved by a person; or its approval
+  was withdrawn): hold `DZ_NOT_APPROVED`. An approved point needs no confirmation and has no time
+  limit;
+- under rules 1, and from rules 2 with `standing_approvals = false` (the strict comparison
+  procedure, `sim/policy-strict.toml`): zone not confirmed within `dropzone.confirm_valid_s`
+  (3600) and its kind is not `pad` at a hub: hold `DZ_UNCONFIRMED`;
 - terrain slope at the zone above `dropzone.max_slope_deg` (10) for a land release: refuse
   `DZ_SLOPE`;
 - boat to a `dock` when the tide check flags `TIDE_DOCK_LEVEL`: the weather rule's hold already
   applies.
 - otherwise allow.
 
-At execution time the same rule runs again against live observations before release: the task
-layer moves the order to `awaiting_confirmation` instead of releasing if the rule would now hold or
-refuse. A refuse at that point ends the `deliver` as `failed` with the reason and the parcel stays
-aboard.
+At execution time the vehicle looks again before release (from rules 2, the drop-time look,
+[delivery-orders.md](delivery-orders.md) section 5.2): clear releases; occupied, unknown or a look
+older than `obs_max_age_s` makes it wait over the zone and look again, and a zone that stays not
+clear for the bounded wait ends the `deliver` as `failed` with the parcel aboard, the vehicle
+brought home and the person told by an issue alert. The look is the vehicle's behaviour after
+dispatch, recorded as op states and `delivery.event`s, not a decision replay re-derives. Before
+departure the dispatcher reads the zone's look as this rule does and waits while it would hold,
+so a busy doorstep costs a delay, not a person's decision.
 
-**Knobs.** `dropzone.confirm_valid_s` 3600, `dropzone.obs_max_age_s` 30, `dropzone.descent_gust_mps` 8,
+**Knobs.** `dropzone.standing_approvals` (rules 2; absent: true), `dropzone.confirm_valid_s` 3600
+(with standing approvals off), `dropzone.obs_max_age_s` 30, `dropzone.descent_gust_mps` 8,
 `dropzone.max_slope_deg` 10.
 
 ## 11. Lost link (`lost_link`)
@@ -486,7 +511,10 @@ dispatch.
   the vehicle order is shuffled.
 - Nav integrity: each trust state from facts; hysteresis; jump check; range mismatch; the order
   table; slow spoof under the thresholds passes (documenting the gap).
-- Drop zone: each branch; execution-time recheck moves to `awaiting_confirmation`.
+- Drop zone: each branch; a standing approval passes with no time limit, a new point holds
+  `DZ_NOT_APPROVED` until a person approves it, a withdrawn approval holds; the strict procedure
+  and rules 1 hold `DZ_UNCONFIRMED` outside `confirm_valid_s`; the drop-time look waits and keeps
+  the parcel when the zone stays not clear.
 - Lost link: expected plan mismatch refuses; coverage gap holds; failover note logged.
 - Replay: every rule round-trips; a tampered check outcome in the log is reported.
 - Property: `refuse` for a safety order only when the rule's own list says so.
@@ -509,6 +537,14 @@ dispatch.
 7. Whether `hold` and `unverified` should stay two outcomes after the first studies, or merge.
 
 ## 15. As built (2026-11-25)
+
+Rules 2 (`STANDING_APPROVALS_SINCE`): the drop-zone rule's confirmation part, `policy_facts`'s
+`hub_or_confirmed` for a `deliver`, and the order rule's `ORDER_NO_DELIVER_WAITING` for a
+`confirm_drop_zone` branch on `RulesConfig::standing_approvals`; each keeps its rules 1 words for
+rules 1 and the strict procedure, so a rules 1 log replays unchanged. Tests:
+`crates/fleetmesh-decide/tests/delivery.rs` (each branch, both versions, both settings, a rules 1
+log and a rules 2 log replayed, each given the other's header).
+
 
 `crates/fleetmesh-decide/src/delivery_rules.rs`, tests in `crates/fleetmesh-decide/tests/delivery.rs`.
 Every check returns one result per vehicle with its reason codes (`CheckResult::codes`), and a

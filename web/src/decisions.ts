@@ -167,6 +167,14 @@ export interface Alert {
     | 'node_reported_again'
     // the navigation monitor proposed a safe order for a vehicle whose navigation is untrusted
     | 'nav_monitor'
+    // automation kept a parcel: its drop zone did not look clear (before departure or over it)
+    | 'drop_not_clear'
+    // parcels wait for a drop zone nobody approved as a delivery point
+    | 'zone_not_approved'
+    // a return to a hub failed and automation stopped trying it
+    | 'return_failed'
+    // a delivery failed its tries and automation gave the parcel up
+    | 'delivery_failed'
   severity: Severity
   uid: number
   callsign: string | null
@@ -176,6 +184,8 @@ export interface Alert {
   intent_id?: number
   /** folded into this swarm alert (`Inbox.swarm_alerts`): the Inbox shows it inside that card only */
   folded_into?: string
+  /** an issue automation raised: what happened, what it did, what the person might do */
+  issue?: { problem: string; did: string; recommend: string }
 }
 
 export interface Inbox {
@@ -220,6 +230,24 @@ export const ALERT_LABEL: Record<Alert['kind'], string> = {
   node_lost: 'CONFIRMED LOST',
   node_reported_again: 'LOST, REPORTING AGAIN',
   nav_monitor: 'NAVIGATION MONITOR ACTED',
+  drop_not_clear: 'NOT DELIVERED: ZONE NOT CLEAR',
+  zone_not_approved: 'DROP ZONE NOT APPROVED',
+  return_failed: 'RETURN FAILED',
+  delivery_failed: 'DELIVERY GIVEN UP',
+}
+
+/** For an alert the bridge derives from a vehicle's state (an issue automation raised carries its
+ *  own words): what automation has already done, and the response it recommends. */
+export const ALERT_RESPONSE: Partial<Record<Alert['kind'], { did: string; recommend: string }>> = {
+  lost_link: { did: 'The vehicle follows its own lost-link failsafe (it heads home); orders for it wait in the queue until it is heard again.', recommend: 'Watch it on the map; act only if it does not come home or its link does not return.' },
+  not_moving: { did: 'Nothing: its order still runs.', recommend: 'Look at the vehicle; order a hold or a return to a hub if it is stuck.' },
+  left_task: { did: 'Nothing: it left its order (a failsafe or a hand on it).', recommend: 'Look at what it does; re-order it or let it go home.' },
+  task_failed: { did: 'Nothing more: the order ended without being carried out.', recommend: 'Look at the order’s detail; the dispatcher tries a delivery again on its own.' },
+  ack_timeout: { did: 'The bridge sent the order and heard no answer.', recommend: 'Check its link; send the order again if it is still needed.' },
+  may_be_running: { did: 'Nothing is re-sent: its start went out before the link was lost.', recommend: 'Decide what it should do once it is heard; look at it on the map.' },
+  restore_pending: { did: 'The bridge keeps asking the vehicle to restore its own failsafe values.', recommend: 'Wait; look at it if it does not confirm them.' },
+  path_crosses_land: { did: 'Its safety order went as ordered.', recommend: 'Watch its way home over land.' },
+  nav_monitor: { did: 'The navigation monitor proposed a safe order for it.', recommend: 'Approve the safe order if it waits for you; watch it until its navigation recovers.' },
 }
 
 // ---- operator ------------------------------------------------------------------------------

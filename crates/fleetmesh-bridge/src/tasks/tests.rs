@@ -502,6 +502,11 @@ impl Fake {
                         self.seq += 1;
                     }
                     apm::MavCmd::MAV_CMD_DO_JUMP => self.seq = it.param1 as u16,
+                    // a DO_ item (the gripper): done where it is, never flown to
+                    apm::MavCmd::MAV_CMD_DO_GRIPPER => {
+                        self.counted("mission MAV_CMD_DO_GRIPPER");
+                        self.seq += 1;
+                    }
                     _ => {
                         if self.move_toward(lat, lon, dt)
                             && usize::from(self.seq) + 1 < self.mission.len()
@@ -1693,4 +1698,76 @@ pub(crate) fn test_platforms() -> std::path::PathBuf {
         path
     })
     .clone()
+}
+
+// ---- the drop-time look (docs/design/delivery-orders.md section 5.2) ------------------------
+
+/// A delivery flown as the decision layer sends it: a transit to the zone that releases there,
+/// with the drop-time look the decision layer gives (`clear` says what the look sees).
+fn looked_delivery(uid: Uid, cell: &Arc<VehicleCell>, clear: Arc<AtomicBool>, wait: Duration) -> TaskOrder {
+    let mut order = TaskOrder::new(
+        request(
+            "transit",
+            &[uid],
+            TaskParams {
+                route: Some(vec![[LON + 0.003, LAT]]),
+                action: Some("deliver".into()),
+                release: Some("winch".into()),
+                ..TaskParams::default()
+            },
+        ),
+        &fleet(&[cell]),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    order.look = Some(DropLook {
+        look: Arc::new(move || if clear.load(Ordering::SeqCst) { Ok("clear".into()) } else { Err("occupied, 2 seen".into()) }),
+        wait,
+    });
+    order
+}
+
+async fn until_detail(op: &OpCell, has: &str, limit_s: u64) -> OpSnapshot {
+    for _ in 0..limit_s * 10 {
+        if op.snapshot().detail.contains(has) || op.finished() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    op.snapshot()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delivery_waits_over_a_drop_zone_that_is_not_clear_and_lets_go_once_it_is() {
+    let (copter, w) = watched(41, Firmware::Copter, Quirks { speed: 20.0, ..Quirks::default() });
+    sleep(Duration::from_millis(500)).await;
+    let tm = TaskManager::default();
+    let clear = Arc::new(AtomicBool::new(false));
+    let t = tm.dispatch_unchecked(looked_delivery(41, &copter, clear.clone(), Duration::from_secs(120)));
+    // over the zone, not clear: it waits there and says so; nothing is let go
+    let s = until_detail(&t.ops[0], "not clear", 300).await;
+    assert!(s.detail.contains("not clear (occupied, 2 seen)"), "{s:?}");
+    assert!(!t.ops[0].finished(), "{s:?}");
+    assert_eq!(w.count("MAV_CMD_DO_GRIPPER"), 0, "no release while the zone is not clear");
+    sleep(Duration::from_secs(30)).await;
+    assert!(!t.ops[0].finished(), "still waiting");
+    assert!(copter.read(|v| v.airborne()), "hovering over the zone");
+    // clear now: it lets go, once, by command
+    clear.store(true, Ordering::SeqCst);
+    let s = settle(&t.ops[0], 60).await;
+    assert_eq!(s.state, Done, "{s:?}");
+    assert_eq!(s.detail, "the parcel released");
+    assert_eq!(w.count("MAV_CMD_DO_GRIPPER"), 1, "released by command after the look");
+    assert_eq!(w.count("mission MAV_CMD_DO_GRIPPER"), 0, "no release item in the mission");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drop_zone_that_stays_not_clear_keeps_the_parcel_aboard_and_fails_the_delivery() {
+    let (copter, w) = watched(42, Firmware::Copter, Quirks { speed: 20.0, ..Quirks::default() });
+    sleep(Duration::from_millis(500)).await;
+    let tm = TaskManager::default();
+    let t = tm.dispatch_unchecked(looked_delivery(42, &copter, Arc::new(AtomicBool::new(false)), Duration::from_secs(20)));
+    let s = settle(&t.ops[0], 400).await;
+    assert_eq!(s.state, Failed, "{s:?}");
+    assert!(s.detail.starts_with("drop zone not clear: occupied, 2 seen after waiting 20 s"), "{}", s.detail);
+    assert_eq!(w.count("MAV_CMD_DO_GRIPPER"), 0, "the parcel was never let go");
 }

@@ -6,7 +6,12 @@
 # [[hub]]       id, lon, lat, radius_m (its landing zone), pads, packs (charged batteries), open
 # [[dropzone]]  id, kind (pad | doorstep | locker | dock | kerb), lon, lat, radius_m, surface
 #               (land | water), populated, hub (a pad's hub: no confirmation needed), closed,
-#               elevation_m, slope_deg, dock_level_m (a dock's deck above the tide datum)
+#               elevation_m, slope_deg, dock_level_m (a dock's deck above the tide datum),
+#               approval: how it became an approved delivery point ahead of time (rules 2):
+#               "survey" (surveyed and marked, as Amazon's delivery zones), "customer" (the
+#               customer chose the spot, as Wing's customers do) or "withdrawn" (approved once,
+#               not now). A zone without one is a new delivery point: a person approves it once
+#               (confirm_drop_zone) and that approval stands. A hub pad is approved with its hub.
 
 [[hub]]
 id = "hub-presidio"
@@ -38,6 +43,7 @@ packs = 2
 [[dropzone]]
 id = "dz-crissy-pad"
 kind = "pad"
+approval = "survey"
 lon = -122.4652
 lat = 37.8042
 radius_m = 3
@@ -47,6 +53,7 @@ hub = "hub-presidio"
 [[dropzone]]
 id = "dz-harbour-17"
 kind = "doorstep"
+approval = "customer"
 lon = -122.4119
 lat = 37.8087
 radius_m = 4
@@ -57,6 +64,7 @@ elevation_m = 3.1
 [[dropzone]]
 id = "dz-marina-kerb"
 kind = "kerb"
+approval = "survey"
 lon = -122.4405
 lat = 37.8015
 radius_m = 5
@@ -66,6 +74,7 @@ populated = true
 [[dropzone]]
 id = "dz-pier-dock"
 kind = "dock"
+approval = "survey"
 lon = -122.4152
 lat = 37.8172
 radius_m = 6

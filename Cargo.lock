@@ -884,6 +884,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleetmesh-tracker"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fleetmesh-traffic"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "flate2",
+ "fleetmesh-linkemu",
+ "fleetmesh-space",
+ "rand 0.9.5",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "fleetmesh-weather"
 version = "0.1.0"
 dependencies = [

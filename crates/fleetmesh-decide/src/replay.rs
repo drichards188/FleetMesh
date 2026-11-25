@@ -1264,6 +1264,19 @@ fn replay_inner<S: AsRef<str>>(
                 // recompute with the rules the log was produced under
                 let mut p = p.clone();
                 p.rules.rules_version = version;
+                // rules 2: a key its version did not have (a newer log given an older header)
+                if !p.rules.at_least(crate::rules::STANDING_APPROVALS_SINCE)
+                    && p.rules.delivery.as_ref().is_some_and(|d| d.dropzone.standing_approvals.is_some())
+                {
+                    bad(
+                        &mut r,
+                        e,
+                        None,
+                        "a field newer than the log's rules version (rules markers)",
+                        "policy.rules.delivery.dropzone.standing_approvals".into(),
+                        format!("absent before rules {}", crate::rules::STANDING_APPROVALS_SINCE),
+                    );
+                }
                 // rules 10: the relying party and the passkeys the run started with
                 if let Some(pk) = listed.as_ref().and_then(|ro| ro.passkeys.as_ref())
                 {
@@ -1420,6 +1433,7 @@ fn replay_inner<S: AsRef<str>>(
                     }
                 };
                 check_terrain(&mut r, e, *intent, &inputs);
+                check_markers(&mut r, e, *intent, &inputs, &pol.rules);
                 // rules 34: a group order's check is its layout and its members' results, both
                 // recomputed; any other check logs no layout
                 let group_eval = crate::group::is_group(&tr.spec, &pol.rules).then(|| crate::group::evaluate(&tr.spec, &inputs, &pol.rules));
@@ -5255,6 +5269,31 @@ fn check_waiting(
             "human-order-waiting facts differ",
             json(logged),
             json(&want),
+        );
+    }
+}
+
+/// The fields a decision's inputs carry that its rules version did not have
+/// ([`crate::rules::RULES_MARKERS`]): from rules 2 a drop zone's standing `approval`.
+fn check_markers(r: &mut ReplayReport, e: &Event, id: IntentId, w: &WorldSnapshot, rules: &crate::rules::RulesConfig) {
+    if rules.at_least(crate::rules::STANDING_APPROVALS_SINCE) {
+        return;
+    }
+    let approved: Vec<String> = w
+        .delivery
+        .iter()
+        .flat_map(|d| d.places.drop_zones.values())
+        .filter(|z| z.approval.is_some())
+        .map(|z| z.id.clone())
+        .collect();
+    if !approved.is_empty() {
+        bad(
+            r,
+            e,
+            Some(id),
+            "a field newer than the log's rules version (rules markers)",
+            format!("check.result.inputs.delivery.places.drop_zones.approval on {}", approved.join(", ")),
+            format!("absent before rules {}", crate::rules::STANDING_APPROVALS_SINCE),
         );
     }
 }

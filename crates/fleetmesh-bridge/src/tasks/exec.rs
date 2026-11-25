@@ -68,6 +68,8 @@ const LEFT_MODE_GRACE_S: f64 = 3.0;
 const STALL_MIN_SPEED: f64 = 0.3;
 /// The height a multirotor goes down to over a drop zone to let a parcel go, m above home.
 const DROP_ALT_M: f64 = 10.0;
+/// How often a vehicle at its drop zone looks again while the zone is not clear.
+const LOOK_EVERY: Duration = Duration::from_secs(2);
 
 /// How an op delivers its order: fresh, or (after a bridge restart) knowing the vehicle may
 /// hold it already.
@@ -132,6 +134,8 @@ pub struct OpCtx {
     pub requeue: bool,
     /// rules 7: the start is logged ahead of sending it through this
     pub ahead: Option<super::WriteAhead>,
+    /// a delivery's drop-time look: asked at the zone before the release
+    pub look: Option<super::DropLook>,
 }
 
 /// Start the op. A panic inside it fails the op instead of leaving it hanging.
@@ -392,22 +396,37 @@ enum OnVehicle {
 /// while, say so. The autopilot can be in AUTO and still not going anywhere (aground, fouled,
 /// stuck): that's what the operator needs to see. "A while" is 10 s on a streaming link and
 /// longer where speed is reported less often (`LinkTiming::stall_after_s`): a vehicle on
-/// HIGH_LATENCY2 every 5 s, or 20 s under water, must not read as stuck between reports.
+/// HIGH_LATENCY2 every 5 s, or 20 s under water, must not read as stuck between reports. A
+/// multirotor climbing after takeoff or going down to its drop hover moves with no ground speed:
+/// a height that changed by [`STALL_MIN_CLIMB_M`] counts as moving.
 struct StallWatch {
     moving_at: f64,
+    /// the height when it was last seen moving
+    alt_at: Option<f64>,
 }
+
+/// A change of height, m, that counts as moving (a climb or a descent in place).
+const STALL_MIN_CLIMB_M: f64 = 1.0;
 
 impl StallWatch {
     fn new() -> StallWatch {
         StallWatch {
             moving_at: clock::mono(),
+            alt_at: None,
         }
     }
 
     fn detail(&mut self, v: &Vehicle, timing: &LinkTiming, base: String) -> String {
         let now = clock::mono();
-        if v.groundspeed.unwrap_or(0.0) >= STALL_MIN_SPEED {
+        let climbed = match (v.alt_rel, self.alt_at) {
+            (Some(a), Some(b)) => (a - b).abs() >= STALL_MIN_CLIMB_M,
+            _ => false,
+        };
+        if v.groundspeed.unwrap_or(0.0) >= STALL_MIN_SPEED || climbed {
             self.moving_at = now;
+            self.alt_at = v.alt_rel;
+        } else if self.alt_at.is_none() {
+            self.alt_at = v.alt_rel;
         }
         let stalled = now - self.moving_at;
         if stalled >= timing.stall_after_s() {
@@ -1433,6 +1452,12 @@ impl Task<'_> {
         // a copter that comes home lands there; one that delivers by landing is put down after
         let land_end = action == "home" && hover && self.caps.land.is_some();
         let land_release = action == "deliver" && hover && self.ctx.params.release.as_deref() == Some("land");
+        // the drop-time look: a multirotor goes down to its low hover over the zone, looks, and
+        // lets go only when the zone is clear (the release is commanded then, not a mission item:
+        // the stand-ins skip a DO_GRIPPER mission item); a fixed wing cannot hover to look and
+        // drops as its mission says
+        let look = if action == "deliver" && !fixed_wing { self.ctx.look.clone() } else { None };
+        let looked_release = look.is_some() && hover && !land_release;
         // a pickup where the vehicle already is: nothing to fly
         if action == "pickup" {
             let near = self
@@ -1453,7 +1478,10 @@ impl Task<'_> {
             for [lon, lat] in &route {
                 items.push(Item::waypoint(*lat, *lon, alt));
             }
-            if flies && action == "deliver" && !land_release {
+            if looked_release {
+                // down to the low hover over the zone, held there while it looks
+                items.push(Item::waypoint(end_lat, end_lon, DROP_ALT_M));
+            } else if flies && action == "deliver" && !land_release {
                 // a multirotor goes down to a low hover over the zone and lets the parcel go
                 // (MAV_CMD_DO_GRIPPER, the servo the params define); a fixed wing drops from its height
                 if hover {
@@ -1466,6 +1494,8 @@ impl Task<'_> {
             }
             if land_end {
                 items.push(Item::nav(apm::MavCmd::MAV_CMD_NAV_LAND, end_lat, end_lon, 0.0));
+            } else if looked_release {
+                items.push(Item::nav(apm::MavCmd::MAV_CMD_NAV_LOITER_UNLIM, end_lat, end_lon, DROP_ALT_M));
             } else {
                 items.push(Item::nav(apm::MavCmd::MAV_CMD_NAV_LOITER_UNLIM, end_lat, end_lon, alt));
             }
@@ -1482,7 +1512,7 @@ impl Task<'_> {
         let total = items.len();
         // the item before the last one (its hold follows it): reached when the route is flown
         let end_wp = (total.saturating_sub(2)) as u16;
-        let sees_release = action == "deliver" && !land_release;
+        let sees_release = action == "deliver" && !land_release && !looked_release;
         // on its hold item (a blimp, whose firmware skips it, at its mission's end on its last
         // waypoint), near the end; a release is waited for in the vehicle's own report of its
         // gripper (no report, no wait)
@@ -1512,10 +1542,19 @@ impl Task<'_> {
             _ => "at the route's end, holding",
         };
         self.run_mission_to(items, candidates, done, progress).await?;
+        // the drop-time look, before anything is let go
+        if let Some(look) = &look {
+            self.look_at_zone(look).await?;
+        }
         match action.as_str() {
             "pickup" => {
                 self.op().narrate("at the pickup site: loading");
                 self.grip(true).await?;
+            }
+            "deliver" if looked_release => {
+                // the zone looked clear from the low hover: let go
+                self.op().narrate("over the drop zone, clear: releasing");
+                self.grip(false).await?;
             }
             "deliver" if land_release => {
                 // put down at the zone, then the release
@@ -1544,6 +1583,39 @@ impl Task<'_> {
         self.op().set(OpState::Done, what.to_string());
         self.op().set_progress(Some("holding at the route's end".into()));
         Ok(())
+    }
+
+    /// The drop-time look ([`super::DropLook`]): look at the zone until it is clear, waiting and
+    /// looking again every [`LOOK_EVERY`] while it is not, for at most the look's wait. A zone that
+    /// stays not clear fails the op with the parcel still aboard: the detail starts with
+    /// `drop zone not clear`, which the dispatcher reads to bring it home and tell the person.
+    async fn look_at_zone(&self, look: &super::DropLook) -> Result {
+        let wait_s = look.wait.as_secs();
+        let deadline = Instant::now() + look.wait;
+        let mut said: Option<String> = None;
+        loop {
+            match (look.look)() {
+                Ok(seen) => {
+                    if said.is_some() {
+                        self.op().narrate(format!("over the drop zone: clear now ({seen})"));
+                    }
+                    return Ok(());
+                }
+                Err(seen) => {
+                    if Instant::now() >= deadline {
+                        return fail(format!(
+                            "drop zone not clear: {seen} after waiting {wait_s} s over it; the parcel is kept aboard"
+                        ));
+                    }
+                    if said.as_deref() != Some(seen.as_str()) {
+                        self.op().narrate(format!("over the drop zone, not clear ({seen}): waiting up to {wait_s} s and looking again"));
+                        said = Some(seen);
+                    }
+                    self.op().set_progress(Some("waiting over the drop zone for a clear look".into()));
+                }
+            }
+            sleep(LOOK_EVERY).await;
+        }
     }
 
     /// Grab (a parcel loaded at the hub) or release it: MAV_CMD_DO_GRIPPER, answered by the

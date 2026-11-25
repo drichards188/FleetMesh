@@ -1,11 +1,19 @@
 # FleetMesh DRAFT policy. First-draft values for a delivery fleet, not tuned and not reviewed by
 # the maintainer. Read by crates/fleetmesh-decide; the whole file is logged at the
-# start of every run and replay decides with that copy. Policy schema 1, rules version 1.
+# start of every run and replay decides with that copy. Policy schema 2, rules version 2.
 #
 # Routing follows docs/design/delivery-orders.md section 9: the nine delivery kinds (pickup,
 # deliver, hold, reroute, return_to_hub, land_now, abort, swap_battery, confirm_drop_zone). The
 # inherited kinds with no delivery counterpart (orbit, patrol, transit, rtl) keep their routine
-# tiers until they are removed. Rules version 1: no *_SINCE gate applies before the first commit.
+# tiers until they are removed.
+#
+# Management by exception (rules 2, docs/DECISIONS.md 2026-11-25): routine deliveries run with no
+# person. Delivery points are approved ahead of time (each drop zone's `approval` in the places
+# file: surveyed, or chosen by the customer), and a person is asked only when an issue comes up.
+# The drop-time look is automation's: a zone that does not look clear makes the vehicle wait and
+# look again, and after a bounded wait it keeps the parcel and comes home, and the person is told
+# (an alert, not a request). sim/policy-strict.toml keeps the earlier procedure (a person
+# confirms each zone every hour) for comparison.
 #
 # Every intent that passes the rules is routed by the first [[tier]] whose `when` matches:
 #   tier = "auto"   approved by policy, dispatched without a person
@@ -31,12 +39,17 @@
 #                                 a populated area
 #   final_approach = bool         abort: the target is a deliver in its last abort.final_approach_s
 #   unplanned_landing = bool      abort: its `then` puts the vehicle down away from a hub
-#   hub_or_confirmed = bool       pickup from a hub, deliver to a confirmed zone or a hub pad,
-#                                 reroute within reroute.auto_added_pct, battery swap at a hub
+#   hub_or_confirmed = bool       pickup from a hub, deliver to an approved delivery point (a
+#                                 standing approval, a hub pad, or one a person approved once;
+#                                 with standing_approvals = false: a zone confirmed within
+#                                 dropzone.confirm_valid_s, or a hub pad), reroute within
+#                                 reroute.auto_added_pct, battery swap at a hub
 # Any check that came out `hold` (delivery-rules.md section 1) sends the order to a person,
 # whatever tier matched: "a hold outcome from any check forces human". A tier marked
 # `locked = true` stays a human tier, and the loader refuses a file with an auto tier that
-# matches confirm_drop_zone (or matches every kind): that order is only ever a person's.
+# matches confirm_drop_zone (or matches every kind): that order is only ever a person's. From
+# rules 2 a confirm_drop_zone approves a new delivery point (one not on the standing list, or
+# one whose approval was withdrawn), once per zone, and the approval stands from then on.
 # Human tiers may also set: approvers = N (distinct approvers), proposer_may_approve = false, and
 # step_up = true (in a credentials run each approval re-enters the approver's password or
 # passkey, and the submitter's own request is never the approval).
@@ -48,7 +61,7 @@ step_up_factor = "password"                 # what a step-up takes in a credenti
                                             # password again, or a passkey (at least as strong)
 
 # How long a pending approval of a kind waits (delivery-orders.md section 9): a landing or an
-# abort is time critical, a drop-zone confirmation less so, a delivery longer.
+# abort is time critical, a new delivery point's approval less so, a delivery longer.
 [approval.kind.land_now]
 expire_s = 30
 
@@ -166,8 +179,13 @@ recover_s = 20.0
 speed_factor = 1.2
 
 [rules.delivery.dropzone]
-confirm_valid_s = 3600
-obs_max_age_s = 30.0
+standing_approvals = true                   # rules 2: an approved delivery point (the places
+                                            # file's `approval`, a hub pad, or a person's approval
+                                            # of a new point) needs no confirmation, with no time
+                                            # limit; false restores the per-hour confirmation
+confirm_valid_s = 3600                      # with standing_approvals = false: a person's
+                                            # confirmation of a zone stands this long
+obs_max_age_s = 30.0                        # a look at the zone older than this is stale
 descent_gust_mps = 8.0
 descent_gust_hard_mps = 10.0
 max_slope_deg = 10.0
@@ -199,7 +217,7 @@ reason = "stopping and going home reduce risk"
 name = "confirm-is-human"
 when = { kind = ["confirm_drop_zone"] }
 tier = "human"
-reason = "a person judges the drop zone"
+reason = "a person approves a new delivery point"
 locked = true
 
 [[tier]]

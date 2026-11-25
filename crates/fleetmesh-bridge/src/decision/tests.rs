@@ -766,6 +766,9 @@ async fn operator_views_are_logged_under_the_session() {
 /// The queue for unreachable vehicles through the bridge (`tests/queue.rs`, rules 5).
 mod queue;
 
+// management by exception (rules 2): the dispatcher's looks, waits, zone approvals and issues
+mod delivery;
+
 /// Rules 8 through the bridge's HTTP surface: logins, step-ups, agent keys (`tests/auth.rs`).
 mod auth;
 

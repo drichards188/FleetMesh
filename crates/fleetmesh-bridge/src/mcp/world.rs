@@ -348,7 +348,7 @@ pub fn places(mcp: &Mcp) -> Value {
         "t": clock::wall(),
         "hubs": p.hubs.values().collect::<Vec<_>>(),
         "drop_zones": p.drop_zones.values().collect::<Vec<_>>(),
-        "note": "Name them by id in pickup, deliver, return_to_hub, swap_battery and confirm_drop_zone. A drop zone not confirmed lately (and not a hub pad) holds a delivery for a person.",
+        "note": "Name them by id in pickup, deliver, return_to_hub, swap_battery and confirm_drop_zone. A drop zone's approval says how it became an approved delivery point ahead of time (survey, customer); a zone without one (or withdrawn) is a new point and holds a delivery until a person approves it once (confirm_drop_zone), after which it stands. A hub pad is approved with its hub.",
     })
 }
 

@@ -124,6 +124,10 @@ const ALERT_HEADLINE: Record<string, string> = {
   node_lost: 'For information: confirmed lost; it is out of the keep-outs and takes no order',
   node_reported_again: 'Confirmed lost, but it reported again: the loss is revoked, it counts again',
   nav_monitor: 'Its navigation is untrusted: the monitor proposed a safe order for it; look at it',
+  drop_not_clear: 'Not delivered: its drop zone did not look clear, and automation kept the parcel',
+  zone_not_approved: 'Parcels wait for a drop zone nobody approved',
+  return_failed: 'It could not be sent home: automation stopped trying; send it yourself',
+  delivery_failed: 'A delivery failed its tries: automation gave the parcel up',
 }
 
 /** An alert as headline (what it asks), the bridge's detail as up to three bullets, and the

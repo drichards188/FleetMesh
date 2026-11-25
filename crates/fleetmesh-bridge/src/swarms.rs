@@ -665,6 +665,7 @@ mod tests {
             since_t,
             op_id: None,
             intent_id: None,
+            issue: None,
         }
     }
 

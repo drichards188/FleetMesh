@@ -181,7 +181,25 @@ pub enum UnknownEndurance {
 /// with the rules it was produced under. `run.started` records it. FleetMesh starts at 1;
 /// new behaviour is gated on a named `*_SINCE` constant set to the version that adds it
 /// (never a literal), and replay is taught the same gate in the same change.
-pub const RULES_VERSION: u32 = 1;
+pub const RULES_VERSION: u32 = STANDING_APPROVALS_SINCE;
+
+/// Rules 2: delivery points are approved ahead of time and a person is asked only about an
+/// exception (docs/DECISIONS.md, 2026-11-25, "Routine deliveries need no person"). A drop zone
+/// that carries a standing approval (`approval = "survey"` or `"customer"` in the places file), a
+/// hub pad, or a zone a person approved with `confirm_drop_zone` passes the confirmation part of
+/// the drop-zone rule with no time limit; any other zone holds `DZ_NOT_APPROVED` (it was
+/// `DZ_UNCONFIRMED` within `confirm_valid_s` under rules 1). A `confirm_drop_zone` approves a
+/// delivery point and needs no delivery waiting for it. `[rules.delivery.dropzone]
+/// standing_approvals = false` restores the rules 1 procedure (the comparison setting).
+pub const STANDING_APPROVALS_SINCE: u32 = 2;
+
+/// The fields each rules version added to what a log carries: (the version that added it, where
+/// it is). Replay flags a log whose `run.started` claims an older version but that carries one of
+/// them (an event that could not have existed then: a newer log given an older header).
+pub const RULES_MARKERS: &[(u32, &str)] = &[
+    (STANDING_APPROVALS_SINCE, "policy.rules.delivery.dropzone.standing_approvals"),
+    (STANDING_APPROVALS_SINCE, "check.result.inputs.delivery.places.drop_zones.approval"),
+];
 
 /// The newest decision rules this build can decide under and replay: [`RULES_VERSION`] itself,
 /// except on a branch that builds the next version in stages. Replay accepts a log of any
@@ -200,8 +218,15 @@ pub const PREPARED_SPACE_MAX_AGE_MS: i64 = 5_000;
 /// and re-serializes byte for byte; `run.started` records it (absent: 1), and replay checks
 /// This is the one a run of the default rules logs; a run under older rules logs the schema they
 /// logged ([`RulesConfig::policy_schema`]: 9 under rules 34, 8 under rules 33, 7 below them, whose
-/// keys it does not log).
-pub const POLICY_SCHEMA: u32 = 1;
+/// keys it does not log). Schema 2 (rules 2, [`STANDING_APPROVALS_SINCE`]) adds
+/// `[rules.delivery.dropzone] standing_approvals`.
+pub const POLICY_SCHEMA: u32 = STANDING_APPROVALS_SCHEMA;
+
+/// The policy schema rules 2 logs: [`POLICY_SCHEMA_V1`] and `standing_approvals`.
+pub const STANDING_APPROVALS_SCHEMA: u32 = 2;
+
+/// The policy schema rules 1 logged.
+pub const POLICY_SCHEMA_V1: u32 = 1;
 
 /// The newest policy schema this build reads and replay accepts: [`POLICY_SCHEMA`], or the one
 /// rules being built behind [`RULES_NEWEST`] add (none now).
@@ -277,9 +302,25 @@ impl RulesConfig {
         self.silent_rules().drift_mps
     }
 
-    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`).
+    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`): 2 from
+    /// rules 2 (`standing_approvals`), 1 before.
     pub fn policy_schema(&self) -> u32 {
-        POLICY_SCHEMA
+        if self.at_least(STANDING_APPROVALS_SINCE) { STANDING_APPROVALS_SCHEMA } else { POLICY_SCHEMA_V1 }
+    }
+
+    /// Whether these rules include the behaviour a `*_SINCE` constant names (rules-versioning.md
+    /// section 5): the one way code branches on the version.
+    pub fn at_least(&self, since: u32) -> bool {
+        self.rules_version >= since
+    }
+
+    /// Rules 2: whether a drop zone's standing approval stands in for a person's confirmation
+    /// ([`STANDING_APPROVALS_SINCE`]): from rules 2 unless the policy sets
+    /// `[rules.delivery.dropzone] standing_approvals = false` (the rules 1 procedure, kept as the
+    /// comparison setting); never under rules 1.
+    pub fn standing_approvals(&self) -> bool {
+        self.at_least(STANDING_APPROVALS_SINCE)
+            && self.delivery.as_ref().is_none_or(|d| d.dropzone.standing_approvals != Some(false))
     }
 }
 

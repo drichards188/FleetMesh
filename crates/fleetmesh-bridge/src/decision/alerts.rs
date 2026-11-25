@@ -37,7 +37,11 @@ pub struct Alert {
     /// information; its lost_link, restore_pending and may_be_running alerts close behind it) |
     /// node_reported_again (rules 30: one confirmed lost reported again, the loss revoked) |
     /// signed for, its fire having ended on the window, the rounds, the target leaving, a cease
-    /// or the assessment)
+    /// or the assessment) | nav_monitor (the navigation monitor proposed a safe order) |
+    /// drop_not_clear (a delivery's drop zone did not look clear: the parcel was kept) |
+    /// zone_not_approved (parcels wait for a drop zone a person has not approved) |
+    /// return_failed (a return to a hub failed and automation stopped trying it) |
+    /// delivery_failed (a delivery failed its tries and automation gave the parcel up)
     pub kind: &'static str,
     pub severity: Severity,
     pub uid: Uid,
@@ -49,6 +53,22 @@ pub struct Alert {
     pub op_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent_id: Option<u64>,
+    /// An issue automation raised (docs/DECISIONS.md 2026-11-25): what the problem is, what
+    /// automation already did about it, and the response it recommends. Absent on the alerts the
+    /// bridge derives from a vehicle's state, whose kind says as much (the console words them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<IssueText>,
+}
+
+/// What an issue alert tells the person, in three parts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IssueText {
+    /// what happened
+    pub problem: String,
+    /// what automation already did about it
+    pub did: String,
+    /// what the person might do (often nothing: automation has done the safe thing)
+    pub recommend: String,
 }
 
 pub(super) fn callsign(cell: &VehicleCell) -> Option<String> {
@@ -105,6 +125,7 @@ pub fn alerts(
                 since_t: d.since,
                 op_id: None,
                 intent_id: None,
+                issue: None,
             });
         }
         let link = cell.link_snapshot(crate::clock::mono());
@@ -121,6 +142,7 @@ pub fn alerts(
                 since_t: last,
                 op_id: None,
                 intent_id: None,
+                issue: None,
             });
         }
     }
@@ -145,6 +167,7 @@ pub fn alerts(
             since_t,
             op_id: Some(op.id),
             intent_id: (op.intent_id != 0).then_some(op.intent_id),
+            issue: None,
         });
     }
     out.sort_by(|a, b| {
@@ -212,6 +235,7 @@ fn may_be_running(
         since_t: op.history.last().map_or(0.0, |h| h.t),
         op_id: Some(op.id),
         intent_id: (op.intent_id != 0).then_some(op.intent_id),
+        issue: None,
     })
 }
 

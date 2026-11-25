@@ -1,0 +1,51 @@
+# harbour-city: the other traffic for a normal Sunday hour on the north waterfront
+# (crates/fleetmesh-traffic; the world is sim/traffic.toml). Times are scenario seconds.
+name = "harbour-city"
+seed = 11
+at = "2026-06-14T17:00:00Z"
+duration_s = 3600
+
+# a normal hour: the world's rates as they are
+[rates]
+
+# A hobby drone with no Remote ID over Marina Green, next to the Marina car hub: only the
+# drones' own detect-and-avoid can see it.
+[[issue]]
+kind = "drone_no_rid"
+name = "unidentified drone at Marina Green"
+at_s = 900
+duration_s = 900
+lat = 37.8063
+lon = -122.4385
+ground_m = 3
+agl_m = 70
+
+# A container ship for Oakland passing under the Golden Gate Bridge, then along the Cityfront.
+[[issue]]
+kind = "ship_arrival"
+name = "container ship for Oakland"
+at_s = 1500
+stream = "ships-oakland"
+class = "cargo"
+vessel_name = "ORIENT HARMONY"
+
+# A tour helicopter whose ADS-B position is 700 m off for ten minutes (a faulty navigation
+# source): its broadcasts disagree with what the drones' own sensors see.
+[[issue]]
+kind = "adsb_bad_position"
+name = "tour helicopter broadcasting a wrong position"
+at_s = 1500
+duration_s = 600
+stream = "heli-tour"
+class = "helicopter"
+offset_m = 700
+bearing_deg = 60
+
+# The Pier dock hub's AIS receiver goes down for ten minutes.
+[[issue]]
+kind = "receiver_down"
+name = "hub-pier AIS receiver down"
+at_s = 2400
+duration_s = 600
+receiver = "hub-pier"
+sensor = "ais"

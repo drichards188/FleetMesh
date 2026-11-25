@@ -1745,6 +1745,7 @@ impl Decision {
                     since_t: op.history.first().map_or(now_wall, |h| h.t),
                     op_id: Some(op.id),
                     intent_id: Some(op.intent_id),
+                    issue: None,
                 })
             })
             .collect()
@@ -2235,6 +2236,14 @@ impl Decision {
         }
         // the navigation monitor acted for a vehicle whose navigation is untrusted
         alerts.extend(self.nav_alerts());
+        // the issues automation raised (a drop zone that stayed not clear, a zone nobody approved);
+        // a delivery op that failed on its drop-time look is said by its issue, not again as a
+        // failed task
+        alerts.retain(|a| !(a.kind == "task_failed" && a.detail.starts_with("drop zone not clear")));
+        // an op that failed on a dispatcher's order it is about to try again (an upload or a
+        // command with no answer): automation handles it, and tells the person if it cannot
+        alerts.retain(|a| !(matches!(a.kind, "task_failed" | "ack_timeout") && self.dispatcher_retrying(a.uid, a.intent_id)));
+        alerts.extend(self.issue_alerts());
         alerts.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.since_t.total_cmp(&b.since_t)));
         alerts
     }

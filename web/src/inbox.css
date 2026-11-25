@@ -90,6 +90,10 @@
 .ix-who { font: 600 var(--text-body)/var(--leading-body) var(--font-data); }
 .ix-age { margin-left: auto; font: var(--text-label)/var(--leading-label) var(--font-data); color: var(--muted); }
 .ix-adetail { margin: 0; font-size: var(--text-body); color: #c8d0d9; }
+/* an issue's three parts: what happened, what automation did, what is recommended */
+.ix-issue { margin: 4px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 8px; font-size: var(--text-body); }
+.ix-issue dt { color: var(--muted); }
+.ix-issue dd { margin: 0; color: #c8d0d9; }
 .ix-trail .bluf-head { color: #aab6c3; }
 .ix-link { margin: 0; font: var(--text-label)/var(--leading-label) var(--font-data); color: var(--muted); }
 .ix-muted { font-size: var(--text-label); }

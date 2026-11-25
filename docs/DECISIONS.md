@@ -133,3 +133,94 @@ compatibility aliases: nothing is released. Identifiers of the earlier project's
 comments (for example `murmur-iobd`) are kept as references to that tracker, as is the removed crate
 `murmur-contacts` where code cites it. Stored operator credentials are now looked for under
 `~/.config/fleetmesh/`, so a credentials file made for the earlier project must be moved there.
+
+## 2026-11-25: Routine deliveries need no person: standing approved delivery points, automation first (rules 2)
+
+The maintainer: "we need to change our procedures to match real life. a human only intervenes for
+when an issue comes up." Under rules 1 every delivery to a zone other than a hub pad waited for a
+person's confirmation of the zone within the hour, and the dispatcher asked for one per parcel; in
+a live harbour-city run every delivery except those to hub pads sat waiting on a person. That
+measures a procedure no delivery operator uses.
+
+What real operators do (researched 2026-11-25; the supervision ratios are reported claims, not
+FAA primary sources):
+
+- Nobody authorises individual drops; delivery spots are approved ahead of time. Amazon Prime Air
+  surveys obstacle-free delivery zones and marks reachable delivery points in them
+  (aboutamazon.com/news/operations/mk30-drone-amazon-delivery-packages). Wing delivers to a spot
+  the customer chose, about 6 by 6 ft with nothing overhead, changed only when the customer picks
+  another (wing.com/news/how-do-you-get-package-from-drone-to;
+  techcrunch.com/2023/06/08/how-curbside-pickup-caused-wing-to-rethink-its-approach-to-drone-delivery).
+- The aircraft checks the spot itself at drop time. Amazon's MK30 hovers at about 12 to 13 ft,
+  detects people, pets, cars and obstacles, and knows when not to deliver
+  (aboutamazon.com/news/transportation/amazon-delivery-drones-safety-testing). Zipline's droid
+  confirms the zone is clear with downward cameras (spectrum.ieee.org/zipline-drone-delivery).
+  Wing's tether releases on its own, and lets go if someone pulls it.
+- Remote pilots supervise many flights at once and step in for exceptions (weather, air traffic,
+  faults, lost link): Wing up to 50 drones per pilot (aviationweek.com, on its Australia
+  expansion), Manna 10 to 50, UPS Flight Forward 3, Matternet 20 with a visual observer.
+- The proposed FAA Part 108 creates an operations supervisor (final safety authority) and a flight
+  coordinator (tactical oversight); neither approves individual drops
+  (pilotinstitute.com/part-108-explained).
+- NASA Langley simulations found more than about 4 aircraft per supervisor problematic unless
+  automation handles routine tasks (aerospaceamerica.aiaa.org, on NASA's operator limits). That is
+  the research question: whether judgement stays meaningful depends on what automation absorbs.
+
+What changed, as rules 2 (`STANDING_APPROVALS_SINCE`, docs/design/rules-versioning.md):
+
+- **Standing approved delivery points.** Each drop zone in the places data carries `approval`:
+  `survey` (surveyed and marked in advance), `customer` (the customer's chosen spot) or
+  `withdrawn` (approved once, not now); a hub pad is approved with its hub. A delivery to an
+  approved point passes the confirmation part of the drop-zone rule with no time limit. Every
+  other check of the rule still applies (open or closed, the surface, slope, descent gusts, a
+  fresh look at a populated zone). The field is optional, so a zone without it is a new point.
+- **`confirm_drop_zone` keeps its lock and changes meaning.** It approves a new delivery point
+  (one not on the standing list, or one whose approval was withdrawn), and that approval stands
+  from then on; it needs no delivery waiting for it. The dispatcher asks once per zone, before it
+  loads any parcel for it, never per parcel or per hour. A deliver held for `DZ_NOT_APPROVED` that
+  a person approves approves the point too.
+- **The drop-time look is automation's.** Before departure the dispatcher waits while the zone
+  does not look clear (as the rule reads the look) and looks again; over the zone the vehicle
+  looks again before it lets go (the task layer's drop look: a copter holds its low hover and the
+  release is commanded only when the zone is clear; a car or boat looks before it releases; a
+  plane cannot hover and keeps the look before departure). Not clear for `depart_wait_s` (120 s)
+  at the hub or `hover_wait_s` (120 s) over the zone: the parcel is kept, the vehicle comes home,
+  the parcel is tried again after `retry_after_s` (600 s) up to `max_tries` (2), and the person is
+  told by an issue alert, not asked.
+- **Holds automation waits out** (`WAIT_OUT` in the dispatcher): traffic near the hub or the route
+  (`SEP_HUB_ZONE`, `SEP_MARGINAL`, `SEP_TRAFFIC_UNKNOWN`), a stale or unread fact
+  (`ENERGY_BATTERY_UNKNOWN`, `WX_UNKNOWN`, `NAV_TRUST_UNKNOWN`, `LINK_PLAN_UNKNOWN`,
+  `INPUT_UNKNOWN`) and the look (`DZ_PEOPLE_NEAR`, `DZ_OBSERVATION_STALE`). The dispatcher dry-runs
+  each of its orders first (`intent.preview`, so no intent and no inbox item) and waits and tries
+  again; after `hold_retry_max_s` (300 s) the order goes as it is and the hold, now persistent, is
+  the person's. A hub out of charged packs is waited out the same way. No threshold of any check
+  moved and no check was removed: weather beyond limits, navigation integrity, lost link, landing
+  away from a hub, abort over people, leaving the approved area, unknown endurance, battery
+  reserve, geofences and payload all reach a person as before.
+- **Routine noise found in live runs, fixed by automation, not by a person:** a vehicle already on
+  a hub's pads loads where it stands (it used to take off and hover over the hub's centre point,
+  where loaded drones then held each other's departures with `SEP_HUB_ZONE`); a return to a hub
+  that fails on its way out (a mission upload with no answer) is proposed again, up to 3 times,
+  before the person is told (`return_failed`); a delivery refused only for a predicted conflict
+  with moving traffic is proposed again after a short delay, as the separation rule's own fix
+  says, instead of failing the parcel; a parcel within the payload rule's hold band of a drone's
+  limit (`PAYLOAD_NEAR_MAX`) is offered to the vehicles that carry it with room to spare (the
+  assigner's input is filtered, each group logged as its own plan; a parcel nothing free carries
+  so is offered to all, and the person judges the margin); and a multirotor climbing or descending
+  in place no longer reads as `NOT MOVING`.
+- **Issue alerts.** An issue automation raised (`drop_not_clear`, `zone_not_approved`,
+  `return_failed`, and the
+  navigation monitor's action) says what happened, what automation already did and the response it
+  recommends; the console words the same three parts for the alerts the bridge derives from a
+  vehicle's state, and a held order's card says what automation did before it asked.
+- **The old procedure is kept as a comparison setting**, because the study's question is the
+  attention cost of each design: `[rules.delivery.dropzone] standing_approvals = false`
+  (`sim/policy-strict.toml`, run with `POLICY=sim/policy-strict.toml`) restores rules 1's per-hour
+  confirmation of every zone but a hub pad, with the dispatcher asking once per zone while one is
+  pending. The drop-time look stays automatic in both. `eval/arms.py`'s arms are proposer and
+  supervisor pairs with no policy dimension, so the setting is a policy file, not an arm.
+
+The version moves from 1 to 2 and the policy schema from 1 to 2 (the new key). Replay decides a
+rules 1 log under rules 1 (it needs `--rules 1` or `--min-rules 1`, as any older log does) and a
+rules 2 log under rules 2; `RULES_MARKERS` flags a log that claims rules 1 but carries a field rules
+2 added.

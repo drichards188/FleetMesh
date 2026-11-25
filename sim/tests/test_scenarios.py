@@ -82,3 +82,29 @@ def test_the_wind_event_ramp_crosses_the_drone_limits():
     frames = load("wind-event", "events.toml")["weather"]["timeline"]
     gusts = [f["values"]["gust_mps"] for f in frames]
     assert min(gusts) < 11.0 < 14.0 < max(gusts)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_drop_zone_is_an_approved_delivery_point(name):
+    # rules 2: delivery points are approved ahead of time (surveyed, or chosen by the customer);
+    # a zone without `approval` would be a new point that a person approves once
+    d = load(name, "dispatch.toml")
+    for z in d["dropzone"]:
+        assert z.get("approval") in ("survey", "customer"), z
+    a = d.get("automation", {})
+    assert set(a) <= {"depart_wait_s", "hover_wait_s", "retry_after_s", "max_tries", "hold_retry_s", "hold_retry_max_s", "issue_show_s"}, a
+
+
+def test_the_sim_places_are_approved_delivery_points():
+    import tomllib
+
+    d = tomllib.loads((ROOT / "hubs.toml").read_text())
+    for z in d["dropzone"]:
+        assert z.get("approval") in ("survey", "customer"), z
+
+
+def test_policy_in_the_environment_runs_a_scenario_under_the_strict_procedure(monkeypatch):
+    monkeypatch.setenv("POLICY", "sim/policy-strict.toml")
+    assert scenario_env.env_for(NAMES[0])["FLEETMESH_POLICY"] == "sim/policy-strict.toml"
+    monkeypatch.delenv("POLICY")
+    assert scenario_env.env_for(NAMES[0])["FLEETMESH_POLICY"] == "sim/policy.toml"

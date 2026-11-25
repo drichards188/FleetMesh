@@ -1,8 +1,9 @@
 //! Replay re-derives every decision of a run for every kept intent kind (orbit, patrol, hold,
-//! rtl, transit), on the shipped policy (`sim/policy.toml`) and areas (`sim/areas`), under rules
-//! version 1 (the only version): a recorded run replays to identical decisions and the identical
-//! hash chain; an edited or removed entry is found; a run claiming another rules version is
-//! refused.
+//! rtl, transit), on the shipped policy (`sim/policy.toml`) and areas (`sim/areas`), under the
+//! current rules version: a recorded run replays to identical decisions and the identical hash
+//! chain; an edited or removed entry is found; a run claiming another rules version is refused;
+//! and the version constants keep the convention of docs/design/rules-versioning.md. The logs of
+//! each version replaying under their own rules are in tests/delivery.rs (rules 1 and 2).
 
 use std::path::PathBuf;
 
@@ -175,4 +176,80 @@ fn a_run_with_an_unknown_rules_version_is_refused() {
     *rules_version = Some(0);
     let r = replay::replay(&events);
     assert!(!r.ok(), "rules version 0 is no version");
+}
+
+// ---- the version constants (docs/design/rules-versioning.md section 7) --------------------------
+
+fn source(rel: &str) -> String {
+    std::fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+}
+
+/// Every `pub const <NAME>_SINCE: u32 = N;` in rules.rs, by name.
+fn since_constants() -> Vec<(String, u32)> {
+    let text = source("crates/fleetmesh-decide/src/rules.rs");
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("pub const ")?;
+            let (name, value) = rest.split_once(": u32 = ")?;
+            if !name.ends_with("_SINCE") {
+                return None;
+            }
+            Some((name.to_string(), value.trim_end_matches(';').trim().parse().ok()?))
+        })
+        .collect()
+}
+
+#[test]
+fn every_since_constant_is_a_version_this_build_has_and_is_used_and_replayed() {
+    use fleetmesh_decide::rules::{RULES_MARKERS, RULES_NEWEST, RULES_VERSION};
+    let consts = since_constants();
+    assert!(!consts.is_empty(), "rules.rs defines the *_SINCE constants");
+    let decide_src: String = ["delivery_rules.rs", "rules.rs", "engine.rs", "replay.rs", "policy.rs"]
+        .iter()
+        .map(|f| source(&format!("crates/fleetmesh-decide/src/{f}")))
+        .collect();
+    let tests = source("crates/fleetmesh-decide/tests/delivery.rs") + &source("crates/fleetmesh-decide/tests/replay.rs");
+    for (name, v) in &consts {
+        assert!(*v >= 1 && *v <= RULES_NEWEST, "{name} = {v} is not a version this build has (1..={RULES_NEWEST})");
+        assert!(decide_src.contains(&format!("at_least({name})")) || decide_src.contains(&format!("at_least(crate::rules::{name})")), "{name} is defined but no code branches on it with at_least");
+        // a replay test names the constant it covers (beside this list)
+        assert!(tests.contains(name.as_str()), "no replay test names {name} (rules {v})");
+    }
+    const { assert!(RULES_VERSION <= RULES_NEWEST) };
+    for (since, what) in RULES_MARKERS {
+        assert!(*since <= RULES_VERSION, "marker {what} is for rules {since}, newer than {RULES_VERSION}");
+    }
+}
+
+#[test]
+fn no_code_compares_the_rules_version_with_a_literal() {
+    // a behaviour is gated on a named constant (`cfg.at_least(NAME_SINCE)`), never a number
+    let dirs = ["crates/fleetmesh-decide/src", "crates/fleetmesh-bridge/src"];
+    let mut found = Vec::new();
+    for d in dirs {
+        let mut stack = vec![root().join(d)];
+        while let Some(p) = stack.pop() {
+            for e in std::fs::read_dir(&p).expect("dir").flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("source");
+                    for (n, l) in text.lines().enumerate() {
+                        let code = l.split("//").next().unwrap_or("");
+                        for pat in ["version >= ", "version > ", "version < ", "version <= ", "at_least("] {
+                            if let Some(i) = code.find(pat) {
+                                let after = &code[i + pat.len()..];
+                                if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                                    found.push(format!("{}:{}: {}", path.display(), n + 1, l.trim()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "the rules version compared with a literal: {found:#?}");
 }

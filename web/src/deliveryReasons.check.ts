@@ -43,6 +43,12 @@ assert.equal(inputRows('nav_integrity', '9 satellites tracked, fewer than 10')[0
 assert.equal(inputRows('separation', "10's position is 92 s old and it is within 5 km of the route")[0].value, '92 s old')
 assert.equal(inputRows('dropzone', 'drop zone dz-city-02 was not confirmed within 3600 s')[0].value, 'none in the last 60 min')
 assert.equal(inputRows('dropzone', 'gust 9.0 m/s at the zone is above the descent limit 8.0')[0].label, 'Gust at the zone')
+// rules 2: a new delivery point, and what the card recommends for it
+assert.deepEqual(inputRows('dropzone', 'drop zone dz-city-02 is not an approved delivery point (it is not on the approved list): a person approves it once and it stands')[0], { label: 'Approval', value: 'it is not on the approved list', tone: 'near' })
+assert.ok(REASONS.DZ_NOT_APPROVED.next?.includes('approved delivery point'), 'a new point says what approving it does')
+for (const [code, r] of Object.entries(REASONS)) {
+  if (r.next) assert.ok(r.next.endsWith('.') && !r.next.includes('—'), `${code}: a recommendation is a sentence`)
+}
 assert.deepEqual(inputRows('weather', 'something the patterns do not know'), [], 'nothing is made up')
 
 // which checks put an order in front of a person

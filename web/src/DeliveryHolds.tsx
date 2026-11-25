@@ -39,6 +39,7 @@ export function DeliveryHolds({ intent: i, vehicles }: { intent: Intent; vehicle
                   <span className="dh-title">{r ? r.title : `${c.rule.replace(/_/g, ' ')}: ${c.outcome}`}</span>
                   {code && <code>{code}</code>}
                   {r && <p className="dh-plain">{r.plain}</p>}
+                  {r?.next && c.outcome === 'hold' && <p className="dh-plain"><b>Recommended:</b> {r.next}</p>}
                 </div>
               )
             })}
@@ -59,10 +60,15 @@ export function DeliveryHolds({ intent: i, vehicles }: { intent: Intent; vehicle
           </div>
         )
       })}
+      {held.some((h) => h.outcome === 'hold') && <p className="dh-detail">{AUTOMATION_DID}</p>}
       {confirm && <DropZoneLook intent={i} zones={feed.places.drop_zones} />}
     </section>
   )
 }
+
+/** What automation did before a held order reached the person (delivery_rt.rs, `WAIT_OUT`). */
+const AUTOMATION_DID =
+  'What automation did: it waited out what it could (traffic near the hub, a stale reading, a drop zone that did not look clear) before asking, and nothing has been sent; the vehicle stays as it is until you decide or the order expires.'
 
 function Row({ r }: { r: ReturnType<typeof inputRows>[number] }) {
   return (
@@ -121,7 +127,11 @@ function DropZoneLook({ intent: i, zones }: { intent: Intent; zones: { id: strin
       <p>
         Latest look now: <span className={tone}>{z ? observationText(z.observation) : 'the drop zone is not on the places list'}</span>.
       </p>
-      <p className="muted">Approving says the zone is fit now and lets the delivery that waits for it go. Rejecting it ends that delivery.</p>
+      <p className="muted">
+        {/new delivery point/.test(i.rationale ?? '')
+          ? 'Approving makes this spot an approved delivery point from now on: deliveries there go with no one asked, and you are not asked about it again. Rejecting it keeps the parcels for it at their hubs.'
+          : 'Approving says the zone is fit now and lets the delivery that waits for it go (and others there for an hour). Rejecting it ends that delivery.'}
+      </p>
     </div>
   )
 }

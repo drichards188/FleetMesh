@@ -30,8 +30,8 @@ use std::collections::BTreeSet;
 use crate::areas::{Area, AreaKind};
 use crate::catalog::{AutopilotKind, Domain, LandNowBehavior, PlatformFacts};
 use crate::delivery::{
-    DeliveryInputs, DeliveryRules, DropZoneKind, NavFacts, NavTrust, ObservedState, ParcelState, Surface2,
-    WxFact, WxLimits,
+    DeliveryInputs, DeliveryRules, DropZoneKind, NavFacts, NavTrust, ObservedState, ParcelState, StandingApproval,
+    Surface2, WxFact, WxLimits,
 };
 use crate::geo::{LonLat, boundary_distance, enu, haversine_m};
 use crate::ids::Uid;
@@ -441,7 +441,9 @@ pub fn order(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> Vec
                     Some(z) if z.closed => x.refuse("DZ_CLOSED", format!("drop zone {drop_zone} is closed")),
                     Some(_) => {}
                 }
-                if di.waiting_deliver.is_none() {
+                // rules 2: a confirmation approves a delivery point, which no delivery need wait
+                // for; under rules 1 (and standing approvals off) it confirms a waiting delivery
+                if di.waiting_deliver.is_none() && !cfg.standing_approvals() {
                     x.refuse(
                         "ORDER_NO_DELIVER_WAITING",
                         format!("no deliver for parcel {parcel} to {drop_zone} is queued or waiting at the zone"),
@@ -1127,14 +1129,30 @@ pub fn dropzone(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> 
             }
             None => {}
         }
-        // confirmed lately, or a pad at a hub
-        let confirmed = di
-            .confirmed
-            .get(&zone_id)
-            .is_some_and(|t| (0..=i64::from(d.dropzone.confirm_valid_s) * 1000).contains(&world.t.ms_since(*t)));
-        let hub_pad = z.kind == DropZoneKind::Pad && z.hub.is_some();
-        if !confirmed && !hub_pad {
-            x.hold("DZ_UNCONFIRMED", format!("drop zone {zone_id} was not confirmed within {} s", d.dropzone.confirm_valid_s));
+        let standing = cfg.standing_approvals();
+        if standing {
+            // rules 2: an approved delivery point, ahead of time (a survey, the customer's own
+            // spot, a hub pad) or by a person once (`confirm_drop_zone`): no time limit
+            if !approved_point(z, di) {
+                let why = match z.approval {
+                    Some(StandingApproval::Withdrawn) => "its standing approval was withdrawn",
+                    _ => "it is not on the approved list",
+                };
+                x.hold(
+                    "DZ_NOT_APPROVED",
+                    format!("drop zone {zone_id} is not an approved delivery point ({why}): a person approves it once and it stands"),
+                );
+            }
+        } else {
+            // confirmed lately, or a pad at a hub
+            let confirmed = di
+                .confirmed
+                .get(&zone_id)
+                .is_some_and(|t| (0..=i64::from(d.dropzone.confirm_valid_s) * 1000).contains(&world.t.ms_since(*t)));
+            let hub_pad = z.kind == DropZoneKind::Pad && z.hub.is_some();
+            if !confirmed && !hub_pad {
+                x.hold("DZ_UNCONFIRMED", format!("drop zone {zone_id} was not confirmed within {} s", d.dropzone.confirm_valid_s));
+            }
         }
         // slope for a release on land
         if z.surface == Surface2::Land
@@ -1143,8 +1161,19 @@ pub fn dropzone(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> 
         {
             x.refuse("DZ_SLOPE", format!("slope {s:.1} degrees is above {:.1}", d.dropzone.max_slope_deg));
         }
-        x.done(format!("drop zone {zone_id} is open, confirmed or a hub pad, and clear"))
+        if standing {
+            x.done(format!("drop zone {zone_id} is open, an approved delivery point, and clear"))
+        } else {
+            x.done(format!("drop zone {zone_id} is open, confirmed or a hub pad, and clear"))
+        }
     })
+}
+
+/// Rules 2: a zone a delivery may go to without a person: approved ahead of time
+/// ([`crate::delivery::DropZone::standing_approved`]) or approved by a person once (the engine's
+/// `confirmed`, from an approved `confirm_drop_zone` or a held `deliver`), with no time limit.
+pub fn approved_point(z: &crate::delivery::DropZone, di: &DeliveryInputs) -> bool {
+    z.standing_approved() || di.confirmed.contains_key(&z.id)
 }
 
 // ---- navigation integrity ---------------------------------------------------------------------
@@ -1403,8 +1432,9 @@ pub struct DeliveryPolicyFacts {
     /// `abort`: what the order does next puts the vehicle down away from a hub.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unplanned_landing: bool,
-    /// The routine tier: a pickup from a hub, a deliver to a confirmed zone or a hub pad, a
-    /// reroute within the added-distance limit, a battery swap at a hub.
+    /// The routine tier: a pickup from a hub, a deliver to a confirmed zone or a hub pad (from
+    /// rules 2: to an approved delivery point, [`approved_point`]), a reroute within the
+    /// added-distance limit, a battery swap at a hub.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hub_or_confirmed: bool,
 }
@@ -1454,6 +1484,10 @@ pub fn policy_facts(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig)
         }
         Task::Pickup { site, .. } => {
             f.hub_or_confirmed = site.id.as_ref().is_some_and(|i| di.places.hubs.contains_key(i));
+        }
+        Task::Deliver { drop_zone, .. } if cfg.standing_approvals() => {
+            // rules 2: an approved delivery point, with no time limit
+            f.hub_or_confirmed = di.places.drop_zones.get(drop_zone).is_some_and(|z| approved_point(z, di));
         }
         Task::Deliver { drop_zone, .. } => {
             let confirmed = di

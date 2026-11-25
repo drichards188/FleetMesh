@@ -112,7 +112,9 @@ per kind:
 - `pickup`: `loading` (vehicle at the site, parcel being loaded), `loaded`, `done` at `loaded`.
 - `deliver`: `en_route`, `at_drop_zone`, `awaiting_confirmation` (only if a confirmation is
   required), `released`, `returning`, `done` when the parcel is released and the vehicle has
-  started its return. The return itself is a separate `return_to_hub` order.
+  started its return. The return itself is a separate `return_to_hub` order. From rules 2 the
+  vehicle looks at the zone when it gets there (the drop-time look, section 5.2): it waits over
+  the zone while the look is not clear, and fails the order with the parcel aboard if it stays so.
 - `hold`: `holding`; `done` when superseded or when `max_s` ends.
 - `reroute`: `replanned` when the new route is accepted by the autopilot, `en_route`, `done` at the
   last new waypoint, which the next order then continues from.
@@ -155,12 +157,33 @@ Fly, drive or sail to a drop zone and release the parcel.
   planned) exists; the vehicle's lost-link plan matches policy (see rules, section 9); the parcel
   fits the platform's payload.
 - Lifecycle: section 4. If the drop-zone rule returns hold, the order stays in the inbox. If an
-  operator approves a `deliver` that was held for `DZ_UNCONFIRMED`, the approval counts as the drop
-  zone confirmation and no separate `confirm_drop_zone` is needed. If the rule returns allow at
-  planning time but the vehicle later reports the zone occupied, the task layer moves the order to
-  `awaiting_confirmation` and the dispatcher proposes a `confirm_drop_zone` or an `abort`.
-- Default routing: **auto** when every check allows and the drop zone is `confirmed` (a zone
-  confirmed within `dropzone.confirm_valid_s`, default 3600 s, or a hub pad). **Human** otherwise.
+  operator approves a `deliver` that was held for `DZ_NOT_APPROVED` (rules 1 and the strict
+  procedure: `DZ_UNCONFIRMED`), the approval counts as the zone's approval and no separate
+  `confirm_drop_zone` is needed.
+- **The drop-time look** (rules 2, management by exception). Real aircraft check the spot
+  themselves at drop time (Amazon's MK30 hovers at about 12 ft and knows when not to deliver;
+  Zipline's droid looks down before it lowers). Here:
+  - before departure the dispatcher reads the zone's latest look as the rule does; while it is not
+    clear (people there, or a populated zone with no recent look that could tell), the loaded
+    vehicle waits at the hub and looks again, so no `DZ_PEOPLE_NEAR` or `DZ_OBSERVATION_STALE`
+    hold reaches the inbox;
+  - over the zone the vehicle looks again before it lets go: a multirotor holds its low hover
+    (10 m) and its release is commanded only once the zone looks clear; a car or a boat looks
+    before it releases; a plane cannot hover to look and keeps the look before departure. The
+    release needs the link (delivery-rules.md 11.1): a link that drops low over the zone fails the
+    release, the delivery is tried again, and the person is told if it fails its tries;
+  - clear means release. Occupied, unknown or stale means wait and look again, every 2 s;
+  - after a bounded wait (`[automation] depart_wait_s` 120 s at the hub, `hover_wait_s` 120 s over
+    the zone, in a scenario's dispatch file) automation does the safe thing on its own: the parcel
+    stays aboard (or at the hub), the vehicle comes home, and the parcel is tried again after
+    `retry_after_s` (600 s), at most `max_tries` (2) times. There is no alternate zone yet;
+  - that outcome raises an issue alert to the person (`drop_not_clear`): what happened, what
+    automation did, what the person might do (nothing, or have the customer choose another spot,
+    which as a new delivery point needs the person's approval). It is never an approval request.
+- Default routing: **auto** when every check allows and the drop zone is an approved delivery point
+  (rules 2: a standing approval, a hub pad, or a point a person approved once; the strict
+  procedure: a zone confirmed within `dropzone.confirm_valid_s`, default 3600 s, or a hub pad).
+  **Human** otherwise.
 - Why: this is the consequential order. Most of them should be uneventful and fast; the inbox
   should hold only the ones where something is marginal. Whether that stays true as the fleet
   grows is the research question.
@@ -262,23 +285,36 @@ Replace a landed vehicle's battery at a hub.
 
 ### 5.9 confirm_drop_zone
 
-A person says the drop zone is fit for this delivery now.
+From rules 2: a person approves a new delivery point. Under rules 1 (and the strict procedure,
+`standing_approvals = false`): a person says the drop zone is fit for this delivery now.
 
-- Fields: `drop_zone`, `parcel`, optional `evidence` (observation ids: a vehicle camera frame
-  classification, a scenario event such as `dropzone.occupied` cleared, the last confirmation).
-- Preconditions: a `deliver` for that parcel and drop zone is queued, or is waiting at the zone in
-  `awaiting_confirmation`; the drop zone is not marked closed.
-- Who proposes: the dispatcher or an LLM agent, with a rationale and evidence ("camera shows empty
-  doorstep at 14:02:11, 6 m from a pedestrian"). Anyone may propose. The approval is the decision.
+Delivery spots are approved ahead of time in real operations (Amazon surveys delivery zones and
+marks delivery points in them; Wing delivers to the spot the customer chose), so nobody authorises
+individual drops. Each drop zone of the places data carries its standing approval (`approval =
+"survey"`, `"customer"`, or `"withdrawn"`; a hub pad is approved with its hub). A
+`confirm_drop_zone` is the one human act left about a place: approving a point that is not on the
+standing list, or whose approval was withdrawn. The approval stands from then on.
+
+- Fields: `drop_zone`, `parcel` (the parcel that first asked for it), optional `evidence`
+  (observation ids: a vehicle camera frame classification, a scenario event such as
+  `dropzone.occupied` cleared, the last confirmation).
+- Preconditions: the drop zone is not marked closed. Under rules 1 and the strict procedure also:
+  a `deliver` for that parcel and drop zone is queued, or is waiting at the zone in
+  `awaiting_confirmation`. From rules 2 no delivery need wait: it approves a place.
+- Who proposes: the dispatcher (once per zone, before it loads any parcel for it; never per parcel
+  or per hour) or an LLM agent, with a rationale and evidence. Anyone may propose. The approval is
+  the decision.
 - Default routing: **human**, always. No tier lets an agent's `confirm_drop_zone` run without a
   person, and the policy loader refuses a file that sets it to `auto`. This order exists so that
   the most direct human judgement in the system is a first-class logged act, not a side effect.
-- Outcomes: approved, the held `deliver` proceeds and the confirmation is valid for
-  `dropzone.confirm_valid_s`. Rejected, the held `deliver` is voided and the dispatcher is asked for
-  a replacement: the default (`decision_on_reject = "abort_return"`) is an `abort` with
-  `then = return_to_hub`, itself routed by section 5.7. Expired (`approval.expire_s.confirm_drop_zone`,
-  default 120 s), the `deliver` is voided in the same way and the expiry is logged as "nobody
-  decided", which the attention-cost measure counts as a missed decision.
+- Outcomes: approved, the zone is an approved delivery point from then on (rules 2) and the parcels
+  that waited for it go; under the strict procedure the held `deliver` proceeds and the
+  confirmation is valid for `dropzone.confirm_valid_s`. Rejected, a `deliver` that waited on it is
+  voided; from rules 2 the parcels for the zone stay at their hubs, the dispatcher does not ask
+  again, and the person is told (`zone_not_approved`, an issue alert) until they approve it
+  themselves or the parcels go elsewhere. Expired (`approval.expire_s.confirm_drop_zone`, default
+  120 s), the same, and the expiry is logged as "nobody decided", which the attention-cost measure
+  counts as a missed decision.
 
 ## 6. How an order becomes an engine intent
 
@@ -363,7 +399,7 @@ reason = "stopping and going home reduce risk"
 name = "confirm-is-human"
 when = { kind = ["confirm_drop_zone"] }
 tier = "human"
-reason = "a person judges the drop zone"
+reason = "a person approves a new delivery point"
 locked = true                 # the loader refuses any file that loosens this
 
 [[tier]]
@@ -423,6 +459,22 @@ Other knobs named above: `reroute.auto_added_pct = 25`, `reroute.join_m = 150`,
 `hub.swap_s = 120`, `hub.charge_s = 2400`. The order of `[[tier]]` entries matters: first match
 wins, and a hold outcome overrides an `auto` match.
 
+From rules 2 (management by exception, docs/DECISIONS.md 2026-11-25):
+
+- `[rules.delivery.dropzone] standing_approvals = true` (the default from rules 2): an approved
+  delivery point needs no confirmation, with no time limit, and `hub_or_confirmed` means "to an
+  approved delivery point". `false` is the strict procedure of rules 1, kept as a comparison
+  setting in `sim/policy-strict.toml` (`make start SCENARIO=harbour-city
+  POLICY=sim/policy-strict.toml`): every zone but a hub pad needs a person's confirmation within
+  `confirm_valid_s`. The research question is the operator-attention cost of each design.
+- What automation does before a person is told is the bridge's, not the policy's, and is no
+  decision's input: `[automation]` in a scenario's dispatch file, `depart_wait_s = 120`,
+  `hover_wait_s = 120`, `retry_after_s = 600`, `max_tries = 2`, `hold_retry_s = 15`,
+  `hold_retry_max_s = 300`, `issue_show_s = 300`. The dispatcher dry-runs each of its orders and
+  waits out a hold that is traffic near the hub or the route, a stale or unread fact, or the
+  look at the drop zone (section 5.2), trying again every `hold_retry_s`; after
+  `hold_retry_max_s` the order goes as it is and a person decides. No threshold moves.
+
 ## 10. Tests to write
 
 - Each kind: a proposal with valid and invalid params (missing parcel, unknown hub, no vehicles).
@@ -449,7 +501,12 @@ wins, and a hold outcome overrides an `auto` match.
    inbox small, which is what lets a fleet scale; always-human makes every delivery a decision and
    tests the other end. Make it a policy switch and run both.
 2. Is `confirm_drop_zone` one order per delivery, or may one confirmation cover several parcels to
-   the same zone within `confirm_valid_s`? The draft says per zone, valid for an hour.
+   the same zone within `confirm_valid_s`? Settled in rules 2: neither. Delivery points are
+   approved ahead of time, as real operators approve theirs (a surveyed zone, the customer's own
+   spot), and a person approves only a new point, once, after which it stands. The per-hour
+   confirmation is kept as the strict comparison setting. Open: whether a point's approval should
+   lapse (a survey that ages, a customer who moves), and an alternate zone to go to when the
+   chosen one stays occupied.
 3. How does a SITL vehicle get its battery swapped? A parameter write (`SIM_BATT_VOLTAGE`,
    `SIM_BATT_CAP_AH` reset) may need a reboot. Stand-ins can simply reset.
 4. Should `land_now` over water for a boat or plane mean something? A boat holds station; a plane
@@ -477,4 +534,25 @@ the bridge's decision layer. Where it differs from the draft above:
 - Policy conditions added: `site`, `over_people`, `final_approach`, `unplanned_landing`,
   `hub_or_confirmed`. A tier marked `locked` stays human, and the loader refuses an auto tier that
   matches `confirm_drop_zone` or matches every kind.
+
+### Rules 2 as built (2026-11-25)
+
+- Standing approvals: `delivery::DropZone::approval` (`StandingApproval`), read by the drop-zone
+  rule and `policy_facts` behind `RulesConfig::standing_approvals` (rules 2 unless the policy sets
+  `standing_approvals = false`); the engine's confirmations (`Engine::drop_zone_confirmations`)
+  approve a point with no time limit.
+- The dispatcher (`crates/fleetmesh-bridge/src/decision/delivery_rt.rs`): parcels for a zone that
+  is not approved are not assigned and the zone is asked about once; the look before departure;
+  the dry run (`Decision::agent_dry_run`) and `WAIT_OUT`; parcels kept and tried again; the issue
+  alerts (`Issue`, `Decision::issue_alerts`).
+- The drop-time look: `tasks::DropLook`, given by `Decision::drop_look_hook` to every dispatched
+  `deliver`, asked in the task layer's transit before the release (`look_at_zone`).
+- Alerts carry `issue` (what happened, what automation did, what to do); the console words the
+  same three parts for the derived alerts (`web/src/decisions.ts`, `ALERT_RESPONSE`).
+- Routine noise automation clears: a pickup by a vehicle on the hub's pads loads in place
+  (`Decision::pickup_in_place`); a failed return to a hub is proposed again up to 3 times, then
+  `return_failed`; a delivery refused only for `SEP_ROUTE_CONFLICT` is proposed again after
+  `hold_retry_s`; a parcel is offered only to vehicles that carry it inside the payload rule's
+  hold band (heaviest first, each group its own logged plan; none free: all); the task layer's
+  NOT MOVING watch counts a climb or a descent as moving.
 

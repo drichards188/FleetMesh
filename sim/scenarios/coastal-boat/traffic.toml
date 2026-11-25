@@ -1,0 +1,58 @@
+# coastal-boat: the other traffic for the delivery boats' two hours on the Bay
+# (crates/fleetmesh-traffic; the world is sim/traffic.toml). Times are scenario seconds.
+name = "coastal-boat"
+seed = 33
+at = "2026-06-14T17:00:00Z"
+duration_s = 7200
+
+[rates]
+fishing-drift = 1.5
+fishing-return = 1.5
+
+# A container ship for Oakland under the Golden Gate Bridge half an hour in.
+[[issue]]
+kind = "ship_arrival"
+name = "container ship for Oakland"
+at_s = 1800
+stream = "ships-oakland"
+class = "cargo"
+vessel_name = "MERIDIAN TRADER"
+
+# A tanker for Richmond, an hour later.
+[[issue]]
+kind = "ship_arrival"
+name = "tanker for Richmond"
+at_s = 4500
+stream = "ships-richmond"
+class = "tanker"
+vessel_name = "NORTHERN PEARL"
+
+# A fishing boat drifting off Alcatraz switches its AIS off for half an hour: only the boats'
+# radar sees it.
+[[issue]]
+kind = "ais_off"
+name = "fishing boat goes dark"
+at_s = 2400
+duration_s = 1800
+stream = "fishing-drift"
+class = "fishing"
+
+# The Pier dock hub's 1090 receiver goes down for 15 minutes.
+[[issue]]
+kind = "receiver_down"
+name = "hub-pier 1090 receiver down"
+at_s = 4000
+duration_s = 900
+receiver = "hub-pier"
+sensor = "adsb_1090"
+
+# A drone with no Remote ID over the Pier dock hub.
+[[issue]]
+kind = "drone_no_rid"
+name = "unidentified drone over the pier"
+at_s = 5000
+duration_s = 600
+lat = 37.8160
+lon = -122.4170
+ground_m = 2
+agl_m = 40

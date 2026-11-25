@@ -572,6 +572,7 @@ impl Decision {
                     since_t: secs(m.t).min(now_wall),
                     op_id: None,
                     intent_id: None,
+                    issue: None,
                 })
             })
             .collect();
@@ -595,6 +596,7 @@ impl Decision {
                 since_t: r.t,
                 op_id: None,
                 intent_id: None,
+                issue: None,
             })
         }));
         out

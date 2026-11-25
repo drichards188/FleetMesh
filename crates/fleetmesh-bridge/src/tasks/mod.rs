@@ -91,6 +91,20 @@ pub type LngLat = [f64; 2];
 /// `Err` (the log refused it, the order ended meanwhile) means nothing is sent.
 pub type WriteAhead = Arc<dyn Fn(&OpCell, &str) -> Result<(), String> + Send + Sync>;
 
+/// The drop-time look of a delivery (docs/design/delivery-orders.md section 5.2): what the vehicle
+/// sees at its drop zone, asked when it gets there and before it lets the parcel go. Clear means
+/// release; anything else (people there, a look that cannot tell, none recent) means the vehicle
+/// waits and looks again, for at most `wait`; then the op fails and the parcel stays aboard (the
+/// dispatcher brings it home and tells the person). The decision layer gives it from the zone's
+/// observation feed; an order without one releases as its mission says.
+#[derive(Clone)]
+pub struct DropLook {
+    /// `Ok(what was seen)` when the zone is clear to release, else `Err(what was seen)`.
+    pub look: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
+    /// How long the vehicle waits at the zone for a clear look.
+    pub wait: std::time::Duration,
+}
+
 /// Task parameters as the operator gave them (echoed back in the tasking).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TaskParams {
@@ -236,6 +250,8 @@ pub struct TaskOrder {
     pub requeue: bool,
     /// rules 7: each vehicle's start is logged ahead of sending it through this (none: not)
     pub ahead: Option<WriteAhead>,
+    /// a delivery's drop-time look (none: the release goes as the mission says)
+    pub look: Option<DropLook>,
     /// the task layer's own slots: same-kind vehicles of one order stacked apart in height and
     /// spread round a ring by their place in it (rules 33 and before); rules 34 never (each
     /// vehicle's order is its own, a group member's share says where it flies)
@@ -286,6 +302,7 @@ impl TaskOrder {
             patience: std::time::Duration::ZERO,
             requeue: false,
             ahead: None,
+            look: None,
             stack: true,
         })
     }
@@ -408,6 +425,7 @@ impl TaskManager {
                 patience: order.patience,
                 requeue: order.requeue,
                 ahead: order.ahead.clone(),
+                look: order.look.clone(),
             };
             exec::spawn(ctx);
         }
