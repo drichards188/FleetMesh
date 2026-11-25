@@ -5304,7 +5304,7 @@ fn check_waiting(
 
 /// The fields a decision's inputs carry that its rules version did not have
 /// ([`crate::rules::RULES_MARKERS`]): from rules 2 a drop zone's standing `approval`, from rules
-/// 3 the traffic picture.
+/// 3 the traffic picture, from rules 5 the fleet's own vehicles' routes.
 fn check_markers(r: &mut ReplayReport, e: &Event, id: IntentId, w: &WorldSnapshot, rules: &crate::rules::RulesConfig) {
     if !rules.at_least(crate::rules::TRAFFIC_SEPARATION_SINCE)
         && w.delivery.as_ref().is_some_and(|d| d.picture.is_some())
@@ -5317,6 +5317,26 @@ fn check_markers(r: &mut ReplayReport, e: &Event, id: IntentId, w: &WorldSnapsho
             "check.result.inputs.delivery.picture".into(),
             format!("absent before rules {}", crate::rules::TRAFFIC_SEPARATION_SINCE),
         );
+    }
+    // rules 5: the fleet's own vehicles' routes in the separation rule's inputs
+    if !rules.at_least(crate::rules::HUB_SEQUENCING_SINCE) {
+        let routed: Vec<String> = w
+            .delivery
+            .iter()
+            .flat_map(|d| d.traffic.iter())
+            .filter(|(_, t)| !t.route.is_empty())
+            .map(|(u, _)| u.to_string())
+            .collect();
+        if !routed.is_empty() {
+            bad(
+                r,
+                e,
+                Some(id),
+                "a field newer than the log's rules version (rules markers)",
+                format!("check.result.inputs.delivery.traffic.route on {}", routed.join(", ")),
+                format!("absent before rules {}", crate::rules::HUB_SEQUENCING_SINCE),
+            );
+        }
     }
     if rules.at_least(crate::rules::STANDING_APPROVALS_SINCE) {
         return;

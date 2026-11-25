@@ -47,21 +47,37 @@ priority = 1
 [demand]
 rate_per_min = 3.0
 from_s = 30
-# the Marina's drone pads and the Pier's take most; the Marina's car kerb and the Pier's boat dock
-# a tenth each, each to the zones its vehicles reach
-hubs = ["hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-pier", "hub-pier", "hub-marina-kerb", "hub-pier-dock"]
+# the Marina's drone pads and the Pier's take most (23 and 9 in 40), the Marina's car kerb 7 in 40
+# and the Pier's boat dock 1 in 40, each to the zones its vehicles reach: a boat's run across the
+# Bay takes most of an hour each way at its 3 m/s, so four boats carry about five parcels an hour
+hubs = [
+  "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina",
+  "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina",
+  "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina", "hub-marina",
+  "hub-pier", "hub-pier", "hub-pier", "hub-pier", "hub-pier", "hub-pier", "hub-pier", "hub-pier", "hub-pier",
+  "hub-marina-kerb", "hub-marina-kerb", "hub-marina-kerb", "hub-marina-kerb", "hub-marina-kerb", "hub-marina-kerb", "hub-marina-kerb",
+  "hub-pier-dock",
+]
 zones_by_hub = { "hub-marina-kerb" = ["dz-fort-mason-3", "dz-city-02", "dz-city-04", "dz-city-05", "dz-city-06", "dz-city-08", "dz-city-11", "dz-city-13", "dz-city-14", "dz-city-20"], "hub-pier-dock" = ["dz-sausalito-dock", "dz-angel-dock"] }
 zones = ["dz-fort-mason-3", "dz-city-02", "dz-city-03", "dz-city-04", "dz-city-05", "dz-city-06", "dz-city-07", "dz-city-08", "dz-city-09", "dz-city-10", "dz-city-11", "dz-city-12", "dz-city-13", "dz-city-14", "dz-city-15", "dz-city-16", "dz-city-17", "dz-city-18", "dz-city-19", "dz-city-20", "dz-city-21", "dz-city-22", "dz-sausalito-pad", "dz-sausalito-dock", "dz-angel-dock"]
 mass_kg = [0.2, 4.0]
+# what each base's vehicles carry: the Pier's drone pads take drone-sized parcels; the Marina's
+# (with its planes, and its car kerb beside it) some up to 2.6 kg, near or over a drone's limit, which
+# the dispatcher gives a plane or a car; the kerb and the dock heavier ones
+mass_by_hub = { "hub-marina" = [0.2, 2.6], "hub-pier" = [0.2, 2.0], "hub-marina-kerb" = [0.5, 10.0], "hub-pier-dock" = [0.5, 15.0] }
 priority_mix = [0.02, 0.60, 0.30, 0.08]
 due_s = 1800
+# a boat's parcel is due in an hour and a half (its run across the Bay)
+due_by_hub = { "hub-pier-dock" = 5400 }
 
+# Marina Green's pads reach 120 m from its point: its 24 drones stand in a row 5 m apart east of it,
+# and its planes beside them (each vehicle's stand is where it was launched, and it lands there again)
 [[hub]]
 id = "hub-marina"
 name = "Marina Green hub"
 lon = -122.437
 lat = 37.8057
-radius_m = 80
+radius_m = 120
 pads = 12
 packs = 16
 
@@ -78,20 +94,23 @@ packs = 10
 # routed to the drones' hub point drove through the landed drones, and the separation rule refused
 # its pickups), and the Pier's boats at the dock in the marina basin east of Pier 39 (the drones'
 # hub point is on the pier, on land, and the domain rule refused a boat's pickup there).
+# the kerb's 8 bays run 42 m east along Marina Boulevard, and its lane out of them 80 m
 [[hub]]
 id = "hub-marina-kerb"
 name = "Marina car kerb"
 lon = -122.4360
 lat = 37.8045
-radius_m = 40
+radius_m = 80
 pads = 8
 packs = 8
 
+# the boats' berths in open water off Pier 39's north-east corner, 8 to 10 m deep, from which a
+# straight run to Sausalito and to Angel Island crosses no land
 [[hub]]
 id = "hub-pier-dock"
 name = "Pier 39 boat dock"
-lon = -122.4092
-lat = 37.8095
+lon = -122.4080
+lat = 37.8102
 radius_m = 60
 pads = 4
 packs = 4
@@ -324,22 +343,25 @@ lat = 37.859
 radius_m = 4
 surface = "land"
 
+# Sausalito's waterfront, off the ferry landing (6.6 m deep)
 [[dropzone]]
 id = "dz-sausalito-dock"
 kind = "dock"
 approval = "survey"
-lon = -122.479
-lat = 37.857
+lon = -122.4776
+lat = 37.8562
 radius_m = 6
 surface = "water"
 dock_level_m = 2.4
 
+# Angel Island's East Garrison pier, on the island's east shore facing the city (the zone stood on
+# the island's hillside, 85 m up, which no boat reaches)
 [[dropzone]]
 id = "dz-angel-dock"
 kind = "dock"
 approval = "survey"
-lon = -122.432
-lat = 37.869
+lon = -122.4185
+lat = 37.8650
 radius_m = 6
 surface = "water"
 dock_level_m = 1.6

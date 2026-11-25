@@ -315,12 +315,19 @@ pub fn order(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> Vec
             };
         };
         let pos = v.position.as_ref().map(|p| p.value);
+        // rules 5: a pickup or a return may name a point within the hub (a vehicle's stand, or the
+        // pad automation gave it); before, the hub's own point
+        let stands = cfg.at_least(crate::rules::HUB_SEQUENCING_SINCE);
         let agrees = |id: &Option<String>, at: LonLat, x: &mut Verdict, what: &str| {
             let Some(i) = id else { return };
             match di.places.hubs.get(i) {
                 None => x.refuse("ORDER_UNKNOWN_SITE", format!("{what} {i} is not a hub of this world")),
                 Some(h) if !h.open => x.refuse("ORDER_HUB_CLOSED", format!("hub {i} is closed")),
-                Some(h) if haversine_m(h.at(), at) > 5.0 => x.refuse(
+                Some(h) if stands && haversine_m(h.at(), at) > h.radius_m.max(5.0) => x.refuse(
+                    "ORDER_SITE_MISMATCH",
+                    format!("{what} {i}'s point is {:.0} m from where the order puts it, outside its {:.0} m radius", haversine_m(h.at(), at), h.radius_m),
+                ),
+                Some(h) if !stands && haversine_m(h.at(), at) > 5.0 => x.refuse(
                     "ORDER_SITE_MISMATCH",
                     format!("{what} {i} is {:.0} m from where the order puts it", haversine_m(h.at(), at)),
                 ),
@@ -787,23 +794,8 @@ pub fn payload(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
             x.hold("PAYLOAD_UNKNOWN", format!("{} has no payload limit in the catalog", platform.id));
             return x.done("");
         };
-        let wx = fresh_wx(world, &d);
-        let gust = wx.iter().map(|w| w.gust_mps).fold(f64::NAN, f64::max);
-        let limits = weather_limits(&d, platform, ap);
-        let effective = if matches!(ap, AutopilotKind::Copter | AutopilotKind::Blimp) && gust.is_finite() {
-            let hard = limits.gust_hard_mps.unwrap_or(14.0);
-            let from = d.payload.derate_from_mps;
-            let f = if gust <= from {
-                1.0
-            } else if gust >= hard {
-                d.payload.derate_floor
-            } else {
-                1.0 - (1.0 - d.payload.derate_floor) * (gust - from) / (hard - from)
-            };
-            max * f
-        } else {
-            max
-        };
+        let gust = payload_gust(world, &d);
+        let effective = effective_payload(&d, platform, ap, max, gust);
         let text = format!("parcel {mass:.2} kg, platform maximum {max:.2} kg, effective maximum {effective:.2} kg");
         if mass > max {
             x.refuse("PAYLOAD_OVER_MAX", text);
@@ -816,6 +808,32 @@ pub fn payload(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
         }
         x.done("")
     })
+}
+
+/// The gust the payload rule derates by: the strongest of the fresh weather samples (NaN with
+/// none). The dispatcher reads the same figure to offer a parcel only to a vehicle with room.
+pub fn payload_gust(world: &WorldSnapshot, d: &DeliveryRules) -> f64 {
+    fresh_wx(world, d).iter().map(|w| w.gust_mps).fold(f64::NAN, f64::max)
+}
+
+/// A platform's payload limit `max` derated in `gust` (section 6): a multirotor's falls linearly
+/// from 1.0 at `payload.derate_from_mps` to `payload.derate_floor` at its hard gust limit; a plane,
+/// a car and a boat do not derate; with no gust known, `max`.
+pub fn effective_payload(d: &DeliveryRules, platform: &PlatformFacts, ap: AutopilotKind, max: f64, gust: f64) -> f64 {
+    if matches!(ap, AutopilotKind::Copter | AutopilotKind::Blimp) && gust.is_finite() {
+        let hard = weather_limits(d, platform, ap).gust_hard_mps.unwrap_or(14.0);
+        let from = d.payload.derate_from_mps;
+        let f = if gust <= from {
+            1.0
+        } else if gust >= hard {
+            d.payload.derate_floor
+        } else {
+            1.0 - (1.0 - d.payload.derate_floor) * (gust - from) / (hard - from)
+        };
+        max * f
+    } else {
+        max
+    }
 }
 
 // ---- weather ----------------------------------------------------------------------------------
@@ -842,6 +860,10 @@ pub fn weather(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
             return x.done("");
         }
         let l = weather_limits(&d, platform, ap);
+        // rules 6: the ground and the water the order's vehicle meets are read where it goes (its
+        // position and its order's points), the wind and the current anywhere fresh, as before
+        let along: Option<Vec<LonLat>> = cfg.at_least(crate::rules::FLOOD_ALONG_ROUTE_SINCE).then(|| order_points(spec, v, world, cfg));
+        let near_route = |w: &WxFact| along.as_ref().is_none_or(|pts| pts.iter().any(|p| haversine_m(*p, w.at) <= crate::rules::FLOOD_NEAR_M));
         let wind = wx.iter().map(|w| w.wind_mps()).fold(0.0, f64::max);
         let gust = wx.iter().map(|w| w.gust_mps).fold(0.0, f64::max);
         let vis = wx.iter().filter_map(|w| w.visibility_m).fold(f64::INFINITY, f64::min);
@@ -882,7 +904,8 @@ pub fn weather(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
                     x.hold("WX_CURRENT_MARGINAL", format!("current {cur:.2} m/s is {ratio:.2} of cruise, above the soft {:.2}", l.current_soft_ratio.unwrap_or(0.0)));
                 }
             }
-            let depth = wx.iter().filter_map(|w| w.depth_m).fold(f64::INFINITY, f64::min);
+            // rules 6: the water under the boat where it goes, not the shallowest anywhere
+            let depth = wx.iter().filter(|w| near_route(w)).filter_map(|w| w.depth_m).fold(f64::INFINITY, f64::min);
             if depth.is_finite() {
                 let draft = platform.draft_m.unwrap_or(0.0);
                 if depth < draft + d.weather.keel_hard_m {
@@ -902,9 +925,9 @@ pub fn weather(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
                 x.hold("TIDE_DOCK_LEVEL", format!("water {tide:.2} m is within {:.2} m of the dock deck at {deck:.2} m", d.weather.dock_level_band_m));
             }
         }
-        // a car: ground the tide can flood
+        // a car: ground the tide can flood (rules 6: where it goes)
         if platform.domain == Domain::Ground {
-            for w in &wx {
+            for w in wx.iter().filter(|w| near_route(w)) {
                 if let (Some(tide), Some(ground)) = (w.tide_m, w.ground_m)
                     && tide > ground - d.weather.flood_clear_m
                 {
@@ -919,6 +942,31 @@ pub fn weather(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -> V
             wx.len()
         ))
     })
+}
+
+/// Rules 6: where an order takes its vehicle, for the checks of the ground and the water there:
+/// its position, the route's points and the way back's end; without a route (no position known)
+/// the task's own points.
+fn order_points(spec: &IntentSpec, v: &VehicleFacts, world: &WorldSnapshot, cfg: &RulesConfig) -> Vec<LonLat> {
+    match route_for(spec, v, world, cfg) {
+        Ok(r) => {
+            let mut pts = outbound(&r);
+            if let Some(ret) = &r.ret {
+                pts.push(ret.to);
+            }
+            if pts.is_empty()
+                && let Some(p) = &v.position
+            {
+                pts.push(p.value);
+            }
+            pts
+        }
+        Err(_) => {
+            let mut pts: Vec<LonLat> = v.position.iter().map(|p| p.value).collect();
+            pts.extend(spec.task.path().map(|p| p.points).unwrap_or_default());
+            pts
+        }
+    }
 }
 
 // ---- separation -------------------------------------------------------------------------------
@@ -959,6 +1007,12 @@ pub fn separation(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -
         let Some(di) = inputs(world) else {
             return unknown_inputs(r, uid, "traffic (delivery inputs)").with_codes(&["SEP_TRAFFIC_UNKNOWN"]);
         };
+        // rules 5: the hub sequences its own traffic, and the fleet's vehicles are predicted as
+        // they will move (a pickup where the vehicle stands moves nothing)
+        let seq = cfg.at_least(crate::rules::HUB_SEQUENCING_SINCE);
+        if seq && spec.kind() == TaskKind::Pickup && polyline_m(&pts) < PICKUP_IN_PLACE_M {
+            return x.done("no route to separate: it loads where it stands");
+        }
         if pts.len() < 2 {
             return x.done("no route to separate");
         }
@@ -984,7 +1038,19 @@ pub fn separation(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -
                 (Domain::Ground, Domain::Ground) => (k.ground_ground_m, None),
                 (Domain::Surface, Domain::Surface) => (k.surface_surface_m, None),
                 (Domain::Air, _) | (_, Domain::Air) => {
-                    let air_alt = if platform.domain == Domain::Air { my_alt } else { tf.alt_m.unwrap_or(0.0) };
+                    // rules 5: an aircraft of ours with a route to fly is taken at the height it
+                    // will fly it (its cruise), not the height it is leaving its stand at
+                    let theirs = match world.vehicles.get(other).and_then(platform_of).and_then(|p| p.typical_alt_m) {
+                        Some(cruise)
+                            if seq
+                                && tf.domain == Domain::Air
+                                && polyline_m(&std::iter::once(tf.position.value).chain(tf.route.iter().copied()).collect::<Vec<_>>()) >= PICKUP_IN_PLACE_M =>
+                        {
+                            tf.alt_m.unwrap_or(0.0).max(cruise)
+                        }
+                        _ => tf.alt_m.unwrap_or(0.0),
+                    };
+                    let air_alt = if platform.domain == Domain::Air { my_alt } else { theirs };
                     if air_alt > k.air_over_ground_m {
                         continue;
                     }
@@ -993,26 +1059,84 @@ pub fn separation(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -
                 _ => continue,
             };
             let other_speed = tf.speed_mps.or_else(|| tf.velocity_mps.map(|[e, n]| e.hypot(n))).unwrap_or(0.0);
-            let other_pts: Vec<LonLat> = if tf.route.is_empty() {
+            // rules 5: one with a route to fly flies it at its cruise speed (or faster, as it goes)
+            // and height, and is at rest at its end; one that is still (on the ground, or slower
+            // than its velocity estimate's noise) with no route to fly stays where it is. One
+            // parked on a hub's stand (still, not in the air, inside the hub's radius) is the
+            // hub's while this order's vehicle is on the same hub's stands: the hub's layout and
+            // sequencing keep a vehicle leaving or reaching its stand clear of the parked ones
+            let other_platform = world.vehicles.get(other).and_then(platform_of);
+            let landed = tf.domain == Domain::Air && tf.alt_m.is_some_and(|a| a <= LANDED_M);
+            let route_m = polyline_m(&std::iter::once(tf.position.value).chain(tf.route.iter().copied()).collect::<Vec<_>>());
+            let flies = seq && route_m >= PICKUP_IN_PLACE_M;
+            let still = seq && !flies && (landed || other_speed < crate::rules::STILL_MPS);
+            let parked_at = (still && tf.domain != Domain::Air || landed && still)
+                .then(|| di.places.hubs.values().find(|hb| haversine_m(tf.position.value, hb.at()) <= hb.radius_m))
+                .flatten();
+            // ... and for the whole of an order that leaves or reaches that hub (its way out of the
+            // hub or into it passes the hub's parked vehicles by its layout, not by our minimum)
+            let leaves_or_reaches = |hb: &crate::delivery::Hub| {
+                [pts.first(), pts.last()].into_iter().flatten().any(|p| haversine_m(*p, hb.at()) <= hb.radius_m)
+            };
+            let other_pts: Vec<LonLat> = if still {
+                vec![tf.position.value, tf.position.value]
+            } else if tf.route.is_empty() {
                 let [e, n] = tf.velocity_mps.unwrap_or([0.0, 0.0]);
                 vec![tf.position.value, crate::geo::offset(tf.position.value, e * k.horizon_s, n * k.horizon_s)]
             } else {
                 std::iter::once(tf.position.value).chain(tf.route.iter().copied()).collect()
             };
-            let other_speed = if tf.route.is_empty() && tf.velocity_mps.is_some() { other_speed } else { other_speed.max(0.0) };
+            let other_speed = if flies {
+                other_speed.max(other_platform.and_then(|p| p.cruise_mps).unwrap_or(0.0))
+            } else if tf.route.is_empty() && tf.velocity_mps.is_some() {
+                other_speed
+            } else {
+                other_speed.max(0.0)
+            };
+            // ... at its cruise height when it flies a route (it climbs to it), else where it is
+            let other_alt = match (flies, tf.domain, other_platform.and_then(|p| p.typical_alt_m)) {
+                (true, Domain::Air, Some(cruise)) => Some(tf.alt_m.unwrap_or(0.0).max(cruise)),
+                _ => tf.alt_m,
+            };
+            // rules 5: the uncertainty grows while either of the two moves; once both are at rest (this
+            // order's vehicle at its route's end, the other still or at its own route's end) neither
+            // drifts towards the other any more
+            let moving_s = if seq {
+                let mine = polyline_m(&pts) / speed;
+                let theirs = if still {
+                    0.0
+                } else if !tf.route.is_empty() {
+                    route_m / other_speed.max(0.1)
+                } else {
+                    f64::INFINITY
+                };
+                mine.max(theirs)
+            } else {
+                f64::INFINITY
+            };
+            // ... and one arriving at a hub's stand is parked there once it has arrived (its route
+            // ends inside the hub's radius), for an order on, leaving or reaching that hub
+            let arrives_at = flies
+                .then(|| tf.route.last().and_then(|end| di.places.hubs.values().find(|hb| haversine_m(*end, hb.at()) <= hb.radius_m)))
+                .flatten();
+            let arrived_s = route_m / other_speed.max(0.1);
             let steps = (k.horizon_s / k.step_s).floor() as usize;
             let mut worst: Option<(f64, f64, bool)> = None; // ratio, time, in hub zone
             for i in 0..=steps {
                 let t = i as f64 * k.step_s;
                 let a = along_poly(&pts, speed, t);
-                let b = if tf.route.is_empty() && tf.velocity_mps.is_some() {
+                let the_hubs = |hb: &crate::delivery::Hub| haversine_m(a, hb.at()) <= hb.radius_m || leaves_or_reaches(hb);
+                if parked_at.is_some_and(the_hubs) || arrives_at.is_some_and(|hb| t >= arrived_s && the_hubs(hb)) {
+                    continue;
+                }
+                let b = if tf.route.is_empty() && tf.velocity_mps.is_some() && !still {
                     along_poly(&other_pts, other_speed.max(0.001), t)
                 } else {
                     along_poly(&other_pts, other_speed, t)
                 };
                 let h = haversine_m(a, b);
-                let drift = k.drift_mps * t;
-                let v_ok = match (min_v, tf.alt_m) {
+                let drift = k.drift_mps * t.min(moving_s);
+                let v_ok = match (min_v, other_alt) {
                     (Some(mv), Some(alt)) => (my_alt - alt).abs() < mv,
                     (Some(_), None) => true,
                     _ => true,
@@ -1035,7 +1159,12 @@ pub fn separation(spec: &IntentSpec, world: &WorldSnapshot, cfg: &RulesConfig) -
                 }
                 pairs.push(text.clone());
                 if ratio < 1.0 {
-                    if hub_zone {
+                    if hub_zone && seq {
+                        x.hold(
+                            "SEP_HUB_ZONE",
+                            format!("{other} and {uid} meet within {:.0} m of a hub at +{t:.0} s: the hub sequences them (automation holds one until the other is clear)", k.hub_zone_m),
+                        );
+                    } else if hub_zone {
                         x.hold("SEP_HUB_ZONE", format!("{other} and {uid} meet within {:.0} m of a hub at +{t:.0} s: a person decides who waits", k.hub_zone_m));
                     } else {
                         x.refuse(
@@ -1146,6 +1275,13 @@ fn traffic_separation(
         closest.unwrap_or_default()
     ));
 }
+
+/// Rules 5: a pickup whose route is shorter than this, m, loads where the vehicle stands (the task
+/// layer flies it nothing: `crates/fleetmesh-bridge` tasks, within its home tolerance or 10 m).
+const PICKUP_IN_PLACE_M: f64 = 10.0;
+
+/// Rules 5: an aircraft this low above its home, m, is on the ground (it is predicted at rest).
+const LANDED_M: f64 = 2.0;
 
 fn my_alt_speed(speed: f64) -> f64 {
     speed.max(0.1)

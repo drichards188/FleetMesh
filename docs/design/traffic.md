@@ -309,6 +309,16 @@ heard is not: a hub's 1090 receiver quiet for 20 s (the network's 30 s), a hub's
 are not judged (a quiet one cannot be told from an empty sky). A change between ok and degraded,
 or in what is not heard, is a `traffic_picture` delivery event.
 
+**Start-up grace.** The bridge may start before the simulator's (or a receiver's) feeds are up: for
+its first `STARTUP_GRACE_S` (60 s of the scenario's clock from the first picture) a picture not yet
+whole is `starting` (`/api/traffic`'s `picture.starting`), not a fault. The rules read it as they
+read any degraded picture (a departure that needs it waits, `SEP_PICTURE_DEGRADED`, which
+automation waits out), and no person is told; a picture still degraded after the grace is an issue
+as before. Re-reading `/sensors` (each ten minutes) keeps what each receiver was heard as: it used
+to reset them, so every receiver read "not heard since the start" for a second at 1200, 1800 and
+3000 s of a run, and the picture went degraded with them. The `traffic_picture_degraded` issue
+clears itself as soon as the picture is whole again (an `issue` delivery event with `cleared`).
+
 **Altitudes.** A track keeps the tracker's reference. For the rules, a pressure altitude (`baro`)
 is brought to mean sea level with the QNH (8.32 m per hPa) and its vertical sigma carries the
 conversion (the tracker's 15 m with a QNH, 120 m without); a geometric one (`geo`) is above mean
@@ -382,7 +392,8 @@ shows them):
     `relevant_km` of the fleet or a hub (vessels' are not raised: see the tracker below);
   - `traffic_picture_degraded` (medium, `uid` 0): a feed silent or a receiver not heard, saying
     which departures automation holds for it (`SEP_PICTURE_DEGRADED`), or that other receivers still
-    cover the routes.
+    cover the routes; never during the picture's start-up grace, and cleared when the picture is
+    whole again.
 
 **The tracker, changed for phase 3** (crates/fleetmesh-tracker/README.md has the detail): a ground
 radar whose site names no domain takes a return that may be at the surface for a vessel; the

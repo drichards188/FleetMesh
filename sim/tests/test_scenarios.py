@@ -85,6 +85,36 @@ def test_every_unit_has_a_home_base_its_vehicles_start_at(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_every_vehicle_stands_on_its_home_base(name):
+    """Rules 5: each vehicle's stand is where it was launched, and it lands there again; the order
+    rule takes a point within its home hub's radius, so every stand lies within it (and a boat's
+    berth is tied up until it first casts off)."""
+    import math
+    sc = load(name, "scenario.toml")
+    d = load(name, "dispatch.toml")
+    hubs = {h["id"]: h for h in d["hub"]}
+    fleet = swarm.load_fleet(ROOT / "scenarios" / name / sc["fleet"])
+    for v in swarm.plan(fleet, swarm.load_platforms()):
+        h = hubs[v["home_hub"]]
+        lat, lon = v["home"][0], v["home"][1]
+        dn = (lat - h["lat"]) * 111_320
+        de = (lon - h["lon"]) * 111_320 * math.cos(math.radians(lat))
+        assert math.hypot(dn, de) <= h.get("radius_m", 50), (v["callsign"], round(math.hypot(dn, de)), h["id"], h.get("radius_m"))
+        if v["platform"] == "delivery_boat":
+            assert v.get("moored"), v["callsign"]
+
+
+def test_harbour_city_demand_fits_its_bases():
+    """A base's parcels are what its vehicles carry: the Pier's drone pads take drone-sized ones
+    (within the payload rule's hold band of a drone's 2.5 kg in a moderate gust), and a boat's
+    parcel is due in its run's time."""
+    g = load("harbour-city", "dispatch.toml")["demand"]
+    assert g["mass_by_hub"]["hub-pier"][1] <= 2.16
+    assert set(g["mass_by_hub"]) <= set(g["hubs"]) and set(g.get("due_by_hub", {})) <= set(g["hubs"])
+    assert g["due_by_hub"]["hub-pier-dock"] >= 3600
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_events_are_in_the_formats_the_readers_take(name):
     ev = load(name, "events.toml")
     for e in ev.get("event", []):

@@ -140,6 +140,14 @@ Why: with the nearest hub, a live harbour-city run sent 13 of 22 returns to anot
 vehicle's own: drones to the car kerb, a plane to the boat dock, boats towards a land hub the domain
 rule refuses. In the headless harbour-city run under rules 4 every return (15 of 15) went home.
 
+3. **Its own stand (rules 5).** At its base a vehicle parks on its own stand, where it was
+   launched (a nest's pad, a kerb's bay, a dock's berth), and lands there again; a visitor gets a
+   free visitor pad; a pickup on the stands loads where the vehicle stands
+   ([dispatch.md](dispatch.md), delivery-rules.md section 8.2). Every stand lies within its base's
+   radius (sim/tests/test_scenarios.py checks it), and a boat is tied up at its berth until it
+   first casts off and again when it disarms there. Before, every return landed on the hub's own
+   point.
+
 ## 7. Open questions
 
 1. Rebalancing between bases (moving idle vehicles to where parcels wait) is not built; a vehicle

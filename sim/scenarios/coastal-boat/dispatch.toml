@@ -49,13 +49,14 @@ radius_m = 100
 pads = 10
 packs = 8
 
-# The boats load at the dock in the marina basin east of Pier 39: the hub's point is on the pier,
-# on land, where the domain rule refused a boat's pickup.
+# The boats load at their berths in open water off Pier 39's north-east corner (8 to 10 m deep): the
+# drones' hub point is on the pier, on land, where the domain rule refused a boat's pickup, and the
+# basin's south end is too shallow for a berth.
 [[hub]]
 id = "hub-pier-dock"
 name = "Pier 39 boat dock"
-lon = -122.4092
-lat = 37.8095
+lon = -122.4080
+lat = 37.8102
 radius_m = 60
 pads = 4
 packs = 4
@@ -132,12 +133,13 @@ radius_m = 20
 surface = "water"
 dock_level_m = 1.0
 
+# off Sausalito's waterfront, 6 m deep (the zone stood on the hillside above the town, 40 m up)
 [[dropzone]]
 id = "dz-sausalito-mooring"
 kind = "dock"
 approval = "survey"
-lon = -122.482
-lat = 37.857
+lon = -122.4770
+lat = 37.8570
 radius_m = 10
 surface = "water"
 dock_level_m = 1.8

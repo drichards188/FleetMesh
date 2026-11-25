@@ -181,7 +181,7 @@ pub enum UnknownEndurance {
 /// with the rules it was produced under. `run.started` records it. FleetMesh starts at 1;
 /// new behaviour is gated on a named `*_SINCE` constant set to the version that adds it
 /// (never a literal), and replay is taught the same gate in the same change.
-pub const RULES_VERSION: u32 = HOME_BASE_SINCE;
+pub const RULES_VERSION: u32 = FLOOD_ALONG_ROUTE_SINCE;
 
 /// Rules 2: delivery points are approved ahead of time and a person is asked only about an
 /// exception (docs/DECISIONS.md, 2026-11-25, "Routine deliveries need no person"). A drop zone
@@ -214,6 +214,58 @@ pub const TRAFFIC_SEPARATION_SINCE: u32 = 3;
 /// change.
 pub const HOME_BASE_SINCE: u32 = 4;
 
+/// Rules 5: a hub sequences its own arrivals and departures, as a vertiport or a nest does, and
+/// the separation rule predicts the fleet's own vehicles as they will move (docs/DECISIONS.md
+/// 2026-11-25, "Hubs sequence their own traffic"; delivery-rules.md section 8). Who lands or leaves
+/// first at a hub is automation's, never a person's:
+///
+/// - **Prediction.** Another of the fleet's vehicles with a dispatched route
+///   (`DeliveryInputs::traffic[..].route`, the bridge fills it from rules 5) is predicted along it
+///   at its platform's cruise speed (or faster, as it goes) and at rest at its end; one with no
+///   route that is still (on the ground, or under [`STILL_MPS`]) is predicted where it is, never
+///   carried off by the noise of its velocity estimate over the horizon; and the position
+///   uncertainty that grows with time (`drift_mps`) stops growing once both vehicles of a pair are
+///   at rest (the order's at its route's end, the other still or at its own). Before rules 5 every
+///   other vehicle was carried along its velocity for the whole horizon, and two vehicles standing
+///   still 150 m apart met at +300 s.
+/// - **Parked vehicles.** One parked on a hub's stand (still, not in the air, inside the hub's
+///   radius) is the hub's: not counted against an order while it is on the same hub's stands, nor
+///   against an order that leaves or reaches that hub (its bays, berths and pads keep them clear);
+///   one whose route ends on a hub's stand counts as parked there from the time it arrives.
+/// - **Stands.** An order that does not move its vehicle (a pickup where it stands) has no route to
+///   separate, and a pickup or a return may name a point within the hub's radius (the vehicle's
+///   own stand, or a pad automation gave it) instead of the hub's centre point: the order rule
+///   accepts a point within `radius_m` of the hub (5 m before rules 5).
+/// - **Sequencing.** A meeting within `hub_zone_m` of a hub holds `SEP_HUB_ZONE` as before, and its
+///   words say the hub sequences it (before rules 5: "a person decides who waits"); the dispatcher
+///   waits it out and never sends the order to a person for it.
+///
+/// No minimum, threshold or policy key changed; the policy schema stays 3.
+pub const HUB_SEQUENCING_SINCE: u32 = 5;
+
+/// Rules 5: a vehicle of the fleet moving slower than this, m/s, with no route, is predicted at
+/// rest ([`HUB_SEQUENCING_SINCE`]): a parked or hovering vehicle's velocity estimate is noise of
+/// a few decimetres a second, which the old prediction carried for the whole horizon (90 m over
+/// 300 s at 0.3 m/s) through a hub. The traffic rule's `underway_mps` for a vessel is the same
+/// figure.
+pub const STILL_MPS: f64 = 0.5;
+
+/// Rules 6: the weather rule reads the ground and the water where the order takes its vehicle
+/// (the samples within [`FLOOD_NEAR_M`] of its position, its route's points and its way back's
+/// end), not every sample the world has (docs/DECISIONS.md 2026-11-25): a car's flood check
+/// (`WX_FLOOD_RISK`) and a boat's depth under the keel (`TIDE_SHALLOW`, `TIDE_AGROUND`). Under
+/// rules 5 and before, a water sample anywhere (a boat dock's seabed, 4 m under the tide) held
+/// every car's order `WX_FLOOD_RISK`, and the shallowest water anywhere judged every boat's. The
+/// wind, gusts, visibility and current are still the worst of every fresh sample, and no
+/// threshold changed.
+pub const FLOOD_ALONG_ROUTE_SINCE: u32 = 6;
+
+/// Rules 6: how near the vehicle's position or one of its order's points a weather sample must be
+/// for the ground and water checks to read it, m ([`FLOOD_ALONG_ROUTE_SINCE`]): the samples are
+/// taken at the hubs, the open drop zones and the vehicles, so this keeps the order's own and
+/// leaves a neighbouring dock's seabed out.
+pub const FLOOD_NEAR_M: f64 = 60.0;
+
 /// The fields each rules version added to what a log carries: (the version that added it, where
 /// it is). Replay flags a log whose `run.started` claims an older version but that carries one of
 /// them (an event that could not have existed then: a newer log given an older header).
@@ -223,6 +275,7 @@ pub const RULES_MARKERS: &[(u32, &str)] = &[
     (TRAFFIC_SEPARATION_SINCE, "policy.rules.delivery.separation.traffic"),
     (TRAFFIC_SEPARATION_SINCE, "check.result.inputs.delivery.picture"),
     (HOME_BASE_SINCE, "dispatch.plan.input.vehicles.home"),
+    (HUB_SEQUENCING_SINCE, "check.result.inputs.delivery.traffic.route"),
 ];
 
 /// The newest decision rules this build can decide under and replay: [`RULES_VERSION`] itself,

@@ -1512,7 +1512,10 @@ impl Task<'_> {
         let total = items.len();
         // the item before the last one (its hold follows it): reached when the route is flown
         let end_wp = (total.saturating_sub(2)) as u16;
-        let sees_release = action == "deliver" && !land_release && !looked_release;
+        // only an aircraft's mission carries its release (a gripper item): a car or a boat stops at
+        // the zone and is told to let go after the mission is done, so it is not waited for here
+        // (waiting for it left a car or a boat holding at the zone with the parcel, for ever)
+        let sees_release = action == "deliver" && flies && !land_release && !looked_release;
         // on its hold item (a blimp, whose firmware skips it, at its mission's end on its last
         // waypoint), near the end; a release is waited for in the vehicle's own report of its
         // gripper (no report, no wait)

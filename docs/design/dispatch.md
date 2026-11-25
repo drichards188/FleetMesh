@@ -148,6 +148,51 @@ or its confirmation is rejected; the keep-out monitor holds a vehicle for a rest
 moves the energy cost enough that the rule would now hold (the dispatcher uses preview for this
 before each tick, so it learns from the rules without knowing them).
 
+**Payload room (as built 2026-11-25).** The assigner is offered, for each parcel, only the free
+vehicles that carry it inside the payload rule's hold band as the wind is now: each platform's
+limit derated in the strongest fresh gust exactly as the payload rule derates it
+(`delivery_rules::effective_payload`, `payload_gust`), times `payload.hold_frac` (0.9), and whose
+platform reaches the parcel's drop zone (no car to a dock, no boat to a kerb). Each group of
+parcels with the same vehicles is its own plan, the smallest groups first. A parcel near a drone's
+limit therefore goes by a plane or a car, or waits for a calmer gust; it is never given to a drone
+whose payload check would hold it for a person (`PAYLOAD_NEAR_MAX`). When no free vehicle at the
+parcel's hub has room but one at another base of the same site does (a site groups bases that work
+together at one place, fleet-organisation.md section 2), the parcel is carried across the site to
+that base (a `transfer` delivery event): harbour-city's Marina parcels near a drone's limit go by
+a car from the Marina kerb when the planes are out. A parcel no vehicle of its site could carry
+within the margin now (whatever they are doing) waits at its hub, logged once (a `wait` event,
+`PAYLOAD_NO_ROOM`), and after `NO_ROOM_ISSUE_S` (600 s) the person is told once per parcel by an
+issue alert (`parcel_no_vehicle`): what it is, why nothing carries it, that automation keeps it and
+gives it to the first vehicle with room; never a pickup to approve. No payload threshold changed.
+Before this, a parcel no free vehicle carried with room was offered to all, a drone took it, and
+its pickup waited in the inbox (in a live harbour-city run 18 of 29 inbox items were such pickups).
+
+**Stands and pads (rules 5).** A vehicle at its home base parks on its own stand (where it was
+launched) and lands there again; at another hub the dispatcher gives it a free visitor pad (the
+hub's point, else a ring of pads round it clear of the stands, the vehicles on the ground and the
+returns bound there). A pickup by a vehicle on its hub's stands names its own position: it loads
+where it stands. The return and the pickup carry the point (`at`), which the order rule checks lies
+within the hub's radius (delivery-rules.md section 8.2). Before rules 5 every return landed on the
+hub's point, on top of the vehicles already there, and a vehicle beyond the hub's radius flew to
+that point to load and hovered there at cruise height while its delivery waited.
+
+**Waiting, not trying (rules 5).** A dispatcher's order that the hub sequences (`SEP_HUB_ZONE`,
+`SEP_MARGINAL`), that is refused only because another of the fleet's vehicles' route is in the way
+(`SEP_ROUTE_CONFLICT`, whose fix is a short delay), or, for a return, that is held for anything
+automation waits out, waits: its dry run says so, the vehicle stays where it is, and it is tried
+every `hold_retry_s`. It is never sent to the inbox for it and a refusal of that kind costs the
+parcel no try; a wait longer than `hold_retry_max_s` is an issue alert (`fleet_conflict`,
+`return_held`) while automation goes on waiting.
+
+**Why a parcel failed.** Every attempt at a parcel that falls short is kept on its record: the
+stage (`pickup`, `deliver`, `look`, `return`), how its order ended (`rejected`, `failed`,
+`expired`, `voided`, `aborted`, `kept`), the refusing or holding checks' reason codes, their words
+or the task layer's failed step, the vehicle, the order and when. A parcel that fails carries the
+end that made automation give it up (`failure`), and `GET /api/parcels` serves both (`failure`, and
+the last six attempts' `ends`); the `parcel` delivery event of a failure carries it as `reason`,
+and the console's Parcels panel shows it on the failed parcel's card. Display and diagnostics only:
+no decision reads it.
+
 **Home bases (rules 4).** Every vehicle belongs to a home base, the hub it returns to
 ([fleet-organisation.md](fleet-organisation.md)). From rules 4 (`HOME_BASE_SINCE`) the assigner
 costs a trip's way back to the candidate's home base (or to the hub nearest the zone when the

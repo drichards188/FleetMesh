@@ -41,14 +41,16 @@ hub: if a rule returns `NotEvaluated` for these, the order is refused. Fail clos
    and navigation rules that make them impossible). A vehicle that cannot take a delivery can
    still be told to stop.
 6. **Rules are versioned.** The rules below are rules version 1 except where a section says
-   "from rules 2" or "from rules 3". Changing any of them means a new `*_SINCE` constant
+   "from rules 2" or later. Changing any of them means a new `*_SINCE` constant
    ([rules-versioning.md](rules-versioning.md)); rules 2 is `STANDING_APPROVALS_SINCE` (standing
    approved delivery points, section 10), rules 3 `TRAFFIC_SEPARATION_SINCE` (other traffic,
-   section 8.1).
+   section 8.1), rules 5 `HUB_SEQUENCING_SINCE` (hubs sequence their own traffic, section 8.2),
+   rules 6 `FLOOD_ALONG_ROUTE_SINCE` (the ground and the water where an order goes, section 7).
 7. **A person is asked about exceptions only.** Routine deliveries run with no person (rules 2,
    docs/DECISIONS.md 2026-11-25). What real operations automate (a stale fact read again,
-   departures sequenced round other traffic, the drop-time look) is automation's: the dispatcher
-   waits it out before anything reaches the inbox, and no check's threshold moved for it.
+   departures sequenced round other traffic, a hub's own arrivals and departures, the drop-time
+   look) is automation's: the dispatcher waits it out before anything reaches the inbox, and no
+   check's threshold moved for it.
 
 ## 3. Rule list and applicability
 
@@ -236,6 +238,15 @@ limit for copters (section 10).
 300, hard 100 m (`WX_VISIBILITY`); flood: if tide level at any route point exceeds terrain
 elevation minus 0.3 m, hold `WX_FLOOD_RISK`. Wind does not limit a car.
 
+**Where the ground and the water are read (from rules 6, `FLOOD_ALONG_ROUTE_SINCE`).** The weather
+samples a run feeds are taken at the hubs, the drop zones with open parcels and the vehicles. A
+car's flood check and a boat's depth under the keel (`TIDE_SHALLOW`, `TIDE_AGROUND`) read only the
+samples within `FLOOD_NEAR_M` (60 m) of the vehicle's position, its route's points and its way
+back's end: where it will be. Before rules 6 they read every fresh sample, so a boat dock's seabed
+(4.3 m under a 1 m tide, harbour-city's Pier 39 dock) held every car's order `WX_FLOOD_RISK`, and
+the shallowest water anywhere judged every boat. The wind, gusts, visibility, precipitation and
+current are still the worst of every fresh sample, and no threshold moved.
+
 **Knobs.** The table values above, each overridable per platform in `sim/rules.toml`
 (`[weather.delivery_drone] gust_soft_mps = 11`). `weather.sample_km` 1.0 (the sampler answers
 with the nearest 3 km model point anyway, so closer spacing adds nothing). `weather.lookahead_s` 0.
@@ -274,7 +285,8 @@ Violation means both horizontal and vertical are below minimum (air) or horizont
   fix in the detail (`delay_s` until clear, or a different cruise layer); the dispatcher can
   re-propose with the fix;
 - predicted violation in a hub zone: hold `SEP_HUB_ZONE` (two vehicles for one pad or the same
-  corridor; a person can decide who waits);
+  corridor; under rules 1 to 4 a person could decide who waits, from rules 5 the hub sequences
+  them, section 8.2);
 - closest approach between 1.0 and `separation.marginal_factor` (default 1.5) times the minimum:
   hold `SEP_MARGINAL`;
 - another vehicle's route unknown (fact too old): hold `SEP_TRAFFIC_UNKNOWN` only if that vehicle is
@@ -297,6 +309,11 @@ replay recomputes from the logged routes.
 
 **Knobs.** The table above; `separation.step_s`, `horizon_s`, `marginal_factor`, `drift_mps`,
 `relevant_km`.
+
+**As built: the hub-zone row.** The code applies the air and air minimum (50 m, 30 m) inside a hub
+zone too and only names the meeting `SEP_HUB_ZONE`; `air_hub_h_m` and `air_hub_v_m` (20 m, 15 m)
+are knobs the rule does not read. The table's smaller hub-zone minimum is not applied: doing so
+would loosen what the rule enforces today, and that is the maintainer's call.
 
 ### 8.1 Other traffic (from rules 3, `TRAFFIC_SEPARATION_SINCE`)
 
@@ -328,6 +345,51 @@ boat's; `SEP_TRAFFIC_UNKNOWN` for a picture older than `max_age_s` (10 s). A run
 (no traffic source) checks nothing of it and says so. Knobs: `[rules.delivery.separation.traffic]`
 (policy schema 3), every figure a draft. The result's detail names each conflict (the track, when,
 how far against its widened minimum) and the closest track that did not conflict.
+
+### 8.2 The fleet's own vehicles at and near a hub (from rules 5, `HUB_SEQUENCING_SINCE`)
+
+In real operations a hub sequences its own arrivals and departures, as a vertiport or a drone nest
+does: who lands or leaves first is never a person's decision, and a routine return does not wait
+for one (docs/DECISIONS.md 2026-11-25, "Hubs sequence their own traffic"). From rules 5:
+
+- **Prediction.** Another of the fleet's vehicles with a dispatched route (the bridge gives the
+  rule each vehicle's route still ahead of it, `DeliveryInputs::traffic[..].route`, logged by
+  value) flies it at its platform's cruise speed (or faster, as it goes) and its cruise height
+  (so a drone lifting off its pad beside a car's way is an aircraft above 20 m, not a vehicle on the
+  ground), and is at rest at its end. One with no route to fly that is still (on the ground, or slower than
+  `STILL_MPS`, 0.5 m/s: a velocity estimate's noise) is predicted where it is. The uncertainty
+  that grows with time (`drift_mps`, 0.5 m/s) grows while either vehicle of the pair moves and
+  stops once both are at rest. Before rules 5 a vehicle with no route was carried along its
+  velocity for the whole horizon (a parked or hovering drone's 0.3 m/s of noise moved it 90 m over
+  300 s, through the hub's other stands), and the uncertainty grew for the whole horizon too: a car
+  back in its bay and a drone on its pad 130 m away "met" at +300 s, inside 10 m plus 150 m. No
+  minimum moved.
+- **Stands and pads.** Every vehicle parks on its own stand at its home base (where it was
+  launched) and lands there again; a vehicle at another hub gets a free visitor pad (the hub's
+  point, else a ring of pads round it clear of every stand, every vehicle on the ground and every
+  return bound there). A pickup by a vehicle on the hub's stands names its own position: it loads
+  where it stands (a parcel is brought to it), so it has no route to separate (`PICKUP_IN_PLACE_M`,
+  10 m, the task layer's own tolerance). The order rule takes a pickup's or a return's point
+  anywhere within the hub's `radius_m` (before rules 5, within 5 m of the hub's point).
+- **Parked vehicles are the hub's.** A vehicle parked on a hub's stand (still, not in the air,
+  inside the hub's radius) is not counted against an order's route while that route is on the
+  same hub's stands, nor against an order that leaves or reaches that hub: the hub's layout (its
+  bays, berths and pads, its lane in and out) keeps a vehicle leaving or reaching its stand clear
+  of the parked ones. One of ours whose route ends on a hub's stand counts as parked there from the
+  time it arrives (its way in is checked as before). Against any other order every minimum applies
+  to them as before. A car leaving its kerb bay 6 m from the next car's, or a boat its berth 20 m from the
+  next, was held `SEP_HUB_ZONE` before rules 5 for as long as its neighbour stayed parked.
+- **Sequencing.** A meeting of two of the fleet's vehicles within `hub_zone_m` of a hub still holds
+  `SEP_HUB_ZONE`, every minimum as before; its words say the hub sequences them ("automation holds
+  one until the other is clear"; before rules 5, "a person decides who waits"). The dispatcher
+  waits it out (`SEQUENCE_CODES`: `SEP_HUB_ZONE`, `SEP_MARGINAL`; and a refusal only for another
+  vehicle's route, `SEP_ROUTE_CONFLICT`, whose own fix is a short delay) and never sends the order
+  to a person for it: a departure waits on its stand, an arrival where it is. A return waits out
+  anything automation waits out the same way. A wait that outlasts `hold_retry_max_s` (300 s) is an
+  issue alert (`fleet_conflict`, or `return_held` for a return held by something else) and
+  automation goes on waiting.
+
+No minimum, threshold or policy key changed.
 
 ## 9. Navigation integrity (`nav_integrity`)
 

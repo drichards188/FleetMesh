@@ -359,3 +359,81 @@ anticipated). The traffic is the public's: a side would claim what a delivery co
 and has no business implying. The console's words avoid the standard's terms: the Key says
 "identified, broadcasting" and "unidentified or not broadcasting". Detail: docs/design/traffic.md,
 section 9.
+
+## 2026-11-25: Hubs sequence their own traffic, and a normal hour runs with no person (rules 5 and 6)
+
+The maintainer: routine work runs without a person, and "a human only intervenes for when an issue
+comes up". Read-only checks of a live harbour-city hour (rules 3) found 19 parcels delivered, 14
+failed with no reason recorded, 116 ready and waiting; the 4 boats never moved; routine returns and
+pickups in the inbox ("18 and 1 meet within 100 m of a hub at +300 s: a person decides who waits");
+pickups held for `PAYLOAD_NEAR_MAX`; and a `traffic_picture_degraded` alert from the start. A
+measured hour under rules 4 (this tree before the change, 30 minutes) gave 16 delivered (11 by drone,
+5 by plane, none by car or boat), 9 failed with no reason, 55 ready, and 29 orders sent to the inbox:
+18 pickups held for `PAYLOAD_NEAR_MAX` (most also `SEP_HUB_ZONE`), 6 car pickups held for
+`WX_FLOOD_RISK`, 3 returns held for `SEP_HUB_ZONE`, 2 deliveries for `ENERGY_MARGIN_THIN`; 13 of 54
+vehicles needed attention, the 4 boats among them.
+
+The main causes found, and what changed:
+
+- **Every return landed on the hub's own point**, on top of the vehicles there, and a drone more
+  than the hub's radius from that point flew to it to load and then hovered there at cruise height
+  while its delivery waited; the separation rule then saw every departure and arrival "meet" it.
+  From rules 5 (`HUB_SEQUENCING_SINCE`) every vehicle parks on its own stand at its base (where it
+  was launched), lands there again, and a visitor gets a free pad; a pickup on the stands loads where
+  the vehicle stands; the order rule takes a point within the hub's radius.
+- **The prediction of the fleet's own vehicles.** A vehicle with no route was carried along its
+  velocity for 300 s (a parked or hovering drone's noise through the hub; a delivering drone 3.6 km
+  past its zone, into routes it would never cross), and the uncertainty grew 0.5 m/s for the whole
+  horizon even between two vehicles standing still. From rules 5 the bridge gives the rule each
+  vehicle's dispatched route; a vehicle flies it at cruise and rests at its end, a still one stays
+  where it is, the uncertainty stops growing once both of a pair are at rest, a drone with a route
+  to fly counts at its cruise height (one lifting off beside a car is not a vehicle on the ground),
+  and a vehicle parked on a hub's stand is the hub's for an order on, leaving or reaching that hub
+  (cars 6 m apart in their kerb bays held each other's departures for as long as the neighbour
+  stayed parked, and a car coming home was held by the cars parked at its kerb).
+- **Sequencing is automation's.** A hub-zone meeting still holds `SEP_HUB_ZONE` (no minimum moved);
+  its words say the hub sequences it, and the dispatcher waits it out, with `SEP_MARGINAL` and a
+  refusal only for another of our vehicles' route (`SEP_ROUTE_CONFLICT`, whose own fix is a short
+  delay), never sending the order to a person and never spending a parcel's try on it. A routine
+  return never waits for a person: whatever automation waits out is waited out. A wait over 5
+  minutes is an issue alert (`fleet_conflict`, `return_held`) while automation goes on waiting. Why
+  not a person: who lands or leaves first at a hub is a vertiport's or a nest's sequencing in real
+  operations, never an operator's decision.
+- **Payload room before assignment.** A parcel no free vehicle carried within the hold band was
+  offered to all, a drone took it, and its pickup waited for a person. The dispatcher now offers a
+  parcel only to vehicles with room in the wind now (the payload rule's own derate), carries it
+  across a site to a base that has one (the Marina's near-limit parcels go by car from the kerb), or
+  keeps it waiting; one no vehicle of its site can carry within the margin for 10 minutes is one
+  issue per parcel (`parcel_no_vehicle`), never a pickup to approve. No payload threshold moved.
+- **Cars never worked.** The weather rule's flood check read every sample the world had, and the
+  boat dock's seabed (4.3 m under a 1 m tide) held every car's order `WX_FLOOD_RISK` for a person.
+  From rules 6 (`FLOOD_ALONG_ROUTE_SINCE`) a car's flood check and a boat's depth read the samples
+  where the vehicle goes. And a car or a boat that reached its drop zone waited for ever for a
+  gripper release that only comes after its mission: the task layer waited for an aircraft's release
+  item on vehicles whose missions carry none.
+- **The boats never moved.** They were not moored, so the tide carried them off their dock (100 m
+  in five minutes) and out of the hub; their dock zones stood on land (Sausalito's 3 m up, Angel
+  Island's 85 m up the hillside) and the straight run from the dock crossed Pier 39. The boats are
+  tied up at berths in open water off the pier (moored again when they disarm at their berth), the
+  zones are at Sausalito's waterfront and Angel Island's East Garrison pier, and a boat parcel is
+  due in 90 minutes; coastal-boat's Sausalito mooring stood on the hillside too.
+- **Demand that fits the bases**: the Pier's drone pads took 4 kg parcels nothing there can carry,
+  and a tenth of the demand went to four 3 m/s boats that make one trip an hour. A base's parcels are
+  now drawn within what its vehicles carry (`mass_by_hub`), the dock takes 1 in 40, the kerb 7 in 40.
+- **Failure reasons.** Every attempt that falls short is kept on the parcel (stage, how its order
+  ended, the refusing checks' codes and words or the task layer's failed step); a failed parcel
+  carries the end that made automation give it up, `GET /api/parcels` serves it and the console's
+  Parcels panel shows it.
+- **The picture's start.** For its first 60 s of the scenario's clock a picture not yet whole is
+  starting, not a fault (departures that need it wait, no one is told); re-reading the simulator's
+  `/sensors` each ten minutes no longer resets which receivers were heard (every receiver read "not
+  heard since the start" for a second at 1200, 1800 and 3000 s); the issue clears itself when the
+  picture is whole again.
+- **A vehicle not heard is left to its own failsafe**: the dispatcher proposed a vehicle with a lost
+  link three returns in three seconds, each voided, and a delivery on stale facts that spent its
+  parcel's last try.
+
+Rules 4 and older logs replay under their own rules; `RULES_MARKERS` flags a log claiming rules 4
+that carries the fleet's routes. Rules 5 and rules 6 are separate bumps (one change, one bump,
+rules-versioning.md). Detail: docs/design/delivery-rules.md sections 7 and 8.2, dispatch.md,
+traffic.md section 10, fleet-organisation.md section 6.

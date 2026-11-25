@@ -1771,3 +1771,29 @@ async fn a_drop_zone_that_stays_not_clear_keeps_the_parcel_aboard_and_fails_the_
     assert!(s.detail.starts_with("drop zone not clear: occupied, 2 seen after waiting 20 s"), "{}", s.detail);
     assert_eq!(w.count("MAV_CMD_DO_GRIPPER"), 0, "the parcel was never let go");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_car_stops_at_the_drop_zone_looks_and_lets_go_after_its_mission() {
+    // a car's mission carries no release item: it drives to the zone, holds there, looks, and is
+    // told to let go then (it used to wait at the zone for a release that only comes after)
+    let (car, w) = watched(43, Firmware::Rover, Quirks { speed: 20.0, ..Quirks::default() });
+    sleep(Duration::from_millis(500)).await;
+    // the parcel aboard, its gripper closed, and the servo reported open once it is told to let go
+    car.write(|v| v.payload_pwm = Some(1900));
+    let (servo, seen) = (car.clone(), w.clone());
+    tokio::spawn(async move {
+        while seen.count("MAV_CMD_DO_GRIPPER") == 0 {
+            sleep(Duration::from_millis(100)).await;
+        }
+        servo.write(|v| v.payload_pwm = Some(1000));
+    });
+    let tm = TaskManager::default();
+    let mut order = looked_delivery(43, &car, Arc::new(AtomicBool::new(true)), Duration::from_secs(60));
+    order.params.release = Some("slip".into());
+    let t = tm.dispatch_unchecked(order);
+    let s = settle(&t.ops[0], 400).await;
+    assert_eq!(s.state, Done, "{s:?}");
+    assert_eq!(s.detail, "the parcel released");
+    assert_eq!(w.count("MAV_CMD_DO_GRIPPER"), 1, "released by command at the zone");
+    assert_eq!(w.count("mission MAV_CMD_DO_GRIPPER"), 0, "no release item in the mission");
+}

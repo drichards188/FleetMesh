@@ -132,6 +132,9 @@ const ALERT_HEADLINE: Record<string, string> = {
   traffic_noncooperative_near: 'Something with no broadcast is close to one of ours: only our own sensors see it',
   traffic_broadcast_disagrees: 'A broadcast position disagrees with our own sensors: it may be faulty or spoofed',
   traffic_picture_degraded: 'The traffic picture is degraded: a feed or a receiver is silent',
+  fleet_conflict: 'One of ours has waited long for another of ours: automation keeps it waiting',
+  return_held: 'A return has waited long: automation keeps holding it',
+  parcel_no_vehicle: 'A parcel no vehicle carries within the payload margin: it waits at the hub',
 }
 
 /** An alert as headline (what it asks), the bridge's detail as up to three bullets, and the

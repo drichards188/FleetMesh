@@ -29,6 +29,10 @@ pub const PHYSICS_HZ: u32 = 10;
 const HOME_FOLLOW_M: f64 = 2.0;
 const HOME_FOLLOW_S: f64 = 5.0;
 
+/// A moored boat (`VehicleConfig::moored`) that disarms this close to its berth, m, is tied up
+/// there again: the current no longer carries it off.
+const MOOR_AGAIN_M: f64 = 15.0;
+
 pub struct Vehicle {
     pub cfg: VehicleConfig,
     pub behavior: Box<dyn Behavior>,
@@ -318,9 +322,19 @@ impl Vehicle {
         } else {
             None
         };
-        // tied up until it first arms: the water still under it, no current to carry it off
+        // tied up until it first arms: the water still under it, no current to carry it off. One
+        // that was moored and comes back to its berth (within MOOR_AGAIN_M of where it spawned)
+        // and disarms there is tied up again, as a crew makes a boat fast at its berth
         if self.moored && self.st.armed {
             self.moored = false;
+        }
+        if !self.moored
+            && !self.st.armed
+            && self.cfg.moored
+            && self.cfg.start_at.is_none()
+            && crate::geo::distance_m(self.st.lat, self.st.lon, self.cfg.home[0], self.cfg.home[1]) <= MOOR_AGAIN_M
+        {
+            self.moored = true;
         }
         if self.moored
             && let Some(s) = sample.as_mut()

@@ -1669,6 +1669,14 @@ impl Decision {
             }
         }
         snapshot::delivery_vehicle_inputs(&self.world, self.facts_catalog(), &mut di);
+        // rules 5: the fleet's own vehicles' routes still ahead of them, for the separation rule
+        if self.rules.at_least(fleetmesh_decide::HUB_SEQUENCING_SINCE) {
+            for (uid, path) in &feed.routes {
+                if let Some(t) = di.traffic.get_mut(uid) {
+                    t.route = delivery_rt::remaining_route(t.position.value, path).into_iter().skip(1).collect();
+                }
+            }
+        }
         // rules 3: the picture of other traffic, when this run has one
         if self.rules.at_least(fleetmesh_decide::TRAFFIC_SEPARATION_SINCE)
             && self.traffic.active()
@@ -2485,7 +2493,9 @@ fn proposal(req: &IntentRequest, places: &fleetmesh_decide::delivery::Places) ->
             site: match p.site.as_ref().ok_or_else(|| bad("pickup needs a site (a hub id or [lon, lat])".into()))? {
                 SiteParam::Id(id) => {
                     let h = places.hubs.get(id).ok_or_else(|| bad(format!("unknown hub {id}")))?;
-                    fleetmesh_decide::Place { id: Some(id.clone()), at: h.at() }
+                    // rules 5: where at the hub (the vehicle's stand); the engine's order rule
+                    // checks it lies within the hub
+                    fleetmesh_decide::Place { id: Some(id.clone()), at: p.at.map_or_else(|| h.at(), ll) }
                 }
                 SiteParam::Point(pt) => fleetmesh_decide::Place { id: None, at: ll(*pt) },
             },
@@ -2514,7 +2524,8 @@ fn proposal(req: &IntentRequest, places: &fleetmesh_decide::delivery::Places) ->
             }) {
                 Some(id) => {
                     let h = places.hubs.get(id).ok_or_else(|| bad(format!("unknown hub {id}")))?;
-                    Some(fleetmesh_decide::Place { id: Some(id.clone()), at: h.at() })
+                    // rules 5: the stand or pad it lands on
+                    Some(fleetmesh_decide::Place { id: Some(id.clone()), at: p.at.map_or_else(|| h.at(), ll) })
                 }
                 None => None,
             },
@@ -2573,6 +2584,10 @@ pub struct DeliveryFeed {
     /// Each vehicle's navigation trust as the monitor holds it and how long better conditions
     /// have held (the hysteresis the rules read).
     pub nav_hysteresis: BTreeMap<DUid, (fleetmesh_decide::delivery::NavTrust, f64)>,
+    /// Rules 5: each vehicle's dispatched route (a delivery, a return, a reroute, a transit), its
+    /// points in travel order, for the separation rule's prediction of the fleet's own vehicles
+    /// (the part still ahead of each is cut at each decision).
+    pub routes: BTreeMap<DUid, Vec<LonLat>>,
 }
 
 /// The world's hubs and drop zones: `FLEETMESH_HUBS`, else `sim/hubs.toml` under the root; none

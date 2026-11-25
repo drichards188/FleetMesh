@@ -182,6 +182,12 @@ export interface Alert {
     | 'traffic_noncooperative_near'
     | 'traffic_broadcast_disagrees'
     | 'traffic_picture_degraded'
+    // rules 5: one of our vehicles has waited long for the hub to sequence it or for another of
+    // ours (automation goes on waiting and never sends the order to a person for it), a return
+    // held long by what automation waits out, a parcel no vehicle carries within the payload margin
+    | 'fleet_conflict'
+    | 'return_held'
+    | 'parcel_no_vehicle'
   severity: Severity
   /** the vehicle it is about; a traffic_picture_degraded alert is about none (null, absent or a uid
    *  the fleet does not have: the card names the picture instead) */
@@ -251,6 +257,9 @@ export const ALERT_LABEL: Record<Alert['kind'], string> = {
   traffic_noncooperative_near: 'UNIDENTIFIED TRAFFIC NEAR',
   traffic_broadcast_disagrees: 'BROADCAST DISAGREES WITH OUR SENSORS',
   traffic_picture_degraded: 'TRAFFIC PICTURE DEGRADED',
+  fleet_conflict: 'WAITING FOR ANOTHER OF OURS',
+  return_held: 'RETURN HELD',
+  parcel_no_vehicle: 'NO VEHICLE CARRIES IT',
 }
 
 /** The alert kinds about other traffic: their cards link to the track as well as the vehicle. */

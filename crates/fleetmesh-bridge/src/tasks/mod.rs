@@ -148,6 +148,11 @@ pub struct TaskParams {
     /// return_to_hub, swap_battery: a hub's id
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<String>,
+    /// pickup and return_to_hub at a hub named by its id (rules 5): where at the hub, [lon, lat]
+    /// (the vehicle's own stand, or the pad automation gave it), within the hub's radius; absent:
+    /// the hub's own point
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<LngLat>,
     /// swap_battery: a pad's id
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pad: Option<String>,

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { dueText, filterCounts, filterParcels, isLate, PARCEL_FILTERS, parcelStateLabel, type ParcelFilter } from './delivery'
+import { dueText, failureText, filterCounts, filterParcels, isLate, PARCEL_FILTERS, parcelStateLabel, type ParcelFilter } from './delivery'
 import type { DeliveryFeed } from './useDelivery'
 import './delivery.css'
 
@@ -83,6 +83,11 @@ export function ParcelsPanel({ feed, nameOf, onVehicle, onPlace, onClose, banner
                   <span className="muted">No vehicle yet{p.tries > 0 ? ` (${p.tries} ${p.tries === 1 ? 'try' : 'tries'})` : ''}</span>
                 )}
               </p>
+              {p.state === 'failed' && p.failure && (
+                <p className="pc-why" title={p.failure.intent ? `order i${p.failure.intent}` : undefined}>
+                  Why: {failureText(p)}
+                </p>
+              )}
             </article>
           )
         })}

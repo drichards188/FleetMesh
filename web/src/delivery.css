@@ -24,6 +24,7 @@
 .pc-due { margin-left: auto; font-size: var(--text-label); color: var(--muted); }
 .pc-due.late { color: var(--bad); font-weight: 600; }
 .pc-route, .pc-veh { margin: 3px 0 0; font-size: var(--text-body); }
+.pc-why { margin: 3px 0 0; font-size: var(--text-label); color: var(--muted); overflow-wrap: anywhere; }
 .pc-card .link { background: none; border: 0; padding: 0; color: var(--air); text-decoration: underline dotted; cursor: pointer; font: inherit; }
 .pc-card .link:disabled { color: var(--text); text-decoration: none; cursor: default; }
 

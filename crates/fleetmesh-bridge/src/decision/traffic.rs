@@ -153,6 +153,12 @@ fn silent_after_s(kind: &str, network: bool) -> f64 {
 /// Before this much of the feeds' time has passed nothing counts as not heard yet, s.
 const WARMUP_S: f64 = 45.0;
 
+/// The picture's start: for this long after its source attached (the bridge may start before the
+/// simulator's or a receiver's feeds are up), s, a picture not yet whole is `starting`, not a
+/// fault: the rules read it as they read any degraded picture (a departure that needs it waits),
+/// and no person is told. A picture still degraded after it is an issue as before.
+pub const STARTUP_GRACE_S: f64 = 60.0;
+
 /// One built picture: what the rules read, and what the API and the console get.
 pub struct Built {
     /// The scenario clock's ms the picture is for (the tracks' own times).
@@ -182,6 +188,8 @@ struct Inner {
     onboard: Vec<Value>,
     sensors_read: bool,
     first_t: Option<i64>,
+    /// the scenario clock's ms at the first picture built (the start of [`STARTUP_GRACE_S`])
+    started_ms: Option<i64>,
     /// scenario ms = local estimate + this (the simulator's clock, read from its `/health`)
     clock_offset_ms: i64,
     qnh: Option<f64>,
@@ -221,6 +229,7 @@ impl Picture {
                 onboard: Vec::new(),
                 sensors_read: false,
                 first_t: None,
+                started_ms: None,
                 clock_offset_ms: 0,
                 qnh: None,
                 truth: None,
@@ -243,6 +252,12 @@ impl Picture {
     /// A source is attached: `live` (the simulator's sockets) or `in_process` (the headless one).
     pub fn attach(&self, source: &'static str) {
         self.lock().source = Some(source);
+    }
+
+    /// Whether the last picture built is still starting ([`STARTUP_GRACE_S`] of the scenario's
+    /// clock since the first) and not yet whole.
+    pub fn starting(&self) -> bool {
+        self.built().is_some_and(|b| b.summary["starting"].as_bool() == Some(true))
     }
 
     /// Whether this run has a traffic source.
@@ -273,6 +288,9 @@ impl Picture {
         let mut sites: Vec<SensorSite> = Vec::new();
         let mut shown = Vec::new();
         let mut onboard = Vec::new();
+        // what each receiver was heard as stays across a re-read of the list (each ten minutes):
+        // a re-read is not a silence
+        let heard: BTreeMap<(String, String), (Option<i64>, u64)> = g.receivers.iter().map(|(k, r)| (k.clone(), (r.last_t, r.lines))).collect();
         g.receivers.clear();
         g.sessions.clear();
         for e in list {
@@ -309,10 +327,9 @@ impl Picture {
                     (Some(lon), Some(lat)) => Some(LonLat::new(lon, lat)),
                     _ => None,
                 };
-                g.receivers.insert(
-                    (id.clone(), kind.to_string()),
-                    Rx { id: id.clone(), kind: kind.into(), network, at, range_m: e["nominal_range_m"].as_f64(), last_t: None, lines: 0 },
-                );
+                let key = (id.clone(), kind.to_string());
+                let (last_t, lines) = heard.get(&key).copied().unwrap_or((None, 0));
+                g.receivers.insert(key, Rx { id: id.clone(), kind: kind.into(), network, at, range_m: e["nominal_range_m"].as_f64(), last_t, lines });
             }
             shown.push(v);
         }
@@ -494,8 +511,12 @@ impl Picture {
                 )
             })
             .collect();
+        let started = *g.started_ms.get_or_insert(scen_ms);
+        let starting = ((scen_ms - started) as f64) < STARTUP_GRACE_S * 1000.0;
         let summary = json!({
             "state": if state == PictureState::Ok { "ok" } else { "degraded" },
+            // its first minute: not whole yet, and not a fault (no one is told)
+            "starting": starting && state != PictureState::Ok,
             "reasons": reasons,
             "not_heard": keys,
             "feeds": feeds,

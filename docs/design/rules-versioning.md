@@ -27,7 +27,13 @@ reproduce that behaviour exactly.
    2026-11-25); rules 3 is `TRAFFIC_SEPARATION_SINCE` (separation from the traffic the fleet does
    not control, the picture of it logged by value; policy schema 3); rules 4 is `HOME_BASE_SINCE`
    (every vehicle has a home base, and the assigner costs a trip's way back to it; the policy
-   schema stays 3).
+   schema stays 3); rules 5 is `HUB_SEQUENCING_SINCE` (a hub sequences its own arrivals and
+   departures: the separation rule predicts the fleet's own vehicles along their dispatched routes,
+   or at rest when they are still, leaves a vehicle parked on a hub's stand to the hub for an order
+   on, leaving or reaching that hub, and words a hub-zone meeting as the hub's to sequence; a
+   pickup or a return may name a point within the hub's radius; the policy schema stays 3); rules 6
+   is `FLOOD_ALONG_ROUTE_SINCE` (the weather rule reads the ground and the water, a car's flood
+   and a boat's depth, where the order takes the vehicle, not anywhere; the policy schema stays 3).
 4. **After the first commit, any change that can alter a decision's outcome, a check's inputs, an
    event's shape or a replay check is gated.** The change adds a named constant
    `<NAME>_SINCE: u32 = N`, where `N` is the new `RULES_VERSION`, and code branches on
@@ -119,7 +125,12 @@ and a drop zone's `approval` in a decision's delivery inputs; replay's `check_ma
 `[rules.delivery.separation.traffic]` in the policy and `delivery.picture` in a decision's inputs,
 flagged in a log that claims rules 2 or older. Rules 4 marks a candidate's `home` in a
 `dispatch.plan`'s input (`dispatch.plan.input.vehicles.home`), flagged in a log that claims rules 3
-or older; replay re-runs the assigner under the log's rules (`dispatch::assign_under`). Replay flags a log whose version is older than a
+or older; replay re-runs the assigner under the log's rules (`dispatch::assign_under`). Rules 5
+marks a vehicle's `route` in the separation rule's traffic inputs
+(`check.result.inputs.delivery.traffic.route`: the bridge fills the fleet's dispatched routes from
+rules 5), flagged in a log that claims rules 4 or older. Rules 6 adds no field: the samples were
+logged before, and only which ones the rule reads changed, so a rules 5 log given a rules 6 header
+is found by its recomputed checks. Replay flags a log whose version is older than a
 marker it contains (an event that
 cannot have existed then), which catches a log edited to include newer events under an older
 version number, and a log of a newer version that is missing an event the version requires.

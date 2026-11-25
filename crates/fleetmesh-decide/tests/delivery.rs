@@ -1990,16 +1990,24 @@ fn assign_input(t: Time, based: bool) -> fleetmesh_decide::dispatch::AssignInput
     }
 }
 
+/// A rig deciding under rules 4 (home bases; before the hubs sequence their own traffic).
+fn v4_rig() -> Rig {
+    let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+    p.rules.rules_version = fleetmesh_decide::HOME_BASE_SINCE;
+    Rig::with_policy(p)
+}
+
 #[test]
 fn a_rules_4_dispatch_plan_replays_and_sends_the_parcel_with_the_drone_based_at_its_hub() {
-    let mut r = Rig::new();
+    let mut r = v4_rig();
     let input = assign_input(r.world.t, true);
     let plan = fleetmesh_decide::dispatch::assign(&input);
     assert_eq!(plan.assignments[0].vehicle.as_str(), "drone-2", "the drone based at the Presidio: {plan:?}");
     r.engine.record_dispatch_plan(1, input, plan).expect("logged");
     let text = r.log.text();
     assert!(text.contains("\"home\":\"hub-pier\""), "each candidate's home base is logged");
-    let report = r.replays();
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
     assert_eq!(report.rules_version, fleetmesh_decide::HOME_BASE_SINCE);
 }
 
@@ -2035,4 +2043,322 @@ fn a_rules_4_dispatch_plan_given_a_rules_3_header_is_found() {
     assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("vehicles.home")), "{:?}", rep.mismatches);
     // rules 3 costs the way back to the nearest hub: the visitor wins, not the plan logged
     assert!(rep.mismatches.iter().any(|m| m.what.contains("dispatch plan differs")), "{:?}", rep.mismatches);
+}
+
+// ---- rules 5: hubs sequence their own traffic; the fleet is predicted as it will move ----------
+
+fn under(version: u32) -> RulesConfig {
+    RulesConfig { rules_version: version, ..RulesConfig::default() }
+}
+
+/// A rig deciding under rules 5 (`HUB_SEQUENCING_SINCE`: before rules 6 read the ground where an
+/// order goes).
+fn v5_rig() -> Rig {
+    let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+    p.rules.rules_version = fleetmesh_decide::HUB_SEQUENCING_SINCE;
+    Rig::with_policy(p)
+}
+
+fn east_north(e: f64, n: f64) -> LonLat {
+    fleetmesh_decide::geo::offset(hub(), e, n)
+}
+
+fn presidio_at(at: LonLat) -> Place {
+    Place { id: Some("hub-presidio".into()), at }
+}
+
+#[test]
+fn from_rules_5_a_still_vehicle_is_predicted_where_it_is_not_carried_off_by_its_velocity_noise() {
+    let mut w = world();
+    // sky-1 comes home to the Presidio hub from 300 m west of it
+    w.vehicles.get_mut(&sky()).expect("sky-1").position = Some(Fact::new(east_north(-300.0, 0.0), t0()));
+    // sky-2 hovers 320 m east of the hub at the same height; its velocity estimate is 0.45 m/s of
+    // noise towards it
+    let mut t = other(east_north(320.0, 0.0), t0(), Some(80.0), Domain::Air);
+    t.velocity_mps = Some([-0.45, 0.0]);
+    t.speed_mps = Some(0.45);
+    di(&mut w).traffic.insert(Uid::new("sky-2"), t);
+    let home = Task::ReturnToHub { hub: Some(presidio_at(hub())) };
+    // rules 4 carried it 135 m towards the hub over the 300 s horizon, into the returning drone
+    expect(&run_with(home.clone(), &w, &under(HOME_BASE_SINCE)), RuleId::Separation, Outcome::Fail, Some("SEP_ROUTE_CONFLICT"));
+    // rules 5 predicts it where it hovers
+    expect_pass(&run_with(home, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+}
+
+#[test]
+fn from_rules_5_another_of_ours_flies_its_route_at_cruise_and_stops_at_its_end() {
+    let mut w = world();
+    // sky-2, another of our drones 600 m north of our route's middle, is just leaving for a zone
+    // there: still slow and low, its route ahead of it ending where our route passes
+    w.vehicles.insert(Uid::new("sky-2"), vehicle("delivery_drone", t0()));
+    let mut t = other(fleetmesh_decide::geo::offset(mid(), 0.0, 600.0), t0(), Some(10.0), Domain::Air);
+    t.route = vec![mid()];
+    t.speed_mps = Some(1.0);
+    di(&mut w).traffic.insert(Uid::new("sky-2"), t);
+    // rules 4 took it at its 1 m/s and its 10 m: no meeting; rules 5 flies it there at its cruise
+    // and its cruise height, and it is at rest there when we pass
+    let new = run_with(deliver(), &w, &under(HUB_SEQUENCING_SINCE));
+    let old = run_with(deliver(), &w, &under(HOME_BASE_SINCE));
+    expect_pass(&old, RuleId::Separation);
+    assert_ne!(result(&new, RuleId::Separation).outcome, Outcome::Pass, "{}", result(&new, RuleId::Separation).detail);
+}
+
+#[test]
+fn from_rules_5_a_car_leaving_its_bay_is_not_held_by_the_one_parked_in_the_next() {
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    di(&mut w).observations.insert("dz-marina-kerb".into(), DzObservation { t: t0(), state: ObservedState::Clear, count: 0 });
+    // the next bay, 6 m east: a car parked there, inside the 10 m ground minimum
+    let mut parked = other(east_north(6.0, 0.0), t0(), None, Domain::Ground);
+    parked.velocity_mps = Some([0.1, 0.0]);
+    parked.speed_mps = Some(0.1);
+    di(&mut w).traffic.insert(Uid::new("car-2"), parked);
+    let to_kerb = deliver_to("dz-marina-kerb");
+    // rules 4: a person decided who waits; rules 5: the hub's bays keep it clear of a parked car
+    let old = run_with(to_kerb.clone(), &w, &under(HOME_BASE_SINCE));
+    expect(&old, RuleId::Separation, Outcome::Hold, Some("SEP_HUB_ZONE"));
+    assert!(result(&old, RuleId::Separation).detail.contains("a person decides who waits"));
+    expect_pass(&run_with(to_kerb.clone(), &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+    // a car parked on its way outside the hub is kept clear of as before
+    let b = places().drop_zones["dz-marina-kerb"].at();
+    let f = 300.0 / fleetmesh_decide::geo::haversine_m(hub(), b);
+    let on_way = LonLat::new(hub().lon + (b.lon - hub().lon) * f, hub().lat + (b.lat - hub().lat) * f);
+    di(&mut w).traffic.insert(Uid::new("car-2"), other(on_way, t0(), None, Domain::Ground));
+    expect(&run_with(to_kerb, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation, Outcome::Fail, Some("SEP_ROUTE_CONFLICT"));
+}
+
+#[test]
+fn from_rules_5_a_pickup_names_the_vehicles_stand_and_loads_there_and_the_hub_sequences_the_rest() {
+    let mut w = world();
+    // sky-1 on its stand, 40 m east of the hub's point (inside its 60 m radius); sky-2 hovering over
+    // the hub's point at cruise height
+    let stand = east_north(40.0, 0.0);
+    let v = w.vehicles.get_mut(&sky()).expect("sky-1");
+    v.position = Some(Fact::new(stand, t0()));
+    v.home = Some(Fact::new(stand, t0()));
+    di(&mut w).parcels.insert("p-2".into(), ParcelFact { mass_kg: Some(1.0), class: "normal".into(), state: ParcelState::Ready, vehicle: Some(sky()) });
+    di(&mut w).traffic.insert(Uid::new("sky-2"), other(hub(), t0(), Some(80.0), Domain::Air));
+    let pickup = |at: LonLat| Task::Pickup { parcel: "p-2".into(), site: presidio_at(at), load_by_s: None };
+    let rs = run_with(pickup(stand), &w, &under(HUB_SEQUENCING_SINCE));
+    expect_pass(&rs, RuleId::Order);
+    expect_pass(&rs, RuleId::Separation);
+    assert!(result(&rs, RuleId::Separation).detail.contains("loads where it stands"), "{}", result(&rs, RuleId::Separation).detail);
+    // a few centimetres of noise in its position are no route either
+    let rs = run_with(pickup(east_north(40.05, 0.03)), &w, &under(HUB_SEQUENCING_SINCE));
+    expect_pass(&rs, RuleId::Separation);
+    // rules 4 took only the hub's own point
+    expect(&run_with(pickup(stand), &w, &under(HOME_BASE_SINCE)), RuleId::Order, Outcome::Fail, Some("ORDER_SITE_MISMATCH"));
+    // sent to the hub's point it flies there, under the one hovering over it: the hub sequences them
+    let rs = run_with(pickup(hub()), &w, &under(HUB_SEQUENCING_SINCE));
+    expect(&rs, RuleId::Separation, Outcome::Hold, Some("SEP_HUB_ZONE"));
+    assert!(result(&rs, RuleId::Separation).detail.contains("the hub sequences them"), "{}", result(&rs, RuleId::Separation).detail);
+    // a point outside the hub's radius is not at the hub
+    expect(&run_with(pickup(east_north(90.0, 0.0)), &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Order, Outcome::Fail, Some("ORDER_SITE_MISMATCH"));
+    // a return may name its stand too
+    let home = Task::ReturnToHub { hub: Some(presidio_at(stand)) };
+    expect_pass(&run_with(home.clone(), &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Order);
+    expect(&run_with(home, &w, &under(HOME_BASE_SINCE)), RuleId::Order, Outcome::Fail, Some("ORDER_SITE_MISMATCH"));
+}
+
+/// Another of ours, sky-2, 2 km north of the hub with its route ahead of it (from rules 5 the
+/// bridge gives the separation rule the fleet's dispatched routes), restamped at `t`.
+fn routed_other(r: &mut Rig) {
+    let t = r.world.t;
+    let mut o = other(east_north(0.0, 2000.0), t, Some(80.0), Domain::Air);
+    o.route = vec![east_north(600.0, 2600.0)];
+    o.speed_mps = Some(12.0);
+    di(&mut r.world).traffic.insert(Uid::new("sky-2"), o);
+}
+
+#[test]
+fn a_rules_5_log_with_the_fleets_routes_replays_and_given_a_rules_4_header_is_found() {
+    let mut r = v5_rig();
+    routed_other(&mut r);
+    let first = r.agent(deliver());
+    r.run_out(first);
+    later(&mut r, 10_000);
+    routed_other(&mut r);
+    let second = r.agent(deliver());
+    r.run_out(second);
+    for id in [first, second] {
+        assert_eq!(r.tier(id).1, "routine-delivery", "{:?}", r.codes(id));
+    }
+    let text = r.log.text();
+    assert!(text.lines().next().is_some_and(|l| l.contains("\"rules_version\":5,") && l.contains("\"policy_schema\":3")), "a rules 5 header");
+    assert!(text.contains("\"route\":[["), "the fleet's routes are logged");
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
+    assert_eq!(report.rules_version, fleetmesh_decide::HUB_SEQUENCING_SINCE);
+    // the same log with a rules 4 header carries what rules 4 could not have
+    let mut events = fleetmesh_decide::audit::parse_log(&text).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(fleetmesh_decide::HOME_BASE_SINCE);
+    let opts = fleetmesh_decide::replay::ReplayOptions { rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1), ..Default::default() };
+    let rep = fleetmesh_decide::replay::replay_with(&events, &opts);
+    assert!(rep.mismatches.iter().any(|m| m.what.contains("rules markers") && m.logged.contains("traffic.route")), "{:?}", rep.mismatches);
+}
+
+#[test]
+fn a_rules_4_hub_zone_hold_given_a_rules_5_header_is_found() {
+    // rules 4: a car leaving its bay beside a parked one waited for a person
+    let mut r = v4_rig();
+    r.world.vehicles.insert(sky(), vehicle("delivery_car", r.world.t));
+    let t = r.world.t;
+    di(&mut r.world).observations.insert("dz-marina-kerb".into(), DzObservation { t, state: ObservedState::Clear, count: 0 });
+    di(&mut r.world).traffic.insert(Uid::new("car-2"), other(east_north(6.0, 0.0), t, None, Domain::Ground));
+    let id = r.agent(deliver_to("dz-marina-kerb"));
+    assert!(r.codes(id).contains(&"SEP_HUB_ZONE".to_string()), "{:?}", r.codes(id));
+    let text = r.log.text();
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
+    assert_eq!(report.rules_version, fleetmesh_decide::HOME_BASE_SINCE);
+    let mut events = fleetmesh_decide::audit::parse_log(&text).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(fleetmesh_decide::HUB_SEQUENCING_SINCE);
+    let opts = fleetmesh_decide::replay::ReplayOptions { rules: fleetmesh_decide::replay::RulesAccepted::AtLeast(1), ..Default::default() };
+    let rep = fleetmesh_decide::replay::replay_with(&events, &opts);
+    // rules 5 leaves the parked car to the hub: the hold recomputes as clear
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
+}
+
+// ---- rules 6: the ground and the water where an order goes ----------------------------------
+
+/// A sample over a boat dock 400 m north of the hub: its ground is the seabed, 4.3 m under a 1 m
+/// tide, 5.3 m deep.
+fn dock_sample(t: Time) -> WxFact {
+    let mut s = calm(t);
+    s.at = east_north(0.0, 400.0);
+    (s.tide_m, s.ground_m, s.depth_m) = (Some(1.0), Some(-4.3), Some(5.3));
+    s
+}
+
+#[test]
+fn from_rules_6_a_cars_flood_check_reads_the_ground_where_it_goes_not_a_docks_seabed() {
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    di(&mut w).weather.push(dock_sample(t0()));
+    let to_kerb = deliver_to("dz-marina-kerb");
+    expect(&run_with(to_kerb.clone(), &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Weather, Outcome::Hold, Some("WX_FLOOD_RISK"));
+    expect_pass(&run_with(to_kerb.clone(), &w, &under(FLOOD_ALONG_ROUTE_SINCE)), RuleId::Weather);
+    // the tide near the ground at the car's own kerb still holds it
+    let mut kerb = calm(t0());
+    kerb.at = places().drop_zones["dz-marina-kerb"].at();
+    (kerb.tide_m, kerb.ground_m) = (Some(1.8), Some(2.0));
+    di(&mut w).weather.push(kerb);
+    expect(&run_with(to_kerb, &w, &under(FLOOD_ALONG_ROUTE_SINCE)), RuleId::Weather, Outcome::Hold, Some("WX_FLOOD_RISK"));
+    // a boat: the water under it where it goes, not the shallowest anywhere
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_boat", t0()));
+    let mut shoal = calm(t0());
+    shoal.at = east_north(-900.0, 0.0);
+    shoal.depth_m = Some(0.4);
+    di(&mut w).weather.push(shoal);
+    let to_dock = deliver_to("dz-pier-dock");
+    expect(&run_with(to_dock.clone(), &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Weather, Outcome::Fail, Some("TIDE_AGROUND"));
+    expect_pass(&run_with(to_dock, &w, &under(FLOOD_ALONG_ROUTE_SINCE)), RuleId::Weather);
+}
+
+#[test]
+fn a_rules_6_log_replays_and_a_rules_5_flood_hold_given_a_rules_6_header_is_found() {
+    let car_delivery = |r: &mut Rig| {
+        let t = r.world.t;
+        r.world.vehicles.insert(sky(), vehicle("delivery_car", t));
+        di(&mut r.world).weather.push(dock_sample(t));
+        di(&mut r.world).observations.insert("dz-marina-kerb".into(), DzObservation { t, state: ObservedState::Clear, count: 0 });
+        r.agent(deliver_to("dz-marina-kerb"))
+    };
+    // rules 6 (this build): the dock's seabed is not the car's ground
+    // (with no terrain installed here the car's domain check cannot pass: the weather is the point)
+    let mut r = Rig::new();
+    let id = car_delivery(&mut r);
+    assert!(!r.codes(id).contains(&"WX_FLOOD_RISK".to_string()), "{:?}", r.codes(id));
+    assert_eq!(r.replays().rules_version, fleetmesh_decide::FLOOD_ALONG_ROUTE_SINCE);
+    // rules 5 held it for a person, and replays so under its own rules
+    let mut r = v5_rig();
+    let id = car_delivery(&mut r);
+    assert!(r.codes(id).contains(&"WX_FLOOD_RISK".to_string()), "{:?}", r.codes(id));
+    let text = r.log.text();
+    let report = replay_any(&text);
+    assert!(report.ok(), "{:?}", report.mismatches);
+    let mut events = fleetmesh_decide::audit::parse_log(&text).expect("parses");
+    let Some(EventBody::RunStarted { rules_version, .. }) = events.first_mut().map(|e| &mut e.body) else {
+        panic!("a log starts with run.started");
+    };
+    *rules_version = Some(fleetmesh_decide::FLOOD_ALONG_ROUTE_SINCE);
+    let rep = fleetmesh_decide::replay::replay(&events);
+    assert!(rep.mismatches.iter().any(|m| m.what == "check results differ"), "{:?}", rep.mismatches);
+}
+
+#[test]
+fn from_rules_5_two_vehicles_at_rest_do_not_drift_towards_each_other() {
+    // a car comes home to the Presidio hub from 300 m west (it is there after 50 s); a drone sits
+    // landed 100 m east of the hub's point, outside the hub's radius
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    w.vehicles.get_mut(&sky()).expect("car").position = Some(Fact::new(east_north(-300.0, 0.0), t0()));
+    w.vehicles.insert(Uid::new("sky-2"), vehicle("delivery_drone", t0()));
+    di(&mut w).traffic.insert(Uid::new("sky-2"), other(east_north(100.0, 0.0), t0(), Some(0.0), Domain::Air));
+    let home = Task::ReturnToHub { hub: Some(presidio_at(hub())) };
+    // rules 4 grew the uncertainty for the whole 300 s, to 160 m round a car and a drone that
+    // were both standing still: a conflict at +300 s
+    let old = run_with(home.clone(), &w, &under(HOME_BASE_SINCE));
+    assert_ne!(result(&old, RuleId::Separation).outcome, Outcome::Pass, "{}", result(&old, RuleId::Separation).detail);
+    // rules 5 stops it growing once both are at rest
+    expect_pass(&run_with(home, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+}
+
+#[test]
+fn from_rules_5_a_car_keeps_no_minimum_from_a_drone_leaving_its_pad_for_its_cruise_height() {
+    // a drone of ours lifting off 6 m beside the car's way out, its route ahead of it: under rules 4
+    // it counted as a vehicle on the ground (it was 3 m up), from rules 5 at the height it will fly
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    di(&mut w).observations.insert("dz-marina-kerb".into(), DzObservation { t: t0(), state: ObservedState::Clear, count: 0 });
+    w.vehicles.insert(Uid::new("sky-2"), vehicle("delivery_drone", t0()));
+    let b = places().drop_zones["dz-marina-kerb"].at();
+    let f = 150.0 / fleetmesh_decide::geo::haversine_m(hub(), b);
+    let beside = fleetmesh_decide::geo::offset(LonLat::new(hub().lon + (b.lon - hub().lon) * f, hub().lat + (b.lat - hub().lat) * f), 0.0, 6.0);
+    let mut d = other(beside, t0(), Some(3.0), Domain::Air);
+    d.route = vec![fleetmesh_decide::geo::offset(beside, 0.0, 2000.0)];
+    di(&mut w).traffic.insert(Uid::new("sky-2"), d);
+    let to_kerb = deliver_to("dz-marina-kerb");
+    assert_ne!(result(&run_with(to_kerb.clone(), &w, &under(HOME_BASE_SINCE)), RuleId::Separation).outcome, Outcome::Pass);
+    expect_pass(&run_with(to_kerb, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+}
+
+#[test]
+fn from_rules_5_a_car_coming_back_to_its_kerb_is_not_held_by_the_cars_parked_there() {
+    // a car comes back to the Presidio hub from 600 m east; another is parked in a bay 40 m east of
+    // the hub's point (inside its 60 m radius). Under rules 4 it was kept 10 m clear of plus the
+    // uncertainty grown on the way in (40 m at +80 s): the parked car "met" it before the hub
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    w.vehicles.get_mut(&sky()).expect("car").position = Some(Fact::new(east_north(600.0, 0.0), t0()));
+    di(&mut w).traffic.insert(Uid::new("car-2"), other(east_north(40.0, 0.0), t0(), None, Domain::Ground));
+    let home = Task::ReturnToHub { hub: Some(presidio_at(hub())) };
+    assert_ne!(result(&run_with(home.clone(), &w, &under(HOME_BASE_SINCE)), RuleId::Separation).outcome, Outcome::Pass);
+    expect_pass(&run_with(home, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+}
+
+#[test]
+fn from_rules_5_two_cars_coming_back_to_neighbouring_bays_are_the_hubs_to_park() {
+    // a car comes home to the Presidio hub's point from 300 m west; another of ours comes home to
+    // the bay 6 m east of it from 150 m north, its route ahead of it, arriving well before
+    let mut w = world();
+    w.vehicles.insert(sky(), vehicle("delivery_car", t0()));
+    w.vehicles.get_mut(&sky()).expect("car").position = Some(Fact::new(east_north(-300.0, 0.0), t0()));
+    w.vehicles.insert(Uid::new("car-2"), vehicle("delivery_car", t0()));
+    let mut b = other(east_north(6.0, 150.0), t0(), None, Domain::Ground);
+    b.route = vec![east_north(6.0, 0.0)];
+    b.speed_mps = Some(6.0);
+    di(&mut w).traffic.insert(Uid::new("car-2"), b);
+    let home = Task::ReturnToHub { hub: Some(presidio_at(hub())) };
+    // rules 4: the two ends 6 m apart, inside the 10 m ground minimum, held for the horizon
+    expect(&run_with(home.clone(), &w, &under(HOME_BASE_SINCE)), RuleId::Separation, Outcome::Hold, Some("SEP_HUB_ZONE"));
+    // rules 5: once it is in its bay it is the hub's, and the way in was clear
+    expect_pass(&run_with(home, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
 }

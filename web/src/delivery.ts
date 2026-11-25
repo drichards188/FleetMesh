@@ -23,6 +23,34 @@ export interface Parcel {
   /** the vehicle carrying or assigned to it (its uid), if any */
   vehicle: string | null
   tries: number
+  /** why it failed (absent while it has not): the end that made automation give it up */
+  failure?: ParcelEnd | null
+  /** how its earlier attempts fell short, oldest first (the bridge keeps the last few) */
+  ends?: ParcelEnd[]
+}
+
+/** How one attempt at a parcel fell short (`delivery_rt.rs` `TryEnd`). */
+export interface ParcelEnd {
+  /** pickup, deliver, look (the look before departure or over the zone kept it) or return */
+  stage: string
+  /** rejected, failed, expired, voided, aborted or kept */
+  ended: string
+  /** the refusing or holding checks' reason codes (none for a task-layer failure) */
+  codes?: string[]
+  detail: string
+  vehicle?: string
+  intent?: number
+  /** seconds into the scenario */
+  at_s: number
+}
+
+/** Why a parcel failed, in a line: "deliver rejected (SEP_ROUTE_CONFLICT): ...". Empty when it has
+ *  not failed. */
+export function failureText(p: Pick<Parcel, 'failure'>): string {
+  const f = p.failure
+  if (!f) return ''
+  const codes = f.codes?.length ? ` (${f.codes.join(', ')})` : ''
+  return `${f.stage} ${f.ended}${codes}: ${f.detail}`
 }
 
 export interface ParcelsDoc {

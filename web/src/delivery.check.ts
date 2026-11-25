@@ -4,7 +4,7 @@
 // what waits, the oldest wait and the decisions of a person in ten minutes (a check's rejection, an
 // expiry and a voiding are not decisions); payload and navigation words.
 import assert from 'node:assert/strict'
-import { decisionsIn, dueText, filterCounts, filterParcels, inFilter, isLate, loadTone, loadWords, navOf, navWords, observationText, observationTone, operatorLoad, parcelAt, payloadWords, spanText, waitingSince, type DropZone, type Hub, type Parcel } from './delivery.ts'
+import { decisionsIn, dueText, failureText, filterCounts, filterParcels, inFilter, isLate, loadTone, loadWords, navOf, navWords, observationText, observationTone, operatorLoad, parcelAt, payloadWords, spanText, waitingSince, type DropZone, type Hub, type Parcel } from './delivery.ts'
 
 const p = (id: string, state: string, due_s: number, o: Partial<Parcel> = {}): Parcel => ({ id, state, from: 'hub-a', to: 'dz-1', mass_kg: 1, priority: 2, class: 'normal', ready_s: 0, due_s, vehicle: null, tries: 0, ...o })
 
@@ -33,6 +33,13 @@ assert.equal(filterParcels([p('x', 'waiting', 500), p('y', 'waiting', 50)], 'wai
 assert.equal(spanText(45), '45 s')
 assert.equal(spanText(600), '10 min')
 assert.equal(spanText(5400 + 300), '1 h 35 min')
+// why a parcel failed, in a line; nothing for one that has not
+assert.equal(failureText(p('a', 'delivered', 10)), '')
+assert.equal(
+  failureText(p('f', 'failed', 10, { failure: { stage: 'deliver', ended: 'rejected', codes: ['SEP_ROUTE_CONFLICT'], detail: '14: predicted loss of separation at +120 s', at_s: 761 } })),
+  'deliver rejected (SEP_ROUTE_CONFLICT): 14: predicted loss of separation at +120 s',
+)
+assert.equal(failureText(p('f', 'failed', 10, { failure: { stage: 'look', ended: 'kept', codes: ['DROP_NOT_CLEAR'], detail: 'not clear', at_s: 1 } })), 'look kept (DROP_NOT_CLEAR): not clear')
 assert.equal(dueText(p('a', 'waiting', 700), 100), 'due in 10 min')
 assert.equal(dueText(p('a', 'waiting', 100), 280), 'late by 3 min')
 assert.equal(dueText(p('a', 'delivered', 100), 280), 'delivered')

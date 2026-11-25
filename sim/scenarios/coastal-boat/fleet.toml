@@ -4,10 +4,11 @@ title = "Coastal boat leg (11 vehicles)"
 platform = "delivery_boat"
 count = 4
 sim = "standin"
-spacing_m = 30
-# at the Pier 39 boat dock (hub-pier-dock), in the marina basin
-spawn = [37.8098, -122.4090, 0, 90]
+spacing_m = 20
+# at their berths at the Pier 39 boat dock (hub-pier-dock), tied up until they first cast off
+spawn = [37.8106, -122.4080, 0, 90]
 home_hub = "hub-pier-dock"
+moored = true
 
 [[unit]]
 platform = "delivery_drone"
