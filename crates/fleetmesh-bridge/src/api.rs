@@ -89,6 +89,7 @@ pub fn router(app: App) -> Router {
         .route("/api/intents/{id}", get(get_intent))
         .route("/api/intents/{id}/{action}", post(intent_action))
         .route("/api/inbox", get(inbox))
+        .route("/api/triage", get(triage))
         .route("/api/swarms", get(swarms))
         .route("/api/parcels", get(parcels))
         .route("/api/hubs", get(hubs))
@@ -491,6 +492,13 @@ async fn intent_action(
 
 async fn inbox(State(app): State<App>) -> Response {
     Json(app.decision.inbox_json()).into_response()
+}
+
+/// `GET /api/triage` (rules 7, docs/design/watch-officer.md): every item the AI watch officer
+/// triaged this run, with its verdict, note and recommendation: the person's audit of what the
+/// officer handled. Read-only; the audit log's `triage.*` events are the record.
+async fn triage(State(app): State<App>) -> Response {
+    Json(app.decision.triage_json()).into_response()
 }
 
 /// `GET /api/swarms` (murmur-z07i): each swarm the fleet manifest names, with its members'

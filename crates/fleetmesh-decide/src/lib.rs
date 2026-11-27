@@ -279,6 +279,7 @@ pub mod hash;
 pub mod ids;
 pub mod intent;
 pub mod nodes;
+pub mod officer;
 pub mod plan;
 pub mod passkey;
 pub mod policy;
@@ -331,7 +332,7 @@ pub use reach::{ReachNow, SensorNow};
 pub use route::{LegKind, Route, RouteLeg, Segment};
 pub use rules::{
     CheckResult, Outcome, POLICY_SCHEMA, POLICY_SCHEMA_NEWEST, RULES_MARKERS, RULES_NEWEST, RULES_VERSION, RuleId,
-    FLOOD_ALONG_ROUTE_SINCE, HOME_BASE_SINCE, HUB_SEQUENCING_SINCE, RulesConfig, STANDING_APPROVALS_SINCE, TRAFFIC_SEPARATION_SINCE, UnknownEndurance,
+    FLOOD_ALONG_ROUTE_SINCE, HOME_BASE_SINCE, HUB_SEQUENCING_SINCE, OFFICER_TRIAGE_SINCE, RulesConfig, STANDING_APPROVALS_SINCE, TRAFFIC_SEPARATION_SINCE, UnknownEndurance,
 };
 pub use nodes::{Evidence, LostMark, NodeLedger, Presumption, Revocation};
 pub use engine::{LossOutcome, NodeStep};

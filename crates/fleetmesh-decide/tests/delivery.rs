@@ -2276,7 +2276,7 @@ fn a_rules_6_log_replays_and_a_rules_5_flood_hold_given_a_rules_6_header_is_foun
     let mut r = Rig::new();
     let id = car_delivery(&mut r);
     assert!(!r.codes(id).contains(&"WX_FLOOD_RISK".to_string()), "{:?}", r.codes(id));
-    assert_eq!(r.replays().rules_version, fleetmesh_decide::FLOOD_ALONG_ROUTE_SINCE);
+    assert!(r.replays().rules_version >= fleetmesh_decide::FLOOD_ALONG_ROUTE_SINCE);
     // rules 5 held it for a person, and replays so under its own rules
     let mut r = v5_rig();
     let id = car_delivery(&mut r);
@@ -2361,4 +2361,123 @@ fn from_rules_5_two_cars_coming_back_to_neighbouring_bays_are_the_hubs_to_park()
     expect(&run_with(home.clone(), &w, &under(HOME_BASE_SINCE)), RuleId::Separation, Outcome::Hold, Some("SEP_HUB_ZONE"));
     // rules 5: once it is in its bay it is the hub's, and the way in was clear
     expect_pass(&run_with(home, &w, &under(HUB_SEQUENCING_SINCE)), RuleId::Separation);
+}
+
+// ---- rules 7: the watch officer's triage (docs/design/watch-officer.md) ---------------------------
+
+mod triage {
+    use super::*;
+    use fleetmesh_decide::officer::{ItemClass, Release, Route, TriageInput, Verdict};
+
+    fn held(agent: &str, codes: &[&str]) -> TriageInput {
+        TriageInput {
+            class: ItemClass::Held,
+            kind: "deliver".into(),
+            severity: None,
+            source: Some("agent".into()),
+            agent: Some(agent.into()),
+            codes: codes.iter().map(|c| c.to_string()).collect(),
+            expires_t: Some(t0().plus_ms(300_000)),
+        }
+    }
+
+    fn alert(kind: &str) -> TriageInput {
+        TriageInput { class: ItemClass::Alert, kind: kind.into(), severity: Some("medium".into()), source: None, agent: None, codes: vec![], expires_t: None }
+    }
+
+    fn officer() -> AgentId {
+        AgentId::new("agent-watch")
+    }
+
+    fn rec(r: &mut Rig, body: EventBody) {
+        r.engine.record_triage(body).expect("recorded");
+    }
+
+    fn routed(r: &mut Rig, item: &str, input: TriageInput) -> Route {
+        let p = r.engine.policy().officer.clone().expect("the shipped policy has [officer]");
+        let route = fleetmesh_decide::officer::route(&p, &input, r.clock.now());
+        rec(r, EventBody::TriageRouted { item: item.into(), input, route: route.clone(), about: serde_json::Value::Null });
+        route
+    }
+
+    /// A rig whose officer came on watch, with a held order and an alert routed to it.
+    fn on_watch() -> Rig {
+        let mut r = Rig::new();
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: true });
+        r.clock.advance_ms(1000);
+        assert!(matches!(routed(&mut r, "intent:7", held("dispatcher", &["ENERGY_MARGIN_THIN"])), Route::Officer { .. }));
+        assert!(matches!(routed(&mut r, "alert:delivery:p-1", alert("drop_not_clear")), Route::Officer { .. }));
+        r
+    }
+
+    fn whats(r: &Rig) -> Vec<String> {
+        replay_any(&r.log.text()).mismatches.into_iter().map(|m| m.what).collect()
+    }
+
+    #[test]
+    fn a_triaged_run_replays_clean() {
+        let mut r = on_watch();
+        r.clock.advance_ms(5_000);
+        rec(&mut r, EventBody::TriageVerdict { item: "alert:delivery:p-1".into(), by: officer(), verdict: Verdict::Handled, note: "retry in 10 min".into(), recommendation: None, intents: vec![] });
+        // the held order's 30 s pass
+        r.clock.advance_ms(25_000);
+        rec(&mut r, EventBody::TriageReleased { item: "intent:7".into(), why: Release::Deadline });
+        // a new alert, and the officer goes quiet
+        assert!(matches!(routed(&mut r, "alert:link:3", alert("lost_link")), Route::Officer { .. }));
+        r.clock.advance_ms(1_000);
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: false });
+        rec(&mut r, EventBody::TriageReleased { item: "alert:link:3".into(), why: Release::OfficerAbsent });
+        let rep = r.replays();
+        assert_eq!(rep.rules_version, fleetmesh_decide::OFFICER_TRIAGE_SINCE);
+    }
+
+    #[test]
+    fn routing_that_differs_from_the_policy_is_found() {
+        let mut r = Rig::new();
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: true });
+        // a land_now goes straight to the person; this log held it for the officer
+        let mut input = held("dispatcher", &[]);
+        input.kind = "land_now".into();
+        rec(&mut r, EventBody::TriageRouted { item: "intent:9".into(), input, route: Route::Officer { deadline_t: t0().plus_ms(30_000) }, about: serde_json::Value::Null });
+        assert!(whats(&r).iter().any(|w| w == "triage routing differs"), "{:?}", whats(&r));
+    }
+
+    #[test]
+    fn an_item_kept_from_the_person_past_its_deadline_is_found() {
+        let mut r = on_watch();
+        r.clock.advance_ms(40_000);
+        rec(&mut r, EventBody::TriageReleased { item: "intent:7".into(), why: Release::Deadline });
+        assert!(whats(&r).iter().any(|w| w.contains("did not reach the person in time")), "{:?}", whats(&r));
+    }
+
+    #[test]
+    fn items_held_by_an_officer_gone_quiet_must_reach_the_person() {
+        let mut r = on_watch();
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: false });
+        r.clock.advance_ms(5_000);
+        // nothing released; the next event finds them overdue
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: true });
+        assert!(whats(&r).iter().any(|w| w.contains("did not reach the person in time")), "{:?}", whats(&r));
+    }
+
+    #[test]
+    fn a_verdict_outside_the_policy_or_by_another_agent_is_found() {
+        let mut r = on_watch();
+        // the officer may not handle a held order, only turn it down or escalate it
+        rec(&mut r, EventBody::TriageVerdict { item: "intent:7".into(), by: officer(), verdict: Verdict::Handled, note: "fine".into(), recommendation: None, intents: vec![] });
+        rec(&mut r, EventBody::TriageVerdict { item: "alert:delivery:p-1".into(), by: AgentId::new("agent-planner"), verdict: Verdict::Handled, note: "fine".into(), recommendation: None, intents: vec![] });
+        let w = whats(&r);
+        assert!(w.iter().any(|w| w.contains("outside what the policy lets the officer do")), "{w:?}");
+        assert!(w.iter().any(|w| w.contains("not the policy's officer")), "{w:?}");
+    }
+
+    #[test]
+    fn a_rules_6_run_logs_no_officer_and_a_triage_event_under_it_is_found() {
+        let mut p = Policy::load(&root().join("sim/policy.toml")).expect("the shipped policy");
+        p.rules.rules_version = fleetmesh_decide::FLOOD_ALONG_ROUTE_SINCE;
+        let mut r = Rig::with_policy(p);
+        assert!(r.engine.policy().officer.is_none(), "rules 6 never had [officer]");
+        rec(&mut r, EventBody::TriageWatch { agent: officer(), on: true });
+        assert!(!whats(&r).is_empty());
+    }
 }

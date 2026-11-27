@@ -437,3 +437,41 @@ Rules 4 and older logs replay under their own rules; `RULES_MARKERS` flags a log
 that carries the fleet's routes. Rules 5 and rules 6 are separate bumps (one change, one bump,
 rules-versioning.md). Detail: docs/design/delivery-rules.md sections 7 and 8.2, dispatch.md,
 traffic.md section 10, fleet-organisation.md section 6.
+
+## 2026-11-26: The AI watch officer triages what reaches the person (rules 7)
+
+The maintainer: deterministic code raises the alerts and holds, the AI watch officer triages them,
+and only what it cannot confidently handle reaches the person's Inbox, with its recommendation;
+the person audits everything else in the order log. The question this serves is the project's own:
+whether one person's judgment over consequential decisions stays meaningful at scale. Management by
+exception (rules 2 to 6) already keeps routine work from the person; at thousands of vehicles the
+exceptions alone are more than one person can read. The officer is the second filter, and phase 8
+measures it as an arm against the person alone.
+
+What changed:
+
+- **What the officer may handle** is a structural test, not the model's confidence: the response
+  is already decided (by the policy, or the conservative default), it is cheap to undo, it accepts
+  no new risk for the fleet or anyone outside it, and its inputs can be trusted. The policy's
+  `[officer.handle]` says which alerts it may settle and which of the dispatcher's held orders it
+  may turn down; its own doubt only sends more to the person, never less.
+- **The officer approves nothing**, as no agent does. Turning down a held order is the dispatcher
+  withdrawing its own proposal at the officer's word (bd fleetmesh-ic4.2), never an agent deciding
+  another's order, and never a safety order (`land_now`, `abort`, `return_to_hub`, `hold`).
+- **Nothing waits on a silent officer.** Each item's deadline is the bridge's, set by the policy's
+  `[officer.deadline_s]` when it appears (an order reaches the person at least `before_expiry_s`
+  before its approval expires); an item not triaged by then reaches the person marked untriaged,
+  and every item it holds does as soon as it makes no MCP call for `absent_after_s`. An emergency
+  landing, an abort and the most time-critical alerts never wait for it (`[officer.bypass]`).
+- **No sampled review** (the maintainer's choice): what the officer handled is listed in
+  `GET /api/triage` and logged, for the person to audit by hand; phase 8 measures its misses
+  against the scenarios' reference decisions.
+- **Rules 7** (`OFFICER_TRIAGE_SINCE`, policy schema 4): `[officer]` in the policy, and the
+  `triage.watch`, `triage.routed`, `triage.verdict`, `triage.released` and `triage.closed` events.
+  No decision's checks or routing changed: an order the officer holds stays `pending_approval` and
+  expires as before. Replay re-runs each item's routing on its logged inputs, checks that every
+  verdict is the policy's officer's and within `[officer.handle]`, and flags an item kept from the
+  person past its deadline or past the officer's going off watch. A run under older rules logs no
+  `[officer]` (`Policy::as_logged`), and a triage event in such a log is flagged.
+
+Detail: docs/design/watch-officer.md.

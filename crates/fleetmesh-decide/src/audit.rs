@@ -516,6 +516,50 @@ pub enum EventBody {
         data: serde_json::Value,
     },
 
+    /// Rules 7 (docs/design/watch-officer.md): the AI watch officer came on watch (an MCP call
+    /// by the policy's `[officer] agent`) or went off it (no call for `absent_after_s`). Going off
+    /// releases every item it held (`triage.released`, `officer_absent`).
+    #[serde(rename = "triage.watch")]
+    TriageWatch { agent: AgentId, on: bool },
+
+    /// Rules 7: an Inbox item appeared while the officer was on watch, and where it went: to the
+    /// officer with its deadline, or straight to the person ([`crate::officer::route`] on `input`,
+    /// which replay re-runs against the logged policy). `item` is `intent:<id>` or
+    /// `alert:<id>`; `about` says what it is, for the audit, and no routing reads it.
+    #[serde(rename = "triage.routed")]
+    TriageRouted {
+        item: String,
+        input: crate::officer::TriageInput,
+        route: crate::officer::Route,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        about: serde_json::Value,
+    },
+
+    /// Rules 7: the officer's verdict on an item it held: handled (within `[officer.handle]`),
+    /// escalated to the person with its recommendation, or turned down (a dispatcher's order the
+    /// dispatcher then withdrew). `intents`: the orders it proposed or turned down for it.
+    #[serde(rename = "triage.verdict")]
+    TriageVerdict {
+        item: String,
+        by: AgentId,
+        verdict: crate::officer::Verdict,
+        note: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recommendation: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        intents: Vec<IntentId>,
+    },
+
+    /// Rules 7: an item the officer held reached the person without its verdict: its deadline
+    /// passed, or the officer went off watch.
+    #[serde(rename = "triage.released")]
+    TriageReleased { item: String, why: crate::officer::Release },
+
+    /// Rules 7: an item the officer held left the Inbox before a verdict or a release (the order
+    /// was decided, withdrawn or expired; the alert's cause cleared).
+    #[serde(rename = "triage.closed")]
+    TriageClosed { item: String, why: String },
+
     /// Mode change, failsafe, STATUSTEXT and the like.
     #[serde(rename = "vehicle.event")]
     VehicleEvent {

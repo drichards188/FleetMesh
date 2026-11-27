@@ -371,7 +371,7 @@ async fn a_bridge_decides_under_the_rules_being_built_only_when_asked() {
     assert_eq!(rules_asked(Some(" ")), Ok(None));
     assert_eq!(rules_asked(Some(&RULES_VERSION.to_string())), Ok(Some(RULES_VERSION)));
     assert_eq!(rules_asked(Some(&format!(" {RULES_NEWEST} "))), Ok(Some(RULES_NEWEST)));
-    for bad in ["7".to_string(), "next".into(), (RULES_NEWEST + 1).to_string()] {
+    for bad in [(RULES_VERSION - 1).to_string(), "next".into(), (RULES_NEWEST + 1).to_string()] {
         assert!(rules_asked(Some(&bad)).is_err(), "{bad}");
     }
     let mut p = Policy::load(&root().join("sim/policy.toml")).expect("policy");

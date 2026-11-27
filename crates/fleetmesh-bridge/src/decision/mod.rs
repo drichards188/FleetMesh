@@ -70,6 +70,7 @@ pub mod delivery_rt;
 pub mod fleet;
 pub(crate) mod terrain;
 pub mod traffic;
+pub mod triage;
 #[cfg(test)]
 mod tests;
 
@@ -465,6 +466,8 @@ pub struct Decision {
     updates: watch::Sender<Arc<String>>,
     /// Vehicle events the loop logged, for agents (`agent::RecentEvents`).
     recent: agent::RecentEvents,
+    /// Rules 7: the AI watch officer's triage of the Inbox ([`triage`]).
+    triage: Mutex<triage::Triage>,
     /// Operators' rejection notes, for agents to read with the intent (display only).
     rejection_notes: agent::RejectionNotes,
     /// `[queue]` of the policy (rules 5).
@@ -851,6 +854,7 @@ impl Decision {
             }),
             updates: watch::channel(Arc::new(String::new())).0,
             recent: agent::RecentEvents::default(),
+            triage: Mutex::new(triage::Triage::default()),
             rejection_notes: agent::RejectionNotes::default(),
             queue_cfg,
             pointer: std::sync::OnceLock::new(),
@@ -1972,6 +1976,9 @@ impl Decision {
             // the batch's anchor: this tick's decisions and those logged since the last tick
             crate::perf::time("decision.commit_anchors", || self.commit_anchors());
         }
+        // rules 7: the watch officer's triage of what the Inbox now holds (outside the lock: the
+        // alerts read it themselves)
+        crate::perf::time("decision.step_triage", || self.step_triage());
         // rules 30: each vehicle's own lost-link failsafe read from it (outside the lock: it
         // only asks the vehicles)
         crate::perf::time("decision.read_lost_link", || lost_link_read::read_lost_link(&self.world));
@@ -2272,26 +2279,128 @@ impl Decision {
     }
 
     /// `GET /api/inbox`: pending approvals (soonest expiry first, with why each needs a
-    /// human) and alerts (most severe first).
+    /// human) and alerts (most severe first), as the person sees them (rules 7: without what the
+    /// watch officer holds or handled).
     pub fn inbox_json(&self) -> Value {
         self.inbox_json_inner()
     }
 
+    /// MCP `get_inbox`: every item, each with where it stands in the officer's triage (rules 7).
+    pub fn inbox_json_for_agents(&self) -> Value {
+        self.inbox_view(true)
+    }
+
+    /// `GET /api/triage` (rules 7): every item the watch officer triaged this run.
+    pub fn triage_json(&self) -> Value {
+        let officer = self.lock().engine.policy().officer.clone();
+        self.triage.lock().unwrap_or_else(|e| e.into_inner()).json(officer.as_ref())
+    }
+
+    /// An agent made an MCP call: the watch officer's presence (rules 7).
+    pub fn agent_seen(&self, agent: &fleetmesh_decide::AgentId) {
+        let officer = self.lock().engine.policy().officer.as_ref().map(|o| o.agent.clone());
+        if officer.as_deref() == Some(agent.as_str()) {
+            self.triage.lock().unwrap_or_else(|e| e.into_inner()).seen(clock::wall());
+        }
+    }
+
+    /// The watch officer's verdict on an item it holds (rules 7, docs/design/watch-officer.md
+    /// section 4): logged, or refused with why.
+    pub fn triage_verdict(&self, by: &fleetmesh_decide::AgentId, item: &str, v: triage::VerdictIn) -> Result<Value, String> {
+        let verdict = v.verdict;
+        let mut core = self.lock();
+        let Some(officer) = core.engine.policy().officer.clone() else {
+            return Err("this run's policy has no [officer]: nothing is triaged".into());
+        };
+        let now = self.clock.now();
+        let ev = {
+            let mut t = self.triage.lock().unwrap_or_else(|e| e.into_inner());
+            t.verdict(&officer, by, item, v, now)?
+        };
+        core.engine.record_triage(ev).map_err(|e| e.to_string())?;
+        drop(core);
+        self.publish();
+        Ok(json!({ "item": item, "verdict": verdict }))
+    }
+
+    /// One tick of the officer's triage (rules 7): presence, new items routed, deadlines, items
+    /// that left; each step logged.
+    fn step_triage(&self) {
+        let officer = self.lock().engine.policy().officer.clone();
+        let Some(officer) = officer else { return };
+        let alerts = self.current_alerts();
+        let mut core = self.lock();
+        let now = self.clock.now();
+        let held: Vec<_> = core.engine.inbox().into_iter().map(triage::held_item).collect();
+        let alert_items: Vec<_> = alerts.iter().map(triage::alert_item).collect();
+        // why an order the officer held is no longer waiting: its state now
+        let left: BTreeMap<String, String> = core
+            .engine
+            .intents()
+            .filter(|i| !matches!(i.state(), fleetmesh_decide::State::PendingApproval))
+            .map(|i| (triage::intent_key(i.id()), format!("{:?}", i.state()).to_lowercase()))
+            .collect();
+        let events = {
+            let mut t = self.triage.lock().unwrap_or_else(|e| e.into_inner());
+            t.step(&officer, now, clock::wall(), triage::Items { held, alerts: alert_items, left })
+        };
+        for ev in events {
+            if let Err(e) = core.engine.record_triage(ev) {
+                eprintln!("decision: triage log: {e}");
+            }
+        }
+    }
+
     /// [`Self::inbox_json`]; the decisions message takes it too (bd murmur-jvdc).
     fn inbox_json_inner(&self) -> Value {
+        self.inbox_view(false)
+    }
+
+    /// The Inbox for the person (`officer` false: what the watch officer holds or handled left
+    /// out, an escalated item with its recommendation) or for an agent (`officer` true: every
+    /// item, each with where it stands in triage) (rules 7, [`triage`]).
+    fn inbox_view(&self, officer: bool) -> Value {
+        let triage = self.triage.lock().unwrap_or_else(|e| e.into_inner());
         let pending: Vec<Value> = {
             let core = self.lock();
             core.engine
                 .inbox()
                 .into_iter()
-                .map(|i| {
+                .filter_map(|i| {
+                    let (shown, note) = triage.view(&triage::intent_key(i.id()));
+                    if !shown && !officer {
+                        return None;
+                    }
                     let mut v = intent_json(i, None, self.tol());
                     v["why"] = json!(why_human(i));
-                    v
+                    if let Some(n) = note {
+                        v["triage"] = n;
+                    } else if !shown {
+                        v["triage"] = json!({ "stage": "with_officer" });
+                    }
+                    if officer && v["triage"].is_object() {
+                        v["triage"]["item"] = json!(triage::intent_key(i.id()));
+                    }
+                    Some(v)
                 })
                 .collect()
         };
-        let alerts = self.current_alerts();
+        let mut alerts = self.current_alerts();
+        let mut alert_notes: BTreeMap<String, Value> = BTreeMap::new();
+        alerts.retain(|a| {
+            let key = triage::alert_key(&a.id);
+            let (shown, note) = triage.view(&key);
+            let note = note.or_else(|| (!shown).then(|| json!({ "stage": "with_officer" })));
+            if let Some(mut n) = note {
+                if officer {
+                    n["item"] = json!(key);
+                }
+                alert_notes.insert(a.id.clone(), n);
+            }
+            shown || officer
+        });
+        let triage_counts = triage.counts();
+        drop(triage);
         // rules 5: orders held for vehicles the link can't carry them to now
         let queued = {
             let core = self.lock();
@@ -2321,10 +2430,17 @@ impl Decision {
         // only (each member's alert stays, marked `folded_into`); a manifest without swarms
         // leaves the inbox as it was
         let groups = self.group_views();
-        let (alerts, swarm_alerts) = match crate::swarms::inbox_view(&self.world, &alerts, &groups, true) {
+        let (mut alerts, swarm_alerts) = match crate::swarms::inbox_view(&self.world, &alerts, &groups, true) {
             Some((list, folds)) => (json!(list), Some(folds)),
             None => (json!(alerts), None),
         };
+        if let Some(list) = alerts.as_array_mut() {
+            for a in list {
+                if let Some(n) = a["id"].as_str().and_then(|id| alert_notes.get(id)) {
+                    a["triage"] = n.clone();
+                }
+            }
+        }
         let mut v = json!({
             "pending": pending,
             "alerts": alerts,
@@ -2336,6 +2452,7 @@ impl Decision {
                 "queued": queued.len(),
                 "review": n_review,
                 "decided_10m": decided_10m,
+                "triage": triage_counts,
             },
         });
         if let Some(folds) = swarm_alerts {

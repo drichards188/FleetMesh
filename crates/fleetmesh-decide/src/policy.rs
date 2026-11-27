@@ -300,6 +300,10 @@ pub struct Policy {
     /// figures differ from the standing ones ([`Policy::fits_rules`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<crate::group::GroupPolicy>,
+    /// `[officer]` (rules 7, policy schema 4): the AI watch officer's triage of the Inbox
+    /// ([`crate::officer`]). Absent: no triage. Absent from logs of older rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub officer: Option<crate::officer::OfficerPolicy>,
 }
 
 /// The keys a policy file may set looser than the file it extends (a file that extends none:
@@ -390,6 +394,11 @@ impl Policy {
         // rules 34: a group order's figures, logged from rules 34 only (the standing ones where
         // the file has none)
         self.group.get_or_insert_with(crate::group::GroupPolicy::default);
+        // rules 7: the watch officer's triage, which older rules never had (a run under them
+        // triages nothing and logs no [officer])
+        if !self.rules.at_least(crate::rules::OFFICER_TRIAGE_SINCE) {
+            self.officer = None;
+        }
         self
     }
 
@@ -411,6 +420,9 @@ impl Policy {
         }
         if p.approval.expire_s == 0 {
             return Err(PolicyError::Invalid("approval.expire_s must be > 0".into()));
+        }
+        if let Some(o) = &p.officer {
+            o.validate().map_err(PolicyError::Invalid)?;
         }
         for (kind, k) in &p.approval.kind {
             if k.expire_s == Some(0) {

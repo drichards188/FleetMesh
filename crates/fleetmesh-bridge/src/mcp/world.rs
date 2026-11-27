@@ -440,7 +440,8 @@ pub fn swarms(mcp: &Mcp, ids: Option<&[String]>, members: bool, hull: bool) -> V
 /// `get_inbox`: pending approvals and alerts, each with its age.
 pub fn inbox(mcp: &Mcp) -> Value {
     let now = clock::wall();
-    let mut v = mcp.decision.inbox_json();
+    // every item, each with where it stands in the watch officer's triage (rules 7)
+    let mut v = mcp.decision.inbox_json_for_agents();
     if let Some(pending) = v["pending"].as_array_mut() {
         for i in pending {
             intent_ages(i, now);
@@ -465,7 +466,9 @@ pub fn inbox(mcp: &Mcp) -> Value {
     v["t"] = json!(now);
     v["note"] = json!(
         "Pending intents wait for a human operator; an agent cannot decide them. Alerts are \
-         derived from the current state and clear when their cause does."
+         derived from the current state and clear when their cause does. With a watch officer \
+         on watch, an item's `triage` says where it stands: with_officer (the person does not \
+         see it yet), escalated, untriaged (it reached the person without a verdict) or bypassed."
     );
     v
 }

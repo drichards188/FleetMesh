@@ -28,6 +28,8 @@ use crate::world::{LoggedInputs, WorldSnapshot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("only a triage.* event is recorded as triage")]
+    NotTriage,
     #[error("unknown intent {0}")]
     UnknownIntent(IntentId),
     #[error(transparent)]
@@ -2703,6 +2705,24 @@ impl Engine {
             detail: detail.into(),
             data,
         })?;
+        Ok(())
+    }
+
+    /// Rules 7: a step of the watch officer's triage, as the bridge took it
+    /// (docs/design/watch-officer.md): a `triage.*` event only, anything else refused. The bridge
+    /// keeps the triage itself; the engine's decisions do not read it.
+    pub fn record_triage(&mut self, body: EventBody) -> Result<(), EngineError> {
+        if !matches!(
+            body,
+            EventBody::TriageWatch { .. }
+                | EventBody::TriageRouted { .. }
+                | EventBody::TriageVerdict { .. }
+                | EventBody::TriageReleased { .. }
+                | EventBody::TriageClosed { .. }
+        ) {
+            return Err(EngineError::NotTriage);
+        }
+        self.emit(body)?;
         Ok(())
     }
 

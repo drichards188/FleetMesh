@@ -1148,6 +1148,8 @@ fn replay_inner<S: AsRef<str>>(
     // next is read), and what a confirmed loss ends next
     let mut nodes = crate::nodes::NodeLedger::default();
     let mut loss_due: Option<LossDue> = None;
+    // rules 7: the watch officer's triage (docs/design/watch-officer.md)
+    let mut triage = TriageCheck::default();
 
     for (i, logged) in events.iter().enumerate() {
         if let Some(p) = i.checked_sub(1).and_then(|j| events.get(j)) {
@@ -1214,6 +1216,10 @@ fn replay_inner<S: AsRef<str>>(
             }
         }
 
+        // rules 7: no item the officer holds outlives its deadline or the officer's absence
+        for (what, logged, want) in triage.overdue(e.t) {
+            bad(&mut r, e, None, &what, logged, want);
+        }
         match &e.body {
             EventBody::RunStarted {
                 policy: p,
@@ -1275,6 +1281,17 @@ fn replay_inner<S: AsRef<str>>(
                         "a field newer than the log's rules version (rules markers)",
                         "policy.rules.delivery.dropzone.standing_approvals".into(),
                         format!("absent before rules {}", crate::rules::STANDING_APPROVALS_SINCE),
+                    );
+                }
+                // rules 7: the watch officer's triage, a section rules 6 did not have
+                if !p.rules.at_least(crate::rules::OFFICER_TRIAGE_SINCE) && p.officer.is_some() {
+                    bad(
+                        &mut r,
+                        e,
+                        None,
+                        "a field newer than the log's rules version (rules markers)",
+                        "policy.officer".into(),
+                        format!("absent before rules {}", crate::rules::OFFICER_TRIAGE_SINCE),
                     );
                 }
                 // rules 3: the traffic figures, a key rules 2 did not have
@@ -3374,6 +3391,15 @@ fn replay_inner<S: AsRef<str>>(
                 }
             }
             EventBody::DeliveryEvent { .. } => {}
+            EventBody::TriageWatch { .. }
+            | EventBody::TriageRouted { .. }
+            | EventBody::TriageVerdict { .. }
+            | EventBody::TriageReleased { .. }
+            | EventBody::TriageClosed { .. } => {
+                for (what, logged, want) in triage.step(e, policy.as_ref()) {
+                    bad(&mut r, e, None, &what, logged, want);
+                }
+            }
             EventBody::AgentAction { .. } => {}
             // a display event decides nothing; it must be under the operator's own session
             // and about an intent the log holds
@@ -5164,6 +5190,162 @@ fn group_step_world(
             bad(r, e, Some(gid), why, String::new(), String::new());
             None
         }
+    }
+}
+
+/// Rules 7: the watch officer's triage as the log holds it (docs/design/watch-officer.md section 8).
+/// Routing is re-derived from the logged inputs and policy ([`crate::officer::route`]); a verdict
+/// must be the policy's officer's, on an item it held, within `[officer.handle]`; and an item it
+/// held must reach the person by its deadline, or as soon as the officer went off watch.
+#[derive(Default)]
+struct TriageCheck {
+    on_watch: bool,
+    /// when the officer went off watch, while items it held are still to be released
+    absent_at: Option<Time>,
+    /// the items the officer holds: their inputs and deadlines
+    open: BTreeMap<String, (crate::officer::TriageInput, Time)>,
+}
+
+/// How late past its deadline a held item may be released: the bridge releases on its one-second
+/// tick.
+const TRIAGE_SLACK_MS: i64 = 2_000;
+
+impl TriageCheck {
+    /// The items held past their deadline, or past the officer's going off watch, at `t` (each
+    /// reported once).
+    fn overdue(&mut self, t: Time) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        let absent = self.absent_at.filter(|a| t.0 > a.0 + TRIAGE_SLACK_MS);
+        let late: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(_, (_, d))| t.0 > d.0 + TRIAGE_SLACK_MS || absent.is_some())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in late {
+            let (_, d) = self.open.remove(&k).expect("listed");
+            out.push((
+                "an item the officer held did not reach the person in time (triage.released)".into(),
+                k,
+                match absent {
+                    Some(a) => format!("released when the officer went off watch at {}", a.0),
+                    None => format!("released by its deadline {}", d.0),
+                },
+            ));
+        }
+        if self.open.is_empty() {
+            self.absent_at = None;
+        }
+        out
+    }
+
+    fn step(&mut self, e: &Event, policy: Option<&Policy>) -> Vec<(String, String, String)> {
+        use crate::officer::{ItemClass, Release, Verdict};
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        let mut problem = |what: &str, logged: String, want: String| out.push((what.to_string(), logged, want));
+        let Some(pol) = policy else {
+            problem("a triage event before run.started", event_type(&e.body), String::new());
+            return out;
+        };
+        if !pol.rules.at_least(crate::rules::OFFICER_TRIAGE_SINCE) {
+            problem(
+                "a field newer than the log's rules version (rules markers)",
+                event_type(&e.body),
+                format!("absent before rules {}", crate::rules::OFFICER_TRIAGE_SINCE),
+            );
+            return out;
+        }
+        let Some(officer) = pol.officer.as_ref() else {
+            problem("a triage event in a run whose policy has no [officer]", event_type(&e.body), String::new());
+            return out;
+        };
+        match &e.body {
+            EventBody::TriageWatch { agent, on } => {
+                if agent.as_str() != officer.agent {
+                    problem("triage.watch for an agent that is not the policy's officer", agent.to_string(), officer.agent.clone());
+                }
+                if *on == self.on_watch {
+                    problem("triage.watch that changes nothing", on.to_string(), (!on).to_string());
+                }
+                self.on_watch = *on;
+                if !on && !self.open.is_empty() {
+                    self.absent_at = Some(e.t);
+                }
+            }
+            EventBody::TriageRouted { item, input, route, .. } => {
+                if !self.on_watch {
+                    problem("an item routed to triage while the officer was off watch", item.clone(), String::new());
+                }
+                if self.open.contains_key(item) {
+                    problem("an item routed again while the officer still held it", item.clone(), String::new());
+                }
+                let want = crate::officer::route(officer, input, e.t);
+                if &want != route {
+                    problem("triage routing differs", json(route), json(&want));
+                }
+                if let crate::officer::Route::Officer { deadline_t } = route {
+                    self.open.insert(item.clone(), (input.clone(), *deadline_t));
+                }
+            }
+            EventBody::TriageVerdict { item, by, verdict, .. } => {
+                if by.as_str() != officer.agent {
+                    problem("a triage verdict by an agent that is not the policy's officer", by.to_string(), officer.agent.clone());
+                }
+                if !self.on_watch {
+                    problem("a triage verdict while the officer was off watch", item.clone(), String::new());
+                }
+                match self.open.remove(item) {
+                    None => problem("a triage verdict on an item the officer did not hold", item.clone(), String::new()),
+                    Some((input, _)) => {
+                        let allowed = match verdict {
+                            Verdict::Escalated => Ok(()),
+                            Verdict::Handled if input.class == ItemClass::Alert && officer.handle.alerts.contains(&input.kind) => Ok(()),
+                            Verdict::Handled => Err(format!("[officer.handle] alerts {:?}", officer.handle.alerts)),
+                            Verdict::TurnedDown => {
+                                let t = &officer.handle.turn_down;
+                                let ok = input.class == ItemClass::Held
+                                    && input.agent.as_deref() == Some(crate::officer::DISPATCHER)
+                                    && t.kinds.contains(&input.kind)
+                                    && !crate::officer::SAFETY_KINDS.contains(&input.kind.as_str())
+                                    && !input.codes.is_empty()
+                                    && input.codes.iter().all(|c| t.codes.contains(c));
+                                if ok { Ok(()) } else { Err(format!("[officer.handle.turn_down] {t:?}, the dispatcher's orders only")) }
+                            }
+                        };
+                        if let Err(want) = allowed {
+                            problem("a triage verdict outside what the policy lets the officer do", format!("{verdict:?} on {item} ({})", input.kind), want);
+                        }
+                    }
+                }
+            }
+            EventBody::TriageReleased { item, why } => {
+                match self.open.remove(item) {
+                    None => problem("triage.released for an item the officer did not hold", item.clone(), String::new()),
+                    Some((_, deadline)) => match why {
+                        Release::Deadline if e.t.0 < deadline.0 => {
+                            problem("triage.released before its deadline", e.t.0.to_string(), format!(">= {}", deadline.0))
+                        }
+                        Release::OfficerAbsent if self.on_watch => {
+                            problem("triage.released for the officer's absence while it was on watch", item.clone(), String::new())
+                        }
+                        _ => {}
+                    },
+                }
+                if self.open.is_empty() {
+                    self.absent_at = None;
+                }
+            }
+            EventBody::TriageClosed { item, .. } => {
+                if self.open.remove(item).is_none() {
+                    problem("triage.closed for an item the officer did not hold", item.clone(), String::new());
+                }
+                if self.open.is_empty() {
+                    self.absent_at = None;
+                }
+            }
+            _ => {}
+        }
+        out
     }
 }
 

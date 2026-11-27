@@ -318,6 +318,8 @@ impl Mcp {
             let via = format!("API key {key_id}");
             self.connected(&agent, &via, ctx.peer.peer_info().as_deref());
             self.note_session(&agent, parts);
+        // rules 7: the watch officer's presence puts the run on watch
+        self.decision.agent_seen(&agent);
             return Ok(agent);
         }
         let header = parts
@@ -342,6 +344,8 @@ impl Mcp {
         let agent = self.resolve(&id)?;
         self.connected(&agent, via, client.as_deref());
         self.note_session(&agent, parts);
+        // rules 7: the watch officer's presence puts the run on watch
+        self.decision.agent_seen(&agent);
         Ok(agent)
     }
 

@@ -130,7 +130,10 @@ marks a vehicle's `route` in the separation rule's traffic inputs
 (`check.result.inputs.delivery.traffic.route`: the bridge fills the fleet's dispatched routes from
 rules 5), flagged in a log that claims rules 4 or older. Rules 6 adds no field: the samples were
 logged before, and only which ones the rule reads changed, so a rules 5 log given a rules 6 header
-is found by its recomputed checks. Replay flags a log whose version is older than a
+is found by its recomputed checks. Rules 7 marks `[officer]` in the logged policy and the
+`triage.*` events (the watch officer's triage, docs/design/watch-officer.md), flagged in a log that
+claims rules 6 or older; a run under older rules logs no `[officer]` (`Policy::as_logged`). Replay
+flags a log whose version is older than a
 marker it contains (an event that
 cannot have existed then), which catches a log edited to include newer events under an older
 version number, and a log of a newer version that is missing an event the version requires.

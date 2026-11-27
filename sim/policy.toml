@@ -1,6 +1,6 @@
 # FleetMesh DRAFT policy. First-draft values for a delivery fleet, not tuned and not reviewed by
 # the maintainer. Read by crates/fleetmesh-decide; the whole file is logged at the
-# start of every run and replay decides with that copy. Policy schema 2, rules version 2.
+# start of every run and replay decides with that copy. Policy schema 4, rules version 7.
 #
 # Routing follows docs/design/delivery-orders.md section 9: the nine delivery kinds (pickup,
 # deliver, hold, reroute, return_to_hub, land_now, abort, swap_battery, confirm_drop_zone). The
@@ -53,6 +53,34 @@
 # Human tiers may also set: approvers = N (distinct approvers), proposer_may_approve = false, and
 # step_up = true (in a credentials run each approval re-enters the approver's password or
 # passkey, and the submitter's own request is never the approval).
+
+# The AI watch officer's triage (rules 7, docs/design/watch-officer.md). With an officer on watch
+# (its agent made an MCP call within absent_after_s), each order waiting for a person and each
+# alert goes to the officer first: it settles what [officer.handle] lets it, and passes the rest
+# to the person with its recommendation. An item it has not triaged by its deadline reaches the
+# person anyway, marked untriaged, and everything it held does when it goes quiet. With no officer
+# running, nothing changes. The officer approves nothing: an order it holds stays pending as before.
+[officer]
+agent = "agent-watch"
+absent_after_s = 20
+
+[officer.deadline_s]
+held = 30              # an order waiting for a person
+alert = 60
+before_expiry_s = 15   # an order reaches the person at least this long before its approval expires
+
+# straight to the person, never held for the officer
+[officer.bypass]
+kinds = ["land_now", "abort"]                              # their approval expires in 30 s
+alerts = ["traffic_noncooperative_near", "damaged", "node_reported_again"]
+severity = []
+
+# what the officer may settle without the person; anything else it may only pass on
+[officer.handle]
+alerts = ["drop_not_clear", "delivery_failed", "return_failed", "parcel_no_vehicle", "zone_not_approved", "fleet_conflict", "return_held", "traffic_conflict"]
+# the dispatcher's held orders it may turn down, when every holding code is one of these (bd
+# fleetmesh-ic4.2 builds the dispatcher's side); never a safety order
+turn_down = { kinds = ["deliver", "pickup", "reroute"], codes = ["ENERGY_MARGIN_THIN", "PAYLOAD_NEAR_MAX", "WX_GUST_LIMIT"] }
 
 [approval]
 expire_s = 120                              # a pending approval waits this long, then expires

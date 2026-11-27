@@ -263,6 +263,25 @@ pub struct IdParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct TriageParams {
+    /// The Inbox item, as get_inbox names it in its `triage.item`: `intent:<id>` or `alert:<id>`.
+    pub item: String,
+    /// `handled` (an alert the policy lets you settle: you dealt with it, or it needs nothing),
+    /// `escalated` (the person decides it, with your recommendation) or `turned_down` (a
+    /// dispatcher's held order the policy lets you turn down).
+    pub verdict: String,
+    /// What you did about it (the orders you proposed, by id) or why no action, in a line or two,
+    /// for the person's audit.
+    pub note: String,
+    /// With `escalated`: your recommendation to the person, bottom line first, then the key facts
+    /// with their ages.
+    pub recommendation: Option<String>,
+    /// The ids of the orders you proposed for it.
+    #[serde(default)]
+    pub intents: Vec<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct WithdrawParams {
     /// The id of an intent this agent proposed.
     pub id: u64,
@@ -542,6 +561,19 @@ pub fn tools() -> Vec<Tool> {
                 .into(),
             true,
         ),
+        tool::<TriageParams>(
+            "triage_item",
+            "Your verdict, as the watch officer, on an Inbox item that waits for you (get_inbox: \
+             its triage stage is with_officer). handled: an alert the policy lets you settle, \
+             with what you did or why nothing was needed; it stays out of the person's Inbox and \
+             in the audit trail. escalated: the person decides it; your recommendation leads its \
+             card. turned_down: a dispatcher's held order the policy lets you turn down. The \
+             policy's [officer.handle] limits what you may settle; anything else, escalate. An \
+             item you leave reaches the person at its deadline, marked untriaged. Every verdict \
+             goes to the audit log. Only the run's watch officer may use it."
+                .into(),
+            false,
+        ),
         tool::<WithdrawParams>(
             "withdraw_intent",
             "Withdraw an intent you proposed, while it waits (pending or approved but not \
@@ -729,6 +761,26 @@ pub async fn call(
                 detail: format!("unknown intent {}", p.id),
                 intent: None,
             })
+        }
+        "triage_item" => {
+            let p = params!(TriageParams);
+            use fleetmesh_decide::officer::Verdict;
+            let refused = |status: u16, detail: String| DecisionError { status, detail, intent: None };
+            match p.verdict.as_str() {
+                "handled" | "escalated" => {
+                    let verdict = if p.verdict == "handled" { Verdict::Handled } else { Verdict::Escalated };
+                    let intents = p.intents.iter().map(|i| fleetmesh_decide::IntentId(*i)).collect();
+                    let v = crate::decision::triage::VerdictIn { verdict, note: p.note, recommendation: p.recommendation, intents };
+                    mcp.decision.triage_verdict(agent, &p.item, v).map_err(|why| refused(403, why))
+                }
+                // the dispatcher holding a parcel back after the officer turns its order down
+                // comes with bd fleetmesh-ic4.2
+                "turned_down" => Err(refused(
+                    409,
+                    "turning down a dispatcher's order is not available yet: escalate it with your recommendation".into(),
+                )),
+                other => Err(refused(400, format!("verdict {other:?}: handled, escalated or turned_down"))),
+            }
         }
         "withdraw_intent" => {
             let p = params!(WithdrawParams);
