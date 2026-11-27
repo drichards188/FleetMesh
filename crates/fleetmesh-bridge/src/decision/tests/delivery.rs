@@ -216,7 +216,7 @@ async fn the_picture_of_other_traffic_is_what_a_decision_reads_and_what_the_api_
     assert!(!tf.path.is_empty());
     assert_eq!(p.config_sha256, pic.config().1);
     // and a delivery the dispatcher would send now is held for it (automation waits it out)
-    r.d.feed().parcels.insert("p-1".into(), fleetmesh_decide::delivery::ParcelFact { mass_kg: Some(0.5), class: "normal".into(), state: fleetmesh_decide::delivery::ParcelState::Loaded, vehicle: Some(fleetmesh_decide::Uid::new("7")) });
+    r.d.feed().parcels.insert("p-1".into(), fleetmesh_decide::delivery::ParcelFact { priority: None, to: None, mass_kg: Some(0.5), class: "normal".into(), state: fleetmesh_decide::delivery::ParcelState::Loaded, vehicle: Some(fleetmesh_decide::Uid::new("7")) });
     let zone = "dz-harbour-17";
     let req = IntentRequest {
         task: "deliver".into(),

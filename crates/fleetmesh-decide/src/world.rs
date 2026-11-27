@@ -440,6 +440,11 @@ pub struct WorldSnapshot {
     /// given (the delivery rules then report each input they need as unknown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<crate::delivery::DeliveryInputs>,
+    /// Engine-filled (rules 8, [`crate::rules::PLAYS_SINCE`]): the plays a person adopted that are
+    /// in force ([`crate::plays`]), which the policy routes by. The bridge never gives them.
+    /// Absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plays: Vec<crate::plays::Play>,
 }
 
 /// A decision's inputs as logged: the [`WorldSnapshot`] with the area set replaced by its
@@ -471,6 +476,9 @@ pub struct LoggedInputs {
     /// What the delivery rules read (absent when none was given).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<crate::delivery::DeliveryInputs>,
+    /// The plays in force (rules 8; absent when none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plays: Vec<crate::plays::Play>,
 }
 
 impl LoggedInputs {
@@ -488,6 +496,7 @@ impl LoggedInputs {
             nodes_lost: world.nodes_lost.clone(),
             silent_orders: world.silent_orders.clone(),
             delivery: world.delivery.clone(),
+            plays: world.plays.clone(),
         }
     }
 
@@ -506,6 +515,7 @@ impl LoggedInputs {
             nodes_lost: self.nodes_lost.clone(),
             silent_orders: self.silent_orders.clone(),
             delivery: self.delivery.clone(),
+            plays: self.plays.clone(),
         }
     }
 }
@@ -556,6 +566,8 @@ impl WorldSnapshot {
             // the world's delivery inputs: the checks of a delivery order read them (the engine
             // adds what it knows of its own orders)
             delivery: self.delivery.clone(),
+            // engine-owned (rules 8): the plays in force
+            plays: Vec::new(),
         }
     }
 

@@ -532,3 +532,34 @@ Building on rules 7 (the entry above), with no rules change:
 - **The bridge says each hub's wind** (`weather` of a base in `GET /api/fleet`): the gust and mean
   wind there and the limits of the strictest platform based there (the weather rule's own
   `weather_limits`, now public). Display only, so no rules version.
+
+## 2026-11-27: One decision for a pattern (rules 8)
+
+A wind-event run showed one cause (gusts over the drones' soft limit) making about six identical
+decisions a minute with the same obvious answer, and every order turned down came back a few
+minutes later: whoever decided was knocking the same item down again and again, and the watch
+officer's own notes said "Same wind incident as #1" on each. Process alarm management (floods,
+first-out alarms, state-based suppression), air traffic flow management (a ground stop over every
+flight in its scope) and supervisory control of many vehicles (Playbook) all answer the pattern,
+not the item.
+
+- **Incidents** (the bridge, a view): three or more Inbox items of one cause (the family of their
+  reason codes) at one hub fold into one card; an item of another cause, or of several, stays on
+  its own and the card says it is there.
+- **Plays** (the engine, rules 8, `PLAYS_SINCE`): a person's standing decision for a hub, adopted
+  under their session (`play.adopted`): a ground stop (no agent's departure leaves without a
+  person) or limits (an order held only for the codes `[plays] codes` lists, within its trip,
+  mass and battery limits, goes as the person decided). An urgent parcel (priority 3) is outside
+  every play. The engine fills the plays in force into each decision's inputs; replay checks that
+  each decision read exactly those and re-derives its routing. A play ends when the bridge sees
+  its condition clear (the gust under the soft limit for five minutes), when a person lifts it, or
+  at its `until_t` (`[plays] max_s`, an hour). The dispatcher holds back what a play holds and
+  withdraws its own held orders the play covers, never counting that as a try. Policy schema 5.
+- **The officer** may recommend a play for an incident (`recommend_play`, logged as its action);
+  it adopts none.
+- **wind-event** gains an urgent clinic parcel at about 17 minutes (no play decides it) and drone
+  3's GNSS degrading at about 5 minutes (not the wind's, and not to be hidden by it).
+
+Not built yet: measuring item-by-item against plays (phase 8's two arms, fleetmesh-ic4.6).
+Detail: docs/design/incidents.md.
+

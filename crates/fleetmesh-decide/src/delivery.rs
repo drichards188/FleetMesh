@@ -272,6 +272,13 @@ pub struct ParcelFact {
     /// The vehicle it is assigned to or aboard, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vehicle: Option<Uid>,
+    /// Rules 8 ([`crate::rules::PLAYS_SINCE`]): its priority (0 low to 3 urgent): a play leaves
+    /// a parcel at or above its `except_priority` to the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    /// Rules 8: the drop zone it goes to (a limits play reads the trip of a pickup by it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 fn normal_class() -> String {

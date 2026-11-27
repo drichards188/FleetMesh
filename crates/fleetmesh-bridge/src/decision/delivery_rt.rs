@@ -639,6 +639,9 @@ struct Job {
     /// Rules 7: the watch officer turned this job's held order down: its next proposal waits
     /// `retry_after_s`, and the turn-down counts as a try.
     turned_down: bool,
+    /// Rules 8: a person's play holds this job's order back (it was withdrawn for the play): not a
+    /// try, and its next proposal waits for the play to end.
+    by_play: bool,
 }
 
 impl Job {
@@ -656,9 +659,23 @@ impl Job {
             via: Vec::new(),
             replanned: false,
             turned_down: false,
+            by_play: false,
         }
     }
 }
+
+/// Rules 8: a play's end condition the bridge watches: the gust at its hub under `below_mps`
+/// for [`PLAY_CLEAR_S`] together.
+#[derive(Clone, Debug)]
+pub struct PlayLift {
+    pub hub: String,
+    pub below_mps: f64,
+    /// since when (the decision clock, ms) the gust has stayed under it
+    pub since_ms: Option<i64>,
+}
+
+/// Rules 8: how long the wind must stay under a play's limit before the play lifts itself, s.
+pub const PLAY_CLEAR_S: i64 = 300;
 
 /// A person asked to approve a zone as a delivery point (rules 2: once per zone).
 #[derive(Clone, Debug)]
@@ -687,6 +704,14 @@ pub struct Issue {
 /// Everything the runtime keeps between steps.
 #[derive(Default)]
 pub struct Runtime {
+    /// Rules 8: the plays the bridge lifts when their end condition clears, by play id.
+    pub play_lifts: BTreeMap<u64, PlayLift>,
+    /// Rules 8: the watch officer's latest recommendation for each incident, by its id (a view:
+    /// the person adopts a play or not).
+    pub play_recs: BTreeMap<String, serde_json::Value>,
+    /// The Inbox's items as incidents remember them over their window (docs/design/incidents.md):
+    /// each as last seen, open or settled since, by its key.
+    pub incident_seen: BTreeMap<String, super::incidents::Item>,
     pub scenario: Option<Scenario>,
     pub parcels: BTreeMap<String, ParcelRec>,
     t0: Option<Time>,
@@ -816,7 +841,7 @@ impl Decision {
         Scenario::load(&dir, root, scale).map(Some)
     }
 
-    fn rt(&self) -> std::sync::MutexGuard<'_, Runtime> {
+    pub(super) fn rt(&self) -> std::sync::MutexGuard<'_, Runtime> {
         self.runtime.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -863,6 +888,7 @@ impl Decision {
 
     fn publish_parcels(&self) {
         // the parcels the engine's rules read, as the feed gives them
+        let plays = self.rules.at_least(fleetmesh_decide::PLAYS_SINCE);
         let rt = self.rt();
         let mut feed = self.feed();
         feed.parcels = rt
@@ -882,6 +908,9 @@ impl Decision {
                         class: p.spec.class.clone(),
                         state,
                         vehicle: p.vehicle.clone(),
+                        // rules 8: what a play reads (its exception, a pickup's trip)
+                        priority: plays.then_some(p.spec.priority),
+                        to: plays.then(|| p.spec.to.clone()),
                     },
                 ))
             })
@@ -1344,12 +1373,88 @@ impl Decision {
         Ok(())
     }
 
+    /// Rules 8: the plays in force (none under older rules).
+    pub(super) fn plays_in_force(&self) -> Vec<fleetmesh_decide::plays::Play> {
+        if !self.rules.at_least(fleetmesh_decide::PLAYS_SINCE) {
+            return Vec::new();
+        }
+        self.lock().engine.plays()
+    }
+
+    /// Rules 8: the play that holds a departure from `hub` to `zone` back from the dispatcher, if
+    /// one does: a ground stop there, or a limits play whose trip or mass limit it is outside (its
+    /// battery is the engine's to judge, vehicle by vehicle). A parcel at or above the play's
+    /// `except_priority` is never held: it still asks the person.
+    pub(super) fn play_holding(&self, plays: &[fleetmesh_decide::plays::Play], hub: &str, zone: &str, mass_kg: f64, priority: u8) -> Option<u64> {
+        use fleetmesh_decide::plays::{PlayKind, PlayLimits, within};
+        for p in plays.iter().filter(|p| p.hub == hub) {
+            if p.except_priority.is_some_and(|m| priority >= m) {
+                continue;
+            }
+            match p.kind {
+                PlayKind::GroundStop => return Some(p.id),
+                PlayKind::Limits => {
+                    let trip = match (self.places.hubs.get(hub), self.places.drop_zones.get(zone)) {
+                        (Some(h), Some(z)) => Some(fleetmesh_decide::geo::haversine_m(h.at(), z.at())),
+                        _ => None,
+                    };
+                    let l = PlayLimits { min_battery_pct: None, ..p.limits.clone() };
+                    if !within(&l, (trip, Some(mass_kg), None)) {
+                        return Some(p.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Rules 8: a play was adopted: the dispatcher withdraws its own orders waiting for a person
+    /// that the play holds back (not a try: each is offered again once the play lets it go).
+    pub(super) fn apply_play(&self, play: &fleetmesh_decide::plays::Play) {
+        let jobs: Vec<(DUid, IntentId, Option<String>)> = self
+            .rt()
+            .jobs
+            .iter()
+            .filter(|(_, j)| matches!(j.stage, Stage::Pickup | Stage::Deliver))
+            .filter_map(|(u, j)| j.intent.map(|i| (u.clone(), i, j.parcel.clone())))
+            .collect();
+        let plays = [play.clone()];
+        for (uid, id, parcel) in jobs {
+            let Some(spec) = parcel.as_ref().and_then(|p| self.rt().parcels.get(p).map(|r| r.spec.clone())) else { continue };
+            if self.play_holding(&plays, &spec.from, &spec.to, spec.mass_kg, spec.priority).is_none() {
+                continue;
+            }
+            let reason = format!("play {} by {}: {} at {}", play.id, play.by, if play.kind == fleetmesh_decide::plays::PlayKind::GroundStop { "a ground stop" } else { "outside the play's limits" }, play.hub);
+            if self.agent_withdraw(&AgentId::new(DISPATCHER), id.0, &reason, Some("pending_approval")).is_ok() {
+                if let Some(j) = self.rt().jobs.get_mut(&uid) {
+                    j.by_play = true;
+                }
+                self.log_delivery("withdrawn", Some(&uid), parcel.as_deref(), &format!("{id} withdrawn: {reason}; offered again once the play lets it go"), json!({ "intent": id.0, "play": play.id }));
+            }
+        }
+    }
+
     /// A dispatcher job for the tests: `intent` held for `uid`'s pickup or delivery of `parcel`.
     #[cfg(test)]
     pub(super) fn test_job(&self, uid: &str, parcel: &str, deliver: bool, intent: IntentId) {
         let stage = if deliver { Stage::Deliver } else { Stage::Pickup };
         let now = self.clock.now();
         self.rt().jobs.insert(DUid::new(uid), Job::new(Some(parcel.into()), stage, Some(intent), now.0));
+    }
+
+    /// A parcel for the tests, ready at `from` for `to`.
+    #[cfg(test)]
+    pub(super) fn test_parcel(&self, id: &str, from: &str, to: &str, mass_kg: f64, priority: u8) {
+        let spec = ParcelSpec { id: id.into(), from: from.into(), to: to.into(), mass_kg, ready_s: 0.0, due_s: 1800.0, priority, class: "normal".into() };
+        let mut r = ParcelRec::new(spec);
+        r.state = PState::Ready;
+        self.rt().parcels.insert(id.into(), r);
+    }
+
+    /// Whether the tests' job for `uid` was withdrawn for a play.
+    #[cfg(test)]
+    pub(super) fn test_by_play(&self, uid: &str) -> Option<bool> {
+        self.rt().jobs.get(&DUid::new(uid)).map(|j| j.by_play)
     }
 
     /// Whether the tests' job for `uid` was turned down by the officer.
@@ -1388,7 +1493,7 @@ impl Decision {
                     }
                     // rules 7: turned down by the watch officer, the vehicle waits longer before
                     // it is offered a parcel again
-                    let pause = if job.turned_down { (self.auto().retry_after_s * 1000.0) as i64 } else { 120_000 };
+                    let pause = if job.by_play { 30_000 } else if job.turned_down { (self.auto().retry_after_s * 1000.0) as i64 } else { 120_000 };
                     self.rt().cooldown.insert(uid.clone(), now.0 + pause);
                     self.log_delivery("parcel", Some(uid), Some(&p), &format!("pickup of {p} by {uid} ended {state:?}: the parcel is open again"), json!({ "state": "ready" }));
                 }
@@ -1464,7 +1569,7 @@ impl Decision {
                     && codes.iter().all(|c| c == "SEP_ROUTE_CONFLICT" || WAIT_OUT.contains(&c.as_str()));
                 // rules 5: a refusal only for another of the fleet's vehicles' route is sequencing,
                 // not a try: the next proposal waits it out (its dry run)
-                let counts = !(sequencing && self.rules.at_least(fleetmesh_decide::HUB_SEQUENCING_SINCE));
+                let counts = !(sequencing && self.rules.at_least(fleetmesh_decide::HUB_SEQUENCING_SINCE)) && !job.by_play;
                 let tries = {
                     let mut rt = self.rt();
                     let r = rt.parcels.get_mut(&p);
@@ -1477,9 +1582,12 @@ impl Decision {
                     })
                 };
                 self.log_delivery("parcel", Some(uid), Some(&p), &format!("delivery of {p} by {uid} ended {state:?} before the parcel was released (try {tries})"), json!({ "state": "loaded", "ended": format!("{state:?}") }));
-                if tries < 3 && (state != State::Rejected || sequencing) {
-                    // rules 7: an order the watch officer turned down waits retry_after_s
-                    let pause = if job.turned_down {
+                if job.by_play || (tries < 3 && (state != State::Rejected || sequencing)) {
+                    // rules 7: an order the watch officer turned down waits retry_after_s; rules
+                    // 8: one a play withdrew is offered again once the play lets it go
+                    let pause = if job.by_play {
+                        30_000
+                    } else if job.turned_down {
                         (self.auto().retry_after_s * 1000.0) as i64
                     } else if sequencing {
                         (self.auto().hold_retry_s * 1000.0) as i64
@@ -2128,6 +2236,11 @@ impl Decision {
         let busy = self.with_open_orders(busy);
         // rules 2: nothing goes to a zone that is not an approved delivery point
         let open = self.hold_for_unapproved_zones(open, &world, &busy, now).await;
+        // rules 8: nor what a person's play holds back (a ground stop, a trip outside its limits)
+        let open = {
+            let plays = self.plays_in_force();
+            open.into_iter().filter(|p| self.play_holding(&plays, &p.hub, &p.zone, p.mass_kg, p.priority).is_none()).collect::<Vec<_>>()
+        };
         // a swap for a vehicle that came home low, before the next parcel
         let swap_below = SWAP_BELOW_PCT;
         self.propose_swaps(&world, &busy, swap_below, now).await;
@@ -2476,6 +2589,17 @@ impl Decision {
 
     async fn propose_deliver(&self, uid: &DUid, parcel: &str, now: Time) {
         let Some(b) = bridge_uid(uid) else { return };
+        // rules 8: a person's play holds it back: it waits at the hub, loaded, until the play ends
+        let held = self.rt().parcels.get(parcel).map(|p| p.spec.clone()).and_then(|p| self.play_holding(&self.plays_in_force(), &p.from, &p.to, p.mass_kg, p.priority));
+        if held.is_some() {
+            let mut rt = self.rt();
+            let j = rt.jobs.entry(uid.clone()).or_insert_with(|| Job::new(Some(parcel.into()), Stage::Deliver, None, now.0));
+            j.stage = Stage::Deliver;
+            j.intent = None;
+            j.by_play = false;
+            j.not_before_ms = now.0 + 30_000;
+            return;
+        }
         // not heard: proposed once it is (its own failsafe has it meanwhile)
         if !self.heard(uid) {
             let mut rt = self.rt();

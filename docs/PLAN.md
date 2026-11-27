@@ -25,6 +25,7 @@ makes the answer measurable.
 | 11 | Other traffic and the company's picture of it | phases 1 to 3 done (rules 3: separation from other traffic, automation first); console layer by the console | [traffic.md](design/traffic.md) |
 | 12 | External interfaces (identity broadcasts, UTM, ATC and VTS, city and responders) | backlog | [external-interfaces.md](design/external-interfaces.md) |
 | 13 | AI watch officer triages the Inbox | built (rules 7): triage, verdicts, the officer, the menu's AI choice, the console; phase 8's two arms open (fleetmesh-ic4.6) | [watch-officer.md](design/watch-officer.md) |
+| 14 | Incidents and plays: one decision for a pattern | built (rules 8): incidents in the Inbox, ground stop and limits plays, the officer's recommendation, wind-event's exception and odd one out; measuring item-by-item against plays is phase 8's | [incidents.md](design/incidents.md) |
 
 ## 1. Vehicle-side port (done)
 

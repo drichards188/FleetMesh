@@ -560,6 +560,26 @@ pub enum EventBody {
     #[serde(rename = "triage.closed")]
     TriageClosed { item: String, why: String },
 
+    /// Rules 8 ([`crate::rules::PLAYS_SINCE`], docs/design/incidents.md): a person adopted a play,
+    /// a standing decision for a pattern at a hub, in force until it ends.
+    #[serde(rename = "play.adopted")]
+    PlayAdopted {
+        play: crate::plays::Play,
+        session: SessionId,
+    },
+
+    /// Rules 8: a play ended: its end condition cleared (the bridge's, `by` none), a person lifted
+    /// it (`by`, `session`), or its time ran out (`by` none, at its `until_t`).
+    #[serde(rename = "play.ended")]
+    PlayEnded {
+        play: u64,
+        why: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<OperatorId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<SessionId>,
+    },
+
     /// Mode change, failsafe, STATUSTEXT and the like.
     #[serde(rename = "vehicle.event")]
     VehicleEvent {

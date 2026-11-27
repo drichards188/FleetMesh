@@ -1150,6 +1150,8 @@ fn replay_inner<S: AsRef<str>>(
     let mut loss_due: Option<LossDue> = None;
     // rules 7: the watch officer's triage (docs/design/watch-officer.md)
     let mut triage = TriageCheck::default();
+    // rules 8: the plays in force as the log builds them (docs/design/incidents.md)
+    let mut plays = PlayCheck::default();
 
     for (i, logged) in events.iter().enumerate() {
         if let Some(p) = i.checked_sub(1).and_then(|j| events.get(j)) {
@@ -1436,6 +1438,11 @@ fn replay_inner<S: AsRef<str>>(
             } => {
                 check_waiting(&mut r, e, *intent, &inputs.waiting, &intents);
                 check_silent_orders(&mut r, e, *intent, inputs, &intents, &nodes, policy.as_ref());
+                // rules 8: the plays it read are exactly those in force (none under older rules)
+                let want = plays.in_force(inputs.t);
+                if inputs.plays != want {
+                    bad(&mut r, e, Some(*intent), "the plays a decision read differ from those in force", json(&inputs.plays), json(&want));
+                }
                 let (Some(pol), Some(tr)) = (&policy, intents.get_mut(intent)) else {
                     bad(
                         &mut r,
@@ -1533,6 +1540,11 @@ fn replay_inner<S: AsRef<str>>(
             } => {
                 check_waiting(&mut r, e, *intent, &inputs.waiting, &intents);
                 check_silent_orders(&mut r, e, *intent, inputs, &intents, &nodes, policy.as_ref());
+                // rules 8: the plays it read are exactly those in force (none under older rules)
+                let want = plays.in_force(inputs.t);
+                if inputs.plays != want {
+                    bad(&mut r, e, Some(*intent), "the plays a decision read differ from those in force", json(&inputs.plays), json(&want));
+                }
                 let (Some(pol), Some(tr)) = (&policy, intents.get_mut(intent)) else {
                     bad(
                         &mut r,
@@ -3391,6 +3403,20 @@ fn replay_inner<S: AsRef<str>>(
                 }
             }
             EventBody::DeliveryEvent { .. } => {}
+            EventBody::PlayAdopted { play, session } => {
+                check_operator(&mut r, e, &play.by, *session, &sessions, "a play");
+                for (what, logged, want) in plays.step(e, policy.as_ref()) {
+                    bad(&mut r, e, None, &what, logged, want);
+                }
+            }
+            EventBody::PlayEnded { by, session, .. } => {
+                if let (Some(by), Some(session)) = (by, session) {
+                    check_operator(&mut r, e, by, *session, &sessions, "a play lifted");
+                }
+                for (what, logged, want) in plays.step(e, policy.as_ref()) {
+                    bad(&mut r, e, None, &what, logged, want);
+                }
+            }
             EventBody::TriageWatch { .. }
             | EventBody::TriageRouted { .. }
             | EventBody::TriageVerdict { .. }
@@ -4572,6 +4598,79 @@ fn check_carried_restores(r: &mut ReplayReport, events: &[Event], opts: &ReplayO
     let _ = (r, events, opts);
 }
 
+/// Rules 8 ([`crate::rules::PLAYS_SINCE`]): the plays in force as the log builds them, each
+/// adoption checked against the logged policy's `[plays]` and each end against the play.
+#[derive(Default)]
+struct PlayCheck {
+    plays: BTreeMap<u64, crate::plays::Play>,
+    next: u64,
+}
+
+impl PlayCheck {
+    /// What a decision at `t` must read.
+    fn in_force(&self, t: crate::time::Time) -> Vec<crate::plays::Play> {
+        crate::plays::in_force(&self.plays.values().cloned().collect::<Vec<_>>(), t)
+    }
+
+    /// A `play.*` event: the mismatches it shows, as (what, logged, wanted).
+    fn step(&mut self, e: &Event, policy: Option<&Policy>) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        let Some(pol) = policy else {
+            out.push(("a play event without run.started".into(), event_type(&e.body), String::new()));
+            return out;
+        };
+        match &e.body {
+            EventBody::PlayAdopted { play, .. } => {
+                if !pol.rules.at_least(crate::rules::PLAYS_SINCE) {
+                    out.push(("a play under rules that take none".into(), json(play), format!("absent before rules {}", crate::rules::PLAYS_SINCE)));
+                    return out;
+                }
+                let Some(pp) = &pol.plays else {
+                    out.push(("a play adopted under a policy with no [plays]".into(), json(play), String::new()));
+                    return out;
+                };
+                let want_id = self.next.max(1);
+                if play.id != want_id {
+                    out.push(("a play's id out of sequence".into(), play.id.to_string(), want_id.to_string()));
+                }
+                let span = play.until_t.0 - e.t.0;
+                if span <= 0 || span % 1000 != 0 {
+                    out.push(("a play's until_t is not a whole number of seconds after its adoption".into(), play.until_t.0.to_string(), e.t.0.to_string()));
+                }
+                let req = crate::plays::PlayRequest {
+                    kind: play.kind,
+                    hub: play.hub.clone(),
+                    codes: play.codes.clone(),
+                    limits: play.limits.clone(),
+                    except_priority: play.except_priority,
+                    for_s: u32::try_from(span.max(0) / 1000).unwrap_or(u32::MAX),
+                    lifts: play.lifts.clone(),
+                };
+                if let Some(why) = pp.refuse(&req) {
+                    out.push((format!("a play outside the policy's [plays]: {why}"), json(play), json(pp)));
+                }
+                self.next = play.id + 1;
+                self.plays.insert(play.id, play.clone());
+            }
+            EventBody::PlayEnded { play, why, by, session } => {
+                match self.plays.remove(play) {
+                    None => out.push(("a play ended that is not in force".into(), play.to_string(), String::new())),
+                    Some(p) => {
+                        if by.is_none() && why == "its time ran out" && e.t < p.until_t {
+                            out.push(("a play's time ran out before its until_t".into(), e.t.0.to_string(), p.until_t.0.to_string()));
+                        }
+                        if by.is_some() != session.is_some() {
+                            out.push(("a play lifted by a person names them and their session together".into(), json(by), json(session)));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
 /// The operator session an event acts under, if it is an operator's act.
 fn acting_session(body: &EventBody) -> Option<SessionId> {
     match body {
@@ -4586,6 +4685,9 @@ fn acting_session(body: &EventBody) -> Option<SessionId> {
         EventBody::PasskeyRegistered { session: Some(s), .. } => Some(*s),
         // rules 30: a loss confirmed, or revoked by an operator
         EventBody::NodeLost { session, .. } => Some(*session),
+        // rules 8: a play adopted, or lifted by a person
+        EventBody::PlayAdopted { session, .. } => Some(*session),
+        EventBody::PlayEnded { session: Some(s), .. } => Some(*s),
         EventBody::NodeLossRevoked {
             cause: crate::nodes::Revocation::Operator { session, .. },
             ..

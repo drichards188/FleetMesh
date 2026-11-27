@@ -452,6 +452,8 @@ impl Decision {
             Value::Object(m)
         };
         let site_of = |hub: &str| sites.iter().find(|s| s.hubs.iter().any(|h| h == hub)).map(|s| s.id.clone());
+        // rules 8: the plays in force, by hub
+        let plays = self.plays_in_force();
         // The wind at each hub against the limits of the platforms based there (the strictest):
         // whether the weather rule holds or refuses what leaves it. Display only; the rule itself
         // reads each order's own samples.
@@ -490,6 +492,7 @@ impl Decision {
                     "visitors": list.iter().filter(|x| x.at_hub.as_deref() == Some(id) && x.base.as_deref() != Some(id)).count(),
                     "parked": count(&|x| x.at_hub.as_deref() == Some(id)),
                     "weather": wind_at(h),
+                    "plays": plays.iter().filter(|p| p.hub == h.id).collect::<Vec<_>>(),
                 })
             })
             .collect();

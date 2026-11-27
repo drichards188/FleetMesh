@@ -316,7 +316,7 @@ fn no_tool_implies_approval_or_control() {
             .as_ref()
             .and_then(|a| a.read_only_hint)
             .expect("every tool says whether it is read-only");
-        let writer = matches!(name.as_str(), "propose_intent" | "withdraw_intent" | "make_group" | "reply_tasking" | "triage_item");
+        let writer = matches!(name.as_str(), "propose_intent" | "withdraw_intent" | "make_group" | "reply_tasking" | "triage_item" | "recommend_play");
         assert_eq!(read_only, !writer, "{name}: read_only_hint");
     }
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -468,6 +468,8 @@ impl Rig {
         feed.parcels.insert(
             "p-1".into(),
             fleetmesh_decide::delivery::ParcelFact {
+                priority: None,
+                to: None,
                 mass_kg: Some(1.0),
                 class: "normal".into(),
                 state: fleetmesh_decide::delivery::ParcelState::Loaded,

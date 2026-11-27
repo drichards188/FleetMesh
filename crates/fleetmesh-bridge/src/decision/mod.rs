@@ -68,6 +68,8 @@ pub mod queue;
 pub mod snapshot;
 pub mod delivery_rt;
 pub mod fleet;
+pub mod incidents;
+pub mod plays;
 pub(crate) mod terrain;
 pub mod traffic;
 pub mod triage;
@@ -252,6 +254,8 @@ fn engine_err(e: EngineError) -> DecisionError {
         | EngineError::NotOnRoster { .. } => 403,
         // rules 8: the signer must (re-)enter their credential
         EngineError::NotAuthenticated { .. } | EngineError::StepUpRequired { .. } => 401,
+        // rules 8: a play refused (outside the policy, older rules) or not in force
+        EngineError::Play(_) => 422,
         _ => 500,
     };
     DecisionError::new(status, e.to_string())
@@ -1979,6 +1983,8 @@ impl Decision {
         // rules 7: the watch officer's triage of what the Inbox now holds (outside the lock: the
         // alerts read it themselves)
         crate::perf::time("decision.step_triage", || self.step_triage());
+        // rules 8: plays whose time ran out or whose end condition cleared
+        crate::perf::time("decision.step_plays", || self.step_plays());
         // rules 30: each vehicle's own lost-link failsafe read from it (outside the lock: it
         // only asks the vehicles)
         crate::perf::time("decision.read_lost_link", || lost_link_read::read_lost_link(&self.world));
@@ -2402,6 +2408,9 @@ impl Decision {
                 .collect()
         };
         let mut alerts = self.current_alerts();
+        // incidents read every item, the officer's too (docs/design/incidents.md)
+        let all_held: Vec<Value> = held.iter().map(|(_, v)| v.clone()).collect();
+        let all_alerts = alerts.clone();
         let mut alert_notes: BTreeMap<String, Value> = BTreeMap::new();
         let (pending, triage_counts) = {
             let triage = self.triage.lock().unwrap_or_else(|e| e.into_inner());
@@ -2478,9 +2487,17 @@ impl Decision {
                 }
             }
         }
+        // incidents (docs/design/incidents.md): the items of one cause at one hub, a view only;
+        // rules 8: the plays in force beside them
+        let incidents = if self.rules.at_least(fleetmesh_decide::PLAYS_SINCE) { self.incidents_of(&all_held, &all_alerts) } else { Vec::new() };
+        let plays = self.plays_json()["plays"].clone();
+        let recommended = self.play_recs_for(&incidents);
         let mut v = json!({
             "pending": pending,
             "alerts": alerts,
+            "incidents": incidents,
+            "plays": plays,
+            "recommended_plays": recommended,
             "queued": queued,
             "review": review,
             "counts": {

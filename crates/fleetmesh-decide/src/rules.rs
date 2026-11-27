@@ -181,7 +181,7 @@ pub enum UnknownEndurance {
 /// with the rules it was produced under. `run.started` records it. FleetMesh starts at 1;
 /// new behaviour is gated on a named `*_SINCE` constant set to the version that adds it
 /// (never a literal), and replay is taught the same gate in the same change.
-pub const RULES_VERSION: u32 = OFFICER_TRIAGE_SINCE;
+pub const RULES_VERSION: u32 = PLAYS_SINCE;
 
 /// Rules 2: delivery points are approved ahead of time and a person is asked only about an
 /// exception (docs/DECISIONS.md, 2026-11-25, "Routine deliveries need no person"). A drop zone
@@ -276,6 +276,17 @@ pub const FLOOD_NEAR_M: f64 = 60.0;
 /// expires as before, and the officer approves nothing. The policy grows `[officer]` (schema 4).
 pub const OFFICER_TRIAGE_SINCE: u32 = 7;
 
+/// Rules 8: a person answers a pattern once with a play (docs/design/incidents.md, docs/DECISIONS.md
+/// 2026-11-27, "One decision for a pattern"). A person adopts a play (`play.adopted`, with their
+/// session) for a hub: a ground stop (no agent's pickup or delivery leaves it without a person) or
+/// a limits play (an order held only for its codes, among `[plays] codes`, within its trip, mass
+/// and battery limits, goes as the person decided). A parcel at or above its `except_priority` is
+/// outside it. The engine fills the plays in force into each decision's inputs (`plays`) and the
+/// policy routes by them ([`crate::plays::route`]); a play ends when the bridge's end condition
+/// clears, when a person lifts it or at its `until_t` (`play.ended`). The policy grows `[plays]`
+/// (schema 5), and a parcel's facts its priority and drop zone.
+pub const PLAYS_SINCE: u32 = 8;
+
 /// The fields each rules version added to what a log carries: (the version that added it, where
 /// it is). Replay flags a log whose `run.started` claims an older version but that carries one of
 /// them (an event that could not have existed then: a newer log given an older header).
@@ -288,6 +299,8 @@ pub const RULES_MARKERS: &[(u32, &str)] = &[
     (HUB_SEQUENCING_SINCE, "check.result.inputs.delivery.traffic.route"),
     (OFFICER_TRIAGE_SINCE, "policy.officer"),
     (OFFICER_TRIAGE_SINCE, "triage.routed"),
+    (PLAYS_SINCE, "policy.plays"),
+    (PLAYS_SINCE, "play.adopted"),
 ];
 
 /// The newest decision rules this build can decide under and replay: [`RULES_VERSION`] itself,
@@ -310,7 +323,10 @@ pub const PREPARED_SPACE_MAX_AGE_MS: i64 = 5_000;
 /// keys it does not log). Schema 2 (rules 2, [`STANDING_APPROVALS_SINCE`]) adds
 /// `[rules.delivery.dropzone] standing_approvals`; schema 3 (rules 3,
 /// [`TRAFFIC_SEPARATION_SINCE`]) adds `[rules.delivery.separation.traffic]`.
-pub const POLICY_SCHEMA: u32 = OFFICER_TRIAGE_SCHEMA;
+pub const POLICY_SCHEMA: u32 = PLAYS_SCHEMA;
+
+/// The policy schema rules 8 logs: `[plays]` ([`PLAYS_SINCE`]).
+pub const PLAYS_SCHEMA: u32 = 5;
 
 /// The policy schema rules 7 logs: `[officer]` ([`OFFICER_TRIAGE_SINCE`]).
 pub const OFFICER_TRIAGE_SCHEMA: u32 = 4;
@@ -398,11 +414,13 @@ impl RulesConfig {
         self.silent_rules().drift_mps
     }
 
-    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`): 4 from
-    /// rules 7 (`[officer]`), 3 from rules 3 (the traffic figures), 2 from rules 2
-    /// (`standing_approvals`), 1 before.
+    /// The policy schema a run under these rules logs (`run.started`'s `policy_schema`): 5 from
+    /// rules 8 (`[plays]`), 4 from rules 7 (`[officer]`), 3 from rules 3 (the traffic figures), 2
+    /// from rules 2 (`standing_approvals`), 1 before.
     pub fn policy_schema(&self) -> u32 {
-        if self.at_least(OFFICER_TRIAGE_SINCE) {
+        if self.at_least(PLAYS_SINCE) {
+            PLAYS_SCHEMA
+        } else if self.at_least(OFFICER_TRIAGE_SINCE) {
             OFFICER_TRIAGE_SCHEMA
         } else if self.at_least(TRAFFIC_SEPARATION_SINCE) {
             TRAFFIC_SEPARATION_SCHEMA

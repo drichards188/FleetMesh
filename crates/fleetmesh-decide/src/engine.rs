@@ -30,6 +30,9 @@ use crate::world::{LoggedInputs, WorldSnapshot};
 pub enum EngineError {
     #[error("only a triage.* event is recorded as triage")]
     NotTriage,
+    /// Rules 8: a play refused (older rules, no `[plays]`, outside it, not in force).
+    #[error("{0}")]
+    Play(String),
     #[error("unknown intent {0}")]
     UnknownIntent(IntentId),
     #[error(transparent)]
@@ -226,6 +229,9 @@ pub struct Engine {
     next_intent: u64,
     next_session: u64,
     intents: BTreeMap<IntentId, Intent>,
+    /// Rules 8: the plays a person adopted that have not ended, by id, and the next play's id.
+    plays: BTreeMap<u64, crate::plays::Play>,
+    next_play: u64,
     /// When each drop zone was last confirmed by a person (an approved `confirm_drop_zone`, or an
     /// approved `deliver` held for `DZ_UNCONFIRMED`): the `confirmed` input of the next decision.
     dz_confirmed: BTreeMap<String, Time>,
@@ -400,6 +406,8 @@ impl Engine {
             next_intent: 1,
             next_session: 1,
             intents: BTreeMap::new(),
+            plays: BTreeMap::new(),
+            next_play: 1,
             dz_confirmed: BTreeMap::new(),
             auth: roster.auth,
             roster: roster.clone(),
@@ -1511,6 +1519,69 @@ impl Engine {
     fn fill_engine_facts(&self, spec: &IntentSpec, inputs: &mut WorldSnapshot) {
         inputs.waiting = self.waiting_for(spec);
         self.fill_delivery(spec, inputs);
+        // rules 8: the plays in force when it is decided
+        if self.policy.rules.at_least(crate::rules::PLAYS_SINCE) {
+            inputs.plays = crate::plays::in_force(&self.plays.values().cloned().collect::<Vec<_>>(), inputs.t);
+        }
+    }
+
+    /// Rules 8 ([`crate::rules::PLAYS_SINCE`], docs/design/incidents.md): a person adopts a play, a
+    /// standing decision for a pattern at a hub, in force from now for `for_s` at most. Refused
+    /// under older rules, without `[plays]` in the policy, or outside it.
+    pub fn adopt_play(&mut self, by: &HumanAuthority, req: crate::plays::PlayRequest) -> Result<crate::plays::Play, EngineError> {
+        if !self.policy.rules.at_least(crate::rules::PLAYS_SINCE) {
+            return Err(EngineError::Play(format!("these decision rules take no play (rules {})", crate::rules::PLAYS_SINCE)));
+        }
+        let Some(pp) = self.policy.plays.clone() else {
+            return Err(EngineError::Play("this run's policy has no [plays]: no play is adopted".into()));
+        };
+        if let Some(why) = pp.refuse(&req) {
+            return Err(EngineError::Play(why));
+        }
+        let now = self.now();
+        let play = crate::plays::Play {
+            id: self.next_play,
+            kind: req.kind,
+            hub: req.hub,
+            codes: req.codes,
+            limits: req.limits,
+            except_priority: req.except_priority,
+            until_t: now.plus_ms(i64::from(req.for_s) * 1000),
+            lifts: req.lifts,
+            by: by.operator().clone(),
+        };
+        self.emit_at(now, EventBody::PlayAdopted { play: play.clone(), session: by.session() })?;
+        self.next_play += 1;
+        self.plays.insert(play.id, play.clone());
+        Ok(play)
+    }
+
+    /// Rules 8: a play ends: lifted by a person (`by`), or its end condition cleared (`by` none:
+    /// the bridge, which watches it).
+    pub fn end_play(&mut self, id: u64, why: &str, by: Option<&HumanAuthority>) -> Result<(), EngineError> {
+        if !self.plays.contains_key(&id) {
+            return Err(EngineError::Play(format!("play {id} is not in force")));
+        }
+        self.emit(EventBody::PlayEnded { play: id, why: why.to_string(), by: by.map(|b| b.operator().clone()), session: by.map(HumanAuthority::session) })?;
+        self.plays.remove(&id);
+        Ok(())
+    }
+
+    /// Rules 8: end every play past its `until_t` (logged at the time it ran out). Call
+    /// periodically, beside [`Engine::expire_due`].
+    pub fn expire_plays(&mut self) -> Result<Vec<u64>, EngineError> {
+        let now = self.now();
+        let due: Vec<u64> = self.plays.values().filter(|p| now >= p.until_t).map(|p| p.id).collect();
+        for id in &due {
+            self.emit(EventBody::PlayEnded { play: *id, why: "its time ran out".into(), by: None, session: None })?;
+            self.plays.remove(id);
+        }
+        Ok(due)
+    }
+
+    /// Rules 8: the plays in force.
+    pub fn plays(&self) -> Vec<crate::plays::Play> {
+        crate::plays::in_force(&self.plays.values().cloned().collect::<Vec<_>>(), self.now())
     }
 
     /// What the delivery rules read of the engine's own orders (delivery-orders.md section 6):

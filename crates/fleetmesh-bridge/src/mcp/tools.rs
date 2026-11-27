@@ -282,6 +282,22 @@ pub struct TriageParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RecommendPlayParams {
+    /// The incident, as get_inbox's `incidents[].id` names it (`weather@hub-crissy`).
+    pub incident: String,
+    /// `ground_stop` (no agent's departure leaves the hub without the person) or `limits` (an
+    /// order held only for the play's codes, within its limits, goes as the person decided).
+    pub kind: String,
+    /// With `limits`: the longest trip in metres (max_trip_m), the heaviest parcel in kg
+    /// (max_mass_kg), the lowest battery in percent (min_battery_pct).
+    #[serde(default)]
+    pub limits: Option<Value>,
+    /// Why, bottom line first, with the facts and their ages: the person reads it on the
+    /// incident's card.
+    pub why: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct WithdrawParams {
     /// The id of an intent this agent proposed.
     pub id: u64,
@@ -577,6 +593,16 @@ pub fn tools() -> Vec<Tool> {
                 .into(),
             false,
         ),
+        tool::<RecommendPlayParams>(
+            "recommend_play",
+            "Recommend a play to the person for an incident (get_inbox: incidents, the items of one \
+             cause at one hub): ground_stop, or limits with the limits. Your recommendation leads \
+             the incident's card; only the person adopts a play, and you adopt none. An urgent \
+             parcel and an item of another cause stay outside any play. Logged. Only the run's \
+             watch officer may use it."
+                .into(),
+            false,
+        ),
         tool::<WithdrawParams>(
             "withdraw_intent",
             "Withdraw an intent you proposed, while it waits (pending or approved but not \
@@ -782,6 +808,24 @@ pub async fn call(
                     mcp.decision.triage_verdict(agent, &p.item, v).map_err(|why| refused(403, why))
                 }
                 None => Err(refused(400, format!("verdict {:?}: handled, escalated or turned_down", p.verdict))),
+            }
+        }
+        "recommend_play" => {
+            let p = params!(RecommendPlayParams);
+            let refused = |status: u16, detail: String| DecisionError { status, detail, intent: None };
+            let kind = match p.kind.as_str() {
+                "ground_stop" => Some(fleetmesh_decide::plays::PlayKind::GroundStop),
+                "limits" => Some(fleetmesh_decide::plays::PlayKind::Limits),
+                _ => None,
+            };
+            let limits: Result<fleetmesh_decide::plays::PlayLimits, String> = match p.limits {
+                None => Ok(Default::default()),
+                Some(v) => serde_json::from_value(v).map_err(|e| format!("limits: {e}")),
+            };
+            match (kind, limits) {
+                (Some(kind), Ok(limits)) => mcp.decision.recommend_play(agent, &p.incident, kind, limits, &p.why),
+                (None, _) => Err(refused(400, format!("kind {:?}: ground_stop or limits", p.kind))),
+                (_, Err(e)) => Err(refused(400, e)),
             }
         }
         "withdraw_intent" => {

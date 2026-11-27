@@ -83,7 +83,7 @@ fn good_nav() -> NavFacts {
 }
 
 fn parcel(mass: f64, uid: &str) -> ParcelFact {
-    ParcelFact { mass_kg: Some(mass), class: "normal".into(), state: ParcelState::Loaded, vehicle: Some(Uid::new(uid)) }
+    ParcelFact { mass_kg: Some(mass), class: "normal".into(), state: ParcelState::Loaded, vehicle: Some(Uid::new(uid)), priority: None, to: None }
 }
 
 /// A world with `sky-1`, a delivery drone at the hub with parcel `p-1` aboard, the shipped areas
@@ -2136,7 +2136,7 @@ fn from_rules_5_a_pickup_names_the_vehicles_stand_and_loads_there_and_the_hub_se
     let v = w.vehicles.get_mut(&sky()).expect("sky-1");
     v.position = Some(Fact::new(stand, t0()));
     v.home = Some(Fact::new(stand, t0()));
-    di(&mut w).parcels.insert("p-2".into(), ParcelFact { mass_kg: Some(1.0), class: "normal".into(), state: ParcelState::Ready, vehicle: Some(sky()) });
+    di(&mut w).parcels.insert("p-2".into(), ParcelFact { mass_kg: Some(1.0), class: "normal".into(), state: ParcelState::Ready, vehicle: Some(sky()), priority: None, to: None });
     di(&mut w).traffic.insert(Uid::new("sky-2"), other(hub(), t0(), Some(80.0), Domain::Air));
     let pickup = |at: LonLat| Task::Pickup { parcel: "p-2".into(), site: presidio_at(at), load_by_s: None };
     let rs = run_with(pickup(stand), &w, &under(HUB_SEQUENCING_SINCE));
@@ -2434,7 +2434,7 @@ mod triage {
         rec(&mut r, EventBody::TriageWatch { agent: officer(), on: false });
         rec(&mut r, EventBody::TriageReleased { item: "alert:link:3".into(), why: Release::OfficerAbsent });
         let rep = r.replays();
-        assert_eq!(rep.rules_version, fleetmesh_decide::OFFICER_TRIAGE_SINCE);
+        assert!(rep.rules_version >= fleetmesh_decide::OFFICER_TRIAGE_SINCE);
     }
 
     #[test]
@@ -2486,5 +2486,139 @@ mod triage {
         assert!(r.engine.policy().officer.is_none(), "rules 6 never had [officer]");
         rec(&mut r, EventBody::TriageWatch { agent: officer(), on: true });
         assert!(!whats(&r).is_empty());
+    }
+}
+
+// ---- rules 8: plays (docs/design/incidents.md) ------------------------------------------------
+
+mod plays {
+    use super::*;
+    use fleetmesh_decide::plays::{PlayKind, PlayLimits, PlayRequest};
+
+    /// gusts in the drones' soft band (11 to 14 m/s) at the hub, every delivery from it held
+    /// WX_GUST_LIMIT_MARGINAL; calm at the drop zone (a gust over 10 m/s there refuses the
+    /// descent, and a play never sends what a check refuses)
+    fn gusty(r: &mut Rig) {
+        let t = r.world.t;
+        let zone = places().drop_zones["dz-harbour-17"].at();
+        di(&mut r.world).weather = vec![WxFact { gust_mps: 12.5, ..calm(t) }, WxFact { at: zone, ..calm(t) }];
+    }
+
+    fn adopt(r: &mut Rig, req: PlayRequest) -> Result<u64, String> {
+        let s = r.engine.open_operator_session(OperatorId::new("op-1")).expect("session");
+        r.engine.adopt_play(s.authority(), req).map(|p| p.id).map_err(|e| e.to_string())
+    }
+
+    fn limits(max_trip_m: f64) -> PlayRequest {
+        PlayRequest {
+            kind: PlayKind::Limits,
+            hub: "hub-presidio".into(),
+            codes: vec!["WX_GUST_LIMIT_MARGINAL".into()],
+            limits: PlayLimits { max_trip_m: Some(max_trip_m), max_mass_kg: Some(1.5), min_battery_pct: Some(60.0) },
+            except_priority: Some(3),
+            for_s: 1800,
+            lifts: Some("gusts under 11 m/s for 5 min".into()),
+        }
+    }
+
+    fn ground_stop() -> PlayRequest {
+        PlayRequest { kind: PlayKind::GroundStop, hub: "hub-presidio".into(), codes: vec![], limits: PlayLimits::default(), except_priority: Some(3), for_s: 600, lifts: None }
+    }
+
+    #[test]
+    fn a_limits_play_sends_what_it_answers_and_leaves_the_rest_to_a_person() {
+        let mut r = Rig::new();
+        gusty(&mut r);
+        let before = r.agent(deliver());
+        assert_eq!(r.state(before), State::PendingApproval);
+        assert!(r.codes(before).contains(&"WX_GUST_LIMIT_MARGINAL".to_string()), "{:?}", r.codes(before));
+        assert_eq!(r.tier(before).1, "(hold)");
+        adopt(&mut r, limits(20_000.0)).expect("adopted");
+        // held only for the gust, within its limits: it goes as the person decided
+        let within = r.agent(deliver());
+        assert_eq!((r.state(within), r.tier(within).1), (State::AutoApproved, "(play)".to_string()));
+        // an urgent parcel is outside the play: it asks the person
+        di(&mut r.world).parcels.get_mut("p-1").expect("p-1").priority = Some(3);
+        let urgent = r.agent(deliver());
+        assert_eq!((r.state(urgent), r.tier(urgent).1), (State::PendingApproval, "(hold)".to_string()));
+        r.replays();
+        // a battery under the play's floor (95% against 97%): outside its limits, the person's
+        let mut low = Rig::new();
+        gusty(&mut low);
+        let mut req = limits(20_000.0);
+        req.limits.min_battery_pct = Some(97.0);
+        adopt(&mut low, req).expect("adopted");
+        let id = low.agent(deliver());
+        assert_eq!(low.tier(id).1, "(hold)", "outside its limits");
+        low.replays();
+    }
+
+    #[test]
+    fn a_limits_play_answers_only_its_hub_and_its_trip() {
+        let mut r = Rig::new();
+        gusty(&mut r);
+        adopt(&mut r, limits(50.0)).expect("adopted");
+        let id = r.agent(deliver());
+        assert_eq!(r.tier(id).1, "(hold)", "the trip is longer than 50 m");
+        let mut far = Rig::new();
+        gusty(&mut far);
+        adopt(&mut far, PlayRequest { hub: "hub-pier".into(), ..limits(20_000.0) }).expect("adopted");
+        let id = far.agent(deliver());
+        assert_eq!(far.tier(id).1, "(hold)", "another hub's play");
+        r.replays();
+        far.replays();
+    }
+
+    #[test]
+    fn a_ground_stop_sends_agents_departures_to_a_person_and_leaves_the_urgent_and_the_persons_own() {
+        let mut r = Rig::new();
+        let id = adopt(&mut r, ground_stop()).expect("adopted");
+        let agent = r.agent(deliver());
+        assert_eq!((r.state(agent), r.tier(agent).1), (State::PendingApproval, "(ground stop)".to_string()));
+        let own = r.human(deliver());
+        assert_ne!(r.tier(own).1, "(ground stop)", "a person's own order is theirs to send");
+        di(&mut r.world).parcels.get_mut("p-1").expect("p-1").priority = Some(3);
+        let urgent = r.agent(deliver());
+        assert_eq!(r.state(urgent), State::AutoApproved, "an urgent parcel is outside the stop");
+        di(&mut r.world).parcels.get_mut("p-1").expect("p-1").priority = None;
+        let s = r.engine.open_operator_session(OperatorId::new("op-1")).expect("session");
+        r.engine.end_play(id, "lifted: the wind dropped", Some(s.authority())).expect("lifted");
+        let after = r.agent(deliver());
+        assert_eq!(r.state(after), State::AutoApproved, "lifted: as before");
+        r.replays();
+    }
+
+    #[test]
+    fn a_play_is_refused_outside_its_policy_and_ends_when_its_time_runs_out() {
+        let mut r = Rig::new();
+        assert!(adopt(&mut r, PlayRequest { for_s: 7200, ..ground_stop() }).is_err(), "longer than [plays] max_s");
+        assert!(adopt(&mut r, PlayRequest { codes: vec!["WX_GUST_LIMIT".into()], ..limits(20_000.0) }).is_err(), "a refusal's code");
+        let mut old = Rig::with_policy(Policy { rules: RulesConfig { rules_version: fleetmesh_decide::PLAYS_SINCE - 1, ..RulesConfig::default() }, ..Policy::load(&root().join("sim/policy.toml")).expect("policy") });
+        assert!(adopt(&mut old, ground_stop()).is_err(), "rules before PLAYS_SINCE take no play");
+        let mut none = Rig::with_policy(Policy { plays: None, ..Policy::load(&root().join("sim/policy.toml")).expect("policy") });
+        assert!(adopt(&mut none, ground_stop()).is_err(), "no [plays]");
+        gusty(&mut r);
+        let id = adopt(&mut r, PlayRequest { for_s: 60, ..limits(20_000.0) }).expect("adopted");
+        let during = r.agent(deliver());
+        assert_eq!(r.tier(during).1, "(play)");
+        later(&mut r, 61_000);
+        gusty(&mut r);
+        assert_eq!(r.engine.expire_plays().expect("expired"), vec![id]);
+        let after = r.agent(deliver());
+        assert_eq!(r.tier(after).1, "(hold)", "its time ran out");
+        r.replays();
+    }
+
+    #[test]
+    fn replay_flags_a_play_a_person_did_not_adopt() {
+        let mut r = Rig::new();
+        gusty(&mut r);
+        adopt(&mut r, limits(20_000.0)).expect("adopted");
+        r.agent(deliver());
+        // the log with its play.adopted line taken out and the chain left as it is: replay says so
+        let text = r.log.text();
+        let without: String = text.lines().filter(|l| !l.contains("\"play.adopted\"")).map(|l| format!("{l}\n")).collect();
+        let rep = fleetmesh_decide::replay::replay_str(&without).expect("parses");
+        assert!(rep.mismatches.iter().any(|m| m.what.contains("plays a decision read")), "{:?}", rep.mismatches);
     }
 }

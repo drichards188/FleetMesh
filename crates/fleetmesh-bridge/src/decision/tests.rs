@@ -800,3 +800,4 @@ mod operator_stores;
 /// reaches the person only as it says or at its deadline, and a turned-down order is the
 /// dispatcher's own withdrawal (`tests/triage.rs`).
 mod triage;
+mod plays;

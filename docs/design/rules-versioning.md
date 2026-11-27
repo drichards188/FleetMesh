@@ -132,7 +132,10 @@ rules 5), flagged in a log that claims rules 4 or older. Rules 6 adds no field: 
 logged before, and only which ones the rule reads changed, so a rules 5 log given a rules 6 header
 is found by its recomputed checks. Rules 7 marks `[officer]` in the logged policy and the
 `triage.*` events (the watch officer's triage, docs/design/watch-officer.md), flagged in a log that
-claims rules 6 or older; a run under older rules logs no `[officer]` (`Policy::as_logged`). Replay
+claims rules 6 or older; a run under older rules logs no `[officer]` (`Policy::as_logged`). Rules
+8 marks `[plays]` in the logged policy and `play.adopted` (a person's play, docs/design/incidents.md),
+flagged in a log that claims rules 7 or older; replay checks each decision read exactly the plays in
+force. Replay
 flags a log whose version is older than a
 marker it contains (an event that
 cannot have existed then), which catches a log edited to include newer events under an older

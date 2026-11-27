@@ -90,6 +90,8 @@ pub fn router(app: App) -> Router {
         .route("/api/intents/{id}/{action}", post(intent_action))
         .route("/api/inbox", get(inbox))
         .route("/api/triage", get(triage))
+        .route("/api/plays", get(plays_list).post(plays_adopt))
+        .route("/api/plays/{id}/lift", post(plays_lift))
         .route("/api/swarms", get(swarms))
         .route("/api/parcels", get(parcels))
         .route("/api/hubs", get(hubs))
@@ -499,6 +501,43 @@ async fn inbox(State(app): State<App>) -> Response {
 /// officer handled. Read-only; the audit log's `triage.*` events are the record.
 async fn triage(State(app): State<App>) -> Response {
     Json(app.decision.triage_json()).into_response()
+}
+
+/// `GET /api/plays` (rules 8, docs/design/incidents.md): the plays in force, each with how its end
+/// condition stands. Read-only.
+async fn plays_list(State(app): State<App>) -> Response {
+    Json(app.decision.plays_json()).into_response()
+}
+
+/// `POST /api/plays` (rules 8): a person adopts a play for a hub, `{"kind": "ground_stop" |
+/// "limits", "hub": id, "codes": [..], "limits": {"max_trip_m", "max_mass_kg",
+/// "min_battery_pct"}, "except_priority": 3, "for_s": s, "lift": "wind"}`. A person's act: the
+/// operator's own session, as an approval.
+async fn plays_adopt(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    let ask = match serde_json::from_slice::<crate::decision::plays::PlayAsk>(&body) {
+        Ok(a) => a,
+        Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, format!("a play: {e}")),
+    };
+    let op = match app.auth.actor(&headers, false) {
+        Ok(op) => op,
+        Err(e) => return decision_error(e),
+    };
+    match app.decision.adopt_play(&op, ask) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => decision_error(e),
+    }
+}
+
+/// `POST /api/plays/{id}/lift` (rules 8): a person lifts a play.
+async fn plays_lift(State(app): State<App>, Path(id): Path<u64>, headers: HeaderMap) -> Response {
+    let op = match app.auth.actor(&headers, false) {
+        Ok(op) => op,
+        Err(e) => return decision_error(e),
+    };
+    match app.decision.lift_play(&op, id) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => decision_error(e),
+    }
 }
 
 /// `GET /api/swarms` (murmur-z07i): each swarm the fleet manifest names, with its members'

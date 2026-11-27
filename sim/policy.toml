@@ -1,6 +1,6 @@
 # FleetMesh DRAFT policy. First-draft values for a delivery fleet, not tuned and not reviewed by
 # the maintainer. Read by crates/fleetmesh-decide; the whole file is logged at the
-# start of every run and replay decides with that copy. Policy schema 4, rules version 7.
+# start of every run and replay decides with that copy. Policy schema 5, rules version 8.
 #
 # Routing follows docs/design/delivery-orders.md section 9: the nine delivery kinds (pickup,
 # deliver, hold, reroute, return_to_hub, land_now, abort, swap_battery, confirm_drop_zone). The
@@ -53,6 +53,15 @@
 # Human tiers may also set: approvers = N (distinct approvers), proposer_may_approve = false, and
 # step_up = true (in a credentials run each approval re-enters the approver's password or
 # passkey, and the submitter's own request is never the approval).
+
+# Rules 8 (docs/design/incidents.md): a person answers a pattern once with a play. A limits play
+# sends an order held only for these codes, within its trip, mass and battery limits; a ground stop
+# sends an agent's departure from its hub to a person. Soft-band codes only (DZ_GUST_AT_ZONE is a
+# hold from 8 m/s at the zone and a refusal over 10: a play never sends what a check refuses), and
+# a play lasts an hour at most.
+[plays]
+codes = ["WX_GUST_LIMIT_MARGINAL", "WX_WIND_LIMIT_MARGINAL", "DZ_GUST_AT_ZONE"]
+max_s = 3600
 
 # The AI watch officer's triage (rules 7, docs/design/watch-officer.md). With an officer on watch
 # (its agent made an MCP call within absent_after_s), each order waiting for a person and each

@@ -304,6 +304,10 @@ pub struct Policy {
     /// ([`crate::officer`]). Absent: no triage. Absent from logs of older rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub officer: Option<crate::officer::OfficerPolicy>,
+    /// `[plays]` (rules 8, policy schema 5): what a person's play may answer and how long it may
+    /// last ([`crate::plays`]). Absent: no play is adopted. Absent from logs of older rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays: Option<crate::plays::PlaysPolicy>,
 }
 
 /// The keys a policy file may set looser than the file it extends (a file that extends none:
@@ -399,6 +403,10 @@ impl Policy {
         if !self.rules.at_least(crate::rules::OFFICER_TRIAGE_SINCE) {
             self.officer = None;
         }
+        // rules 8: plays, which older rules never had
+        if !self.rules.at_least(crate::rules::PLAYS_SINCE) {
+            self.plays = None;
+        }
         self
     }
 
@@ -420,6 +428,14 @@ impl Policy {
         }
         if p.approval.expire_s == 0 {
             return Err(PolicyError::Invalid("approval.expire_s must be > 0".into()));
+        }
+        if let Some(pl) = &p.plays {
+            if pl.max_s == 0 {
+                return Err(PolicyError::Invalid("[plays] max_s must be over 0".into()));
+            }
+            if pl.codes.iter().any(|c| c.trim().is_empty()) {
+                return Err(PolicyError::Invalid("[plays] codes holds an empty code".into()));
+            }
         }
         if let Some(o) = &p.officer {
             o.validate().map_err(PolicyError::Invalid)?;
@@ -1043,6 +1059,10 @@ pub fn decide(spec: &IntentSpec, world: &WorldSnapshot, policy: &Policy) -> Poli
         d.tier = Tier::Human;
         d.submitter_authorizes = matches!(spec.source, Source::Human { .. }) && policy.submitter_authorizes(None);
     }
+    // rules 8: a ground stop sends an agent's departure from its hub to a person
+    if policy.rules.at_least(crate::rules::PLAYS_SINCE) {
+        crate::plays::route_ground_stop(spec, world, &mut d);
+    }
     if !spec.kind().needs_consequential_authority() {
         // an agent's order on a vehicle with a consequential order in play (pending, approved or
         // dispatched) goes to a human: a hold or an rtl would otherwise run on its own and
@@ -1159,7 +1179,7 @@ fn decide_by_file(spec: &IntentSpec, world: &WorldSnapshot, policy: &Policy, gro
         if matches {
             // a delivery check that came out `hold` sends the order to a person, whatever the tier
             if rule.tier == Tier::Auto && !facts.held.is_empty() {
-                return PolicyDecision {
+                let mut d = PolicyDecision {
                     tier: Tier::Human,
                     rule: "(hold)".into(),
                     reason: format!(
@@ -1172,6 +1192,11 @@ fn decide_by_file(spec: &IntentSpec, world: &WorldSnapshot, policy: &Policy, gro
                     proposer_excluded: false,
                     step_up: false,
                 };
+                // rules 8: unless a person's play in force answers it
+                if policy.rules.at_least(crate::rules::PLAYS_SINCE) {
+                    crate::plays::route_limits(spec, world, &checks, &mut d);
+                }
+                return d;
             }
             if rule.tier == Tier::Auto && !facts.unverified.is_empty() {
                 return PolicyDecision {
