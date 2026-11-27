@@ -2302,6 +2302,13 @@ impl Decision {
         self.triage.lock().unwrap_or_else(|e| e.into_inner()).waiting()
     }
 
+    /// Whether the person sees an Inbox item now (`intent:<id>`, `alert:<id>`): not while the watch
+    /// officer holds it or it is arriving to the officer (rules 7). Takes the triage lock, so the
+    /// decision lock, if held at all, was taken first (the one order the two are taken in).
+    pub fn person_sees(&self, key: &str) -> bool {
+        self.triage.lock().unwrap_or_else(|e| e.into_inner()).view(key).0
+    }
+
     /// An agent made an MCP call: the watch officer's presence (rules 7).
     pub fn agent_seen(&self, agent: &fleetmesh_decide::AgentId) {
         let officer = self.lock().engine.policy().officer.as_ref().map(|o| o.agent.clone());

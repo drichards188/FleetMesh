@@ -143,3 +143,27 @@ async fn the_inbox_is_read_while_the_loop_ticks_without_a_deadlock() {
     reader.join().expect("reader");
     ticker.join().expect("ticker");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_vehicle_whose_item_is_with_the_officer_does_not_ask_for_the_person() {
+    // the fleet view (a hub's "need you", a fleet row) says what the person's Inbox says: an item
+    // the officer still holds is the officer's, one it passed on is the person's
+    let r = rig();
+    r.vehicle(7, Firmware::Copter, "delivery_drone", (LAT, LON));
+    r.d.agent_seen(&officer());
+    r.d.tick();
+    issue(&r, "drop_not_clear", "delivery:p-9");
+    r.d.tick();
+    let row = |r: &Rig| {
+        let f = r.d.fleet_json();
+        let v = f["vehicles"].as_array().expect("vehicles").iter().find(|v| v["uid"] == 7).cloned().expect("vehicle 7");
+        (v["state"].as_str().unwrap_or("").to_string(), v["why"].as_str().unwrap_or("").to_string())
+    };
+    let (state, why) = row(&r);
+    assert_eq!(state, "holding", "{why}");
+    assert!(why.contains("with the watch officer"), "{why}");
+    let v = VerdictIn { verdict: Verdict::Escalated, note: "the zone keeps filling".into(), recommendation: Some("Send it to another zone".into()), intents: vec![] };
+    r.d.triage_verdict(&officer(), "alert:delivery:p-9", v).expect("an escalation");
+    let (state, why) = row(&r);
+    assert_eq!(state, "attention", "passed on: the person's ({why})");
+}

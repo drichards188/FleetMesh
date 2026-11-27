@@ -304,11 +304,18 @@ impl Decision {
     pub fn fleet_json(&self) -> Value {
         let now = self.clock.now();
         let wall = clock::wall();
-        // the alerts that ask something of a person, by vehicle
+        // the alerts that ask something of a person, by vehicle; one the watch officer still holds
+        // is not the person's yet (rules 7): it is with the officer
         let mut alerts: BTreeMap<crate::vehicle::Uid, Vec<&'static str>> = BTreeMap::new();
+        let mut with_officer: BTreeMap<DUid, String> = BTreeMap::new();
         for a in self.current_alerts() {
-            if a.severity != Severity::Info {
+            if a.severity == Severity::Info {
+                continue;
+            }
+            if self.person_sees(&super::triage::alert_key(&a.id)) {
                 alerts.entry(a.uid).or_default().push(a.kind);
+            } else {
+                with_officer.entry(super::snapshot::duid(a.uid)).or_insert_with(|| format!("its {} alert is with the watch officer", words(a.kind)));
             }
         }
         let (work, holds) = self.fleet_work(now);
@@ -316,10 +323,10 @@ impl Decision {
         // for a link, and vehicles confirmed lost
         let (pending, running, queued, lost) = {
             let core = self.lock();
-            let mut pending: BTreeMap<DUid, Vec<String>> = BTreeMap::new();
+            let mut pending: Vec<(DUid, fleetmesh_decide::IntentId, String)> = Vec::new();
             for i in core.engine.inbox() {
                 for u in &i.spec().uids {
-                    pending.entry(u.clone()).or_default().push(format!("its {} order waits for your decision", words(i.spec().kind().as_str())));
+                    pending.push((u.clone(), i.id(), words(i.spec().kind().as_str())));
                 }
             }
             let mut running: BTreeMap<DUid, (u64, String, String)> = BTreeMap::new();
@@ -346,6 +353,17 @@ impl Decision {
             }
             (pending, running, queued, self.lost_uids(&core))
         };
+        // an order waiting for a decision is the person's once the officer has passed it on (or
+        // there is no officer); before that it is with the officer, who decides or passes it
+        // within its deadline (the triage lock after the decision lock's block, never inside it)
+        let pending: BTreeMap<DUid, Vec<String>> = pending.into_iter().fold(BTreeMap::new(), |mut m, (u, id, kind)| {
+            if self.person_sees(&super::triage::intent_key(id)) {
+                m.entry(u).or_default().push(format!("its {kind} order waits for your decision"));
+            } else {
+                with_officer.entry(u).or_insert_with(|| format!("its {kind} order is with the watch officer"));
+            }
+            m
+        });
         let (nav, sites): (BTreeMap<DUid, NavTrust>, Vec<super::delivery_rt::Site>) = {
             let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             (rt.nav.iter().map(|(u, n)| (u.clone(), n.state)).collect(), rt.scenario.as_ref().map(|s| s.sites.clone()).unwrap_or_default())
@@ -397,7 +415,7 @@ impl Decision {
                 attention,
                 // automation's words name the vehicle first ("51 waits on the ground..."): the row
                 // already does
-                holding: holds.get(&u).map(|h| h.strip_prefix(&format!("{u} ")).unwrap_or(h).to_string()),
+                holding: holds.get(&u).map(|h| h.strip_prefix(&format!("{u} ")).unwrap_or(h).to_string()).or_else(|| with_officer.get(&u).cloned()),
                 work: work.get(&u).cloned(),
                 other_order: running.get(&u).map(|(_, k, by)| (k.clone(), by.clone())),
                 queued: queued.contains(&u),
