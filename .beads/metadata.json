@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "fleetmesh",
+  "project_id": "702e52e7-ad18-47a4-a6dd-7065829d8d65"
+}

@@ -176,7 +176,6 @@ fresh checkout, `docs/` carries no reference to removed features.
   needs its own copy or a fetch before the repository stands alone.
 - The catalog decisions in `CATALOG.tsv` (many applied as `auto-judged`) need the maintainer's review.
 - The research citations in [attention-cost.md](design/attention-cost.md) need checking.
-- bd has no database in this repository yet (no `.beads/`); these items should be filed there first.
 - External interfaces a real delivery operator's command and control speaks, and FleetMesh does
   not yet: the fleet's own identity broadcasts (Remote ID, ADS-B Out and transponder codes, AIS),
   UTM strategic deconfliction (ASTM F3548 with the InterUSS DSS), NOTAM, TFR and METAR inputs,
