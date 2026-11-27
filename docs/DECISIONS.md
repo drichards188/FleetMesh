@@ -511,3 +511,24 @@ Building on rules 7 (the entry above), with no rules change:
   minutes, when drones are out for automation to keep clear of it.
 - **coastal-boat is unchanged**: its events follow its boats (bd fleetmesh-2m9).
 - A test keeps the first two starting on something within two minutes.
+
+## 2026-11-27: A hub is a mark of its own, with its details
+
+- **A hub is a house on a short stem over its point**, our fleet's navy and blue so it never reads
+  as other traffic, a shape nothing else on the map has (as an installation's frame sets a base
+  apart from units in military symbology). Its roof is the colour of its state: blue while all is
+  well, amber while the wind is in the soft band or vehicles hold, red while grounded or someone
+  is needed, grey while closed. The vehicles parked there collapse into it (their number on its
+  walls), a red count on its eave says how many of its own need the person, and beside it one
+  label: its name and a line, what needs the person first ("2 need you · Marginal: gusts 12.5 m/s
+  · 18 holding"). Every hub has its mark at every zoom (before, a hub was a blue disc that read as
+  a selection, under a second, same-named label for its parked vehicles). The stem keeps the
+  vehicles parked on the point from covering it.
+- **A click on a hub opens its details**: a few plain sentences first (whether it can fly, what
+  needs you, what its vehicles and parcels do), then who needs you and why (each a link), the
+  wind against the limits as a gauge, its vehicles by state, its parcels (a link to the list at
+  the hub), pads and packs. Showing its parked vehicles one by one moved there from the mark's
+  click. A site's mark, zoomed out, zooms in to its hubs.
+- **The bridge says each hub's wind** (`weather` of a base in `GET /api/fleet`): the gust and mean
+  wind there and the limits of the strictest platform based there (the weather rule's own
+  `weather_limits`, now public). Display only, so no rules version.

@@ -838,7 +838,9 @@ pub fn effective_payload(d: &DeliveryRules, platform: &PlatformFacts, ap: Autopi
 
 // ---- weather ----------------------------------------------------------------------------------
 
-fn weather_limits(d: &DeliveryRules, platform: &PlatformFacts, ap: AutopilotKind) -> WxLimits {
+/// A platform's weather limits: its autopilot kind's first-draft limits, under what the policy sets
+/// for the platform. The weather rule reads them; so does the bridge's view of each hub's wind.
+pub fn weather_limits(d: &DeliveryRules, platform: &PlatformFacts, ap: AutopilotKind) -> WxLimits {
     let base = WxLimits::defaults(ap);
     d.weather.platform.get(&platform.id).map_or(base.clone(), |o| o.over(&base))
 }

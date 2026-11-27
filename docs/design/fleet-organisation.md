@@ -108,15 +108,27 @@ the rest are left out. Selection (the left strip, shift-click ranges, right-clic
 details (a click on the row), the Select menu (now with each base) and "add to group" work as
 before, so a group order goes to a base's vehicles in two clicks.
 
-**Map.** The vehicles parked at their own base (ready or charging) collapse into one marker per
-base: a disc with their number and, beside it, "Marina Green hub: 22 ready, 2 charging". Zoomed out
-past zoom 15, the bases of a site share one marker ("Marina: 30 ready, 2 charging"). From zoom 17.5
-every vehicle is drawn on its own; a click on a marker opens its bases at any zoom (their vehicles
-drawn one by one, a hollow marker left to close them again). A vehicle away from its base (a visitor
-at another hub), under way, in any state but ready or charging, selected, followed or named by an
-order waiting for a person always stays on its own, with its route. A base collapses only when two
-or more would. The markers are in the fleet's own blue, ringed as our vehicles' symbols are, so they
-never read as other traffic.
+**Map.** Every hub has one mark of its own at every zoom: a house standing on a short stem over the
+hub's point (a shape nothing else on the map has, in the fleet's own navy and blue so it never
+reads as other traffic), its roof the colour of the hub's state (blue all well; amber the wind in
+the soft band or vehicles holding; red grounded or someone needed; grey closed), a red count on its
+eave of its own vehicles that need the person, and beside it its name with one line under it:
+what needs the person first, then whether it can fly, then what its vehicles do ("2 need you ·
+Marginal: gusts 12.5 m/s · 18 holding", `web/src/hubSummary.ts`). The vehicles parked at their own
+base (ready or charging) collapse into the mark, their number on its walls. Zoomed out past zoom
+15, the hubs of a site share one mark ("Marina: 2 out · 30 ready"), and a click on it zooms in to
+its hubs. From zoom 17.5 every vehicle is drawn on its own and the marks stay. A vehicle away from
+its base (a visitor at another hub), under way, in any state but ready or charging, selected,
+followed or named by an order waiting for a person always stays on its own, with its route. A base
+collapses only when two or more would.
+
+**A hub's details** open on a click on its mark: a few plain sentences first (whether it can fly
+and why, how many of its vehicles need the person, what its vehicles do, how many parcels wait
+and when the next is due), then who needs the person and why (each a link to the vehicle), the
+wind at the hub against the limits of the strictest platform based there (`weather` of a base in
+`GET /api/fleet`: held from the soft limit, refused from the hard), its vehicles by state, its
+parcels (a link to the Parcels list at the hub), its pads and charged packs, and the way to show
+its parked vehicles one by one.
 
 ## 6. Dispatch: home bases (rules 4)
 

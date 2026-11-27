@@ -1,4 +1,4 @@
-// The delivery layers on the map (the Layers menu): hubs with their battery packs, drop zones
+// The delivery layers on the map (the Layers menu): the ring of each hub's pads, drop zones
 // coloured by their latest look, parcels by place (one mark for a hub, a vehicle or a drop zone,
 // with how many are there), each running delivery's route, and the
 // areas where vehicles show GNSS interference or a link outage (suspected, from symptoms:
@@ -8,7 +8,7 @@ import { type DropZone, type Hub, type ParcelPlace, observationText, observation
 import { type RouteDraw } from './deliveryRoutes'
 import { ALL_FULL, type LabelPlan } from './declutter'
 import type { MapScreen } from './aloft'
-import { areaKey, areaText, hubOffset, hubText, PARCEL_COUNT_PX, PARCEL_MARK_PX, parcelCountOffset, parcelCountText, parcelKey, parcelOffset } from './deliveryLabels'
+import { areaKey, areaText, PARCEL_COUNT_PX, PARCEL_MARK_PX, parcelCountOffset, parcelCountText, parcelKey, parcelOffset } from './deliveryLabels'
 import { circle } from './geo'
 import type { SuspectArea } from './suspectAreas'
 
@@ -20,7 +20,6 @@ const FONT_SETTINGS = { sdf: true, fontSize: 48, buffer: 6 }
 
 export const LAYER_IDS = {
   hubs: 'delivery-hubs',
-  hubNames: 'delivery-hub-names',
   zones: 'delivery-zones',
   parcels: 'delivery-parcels',
   parcelCounts: 'delivery-parcel-counts',
@@ -147,6 +146,7 @@ export function buildDeliveryLayers(d: DeliveryData, on: DeliveryDraw, plan: Lab
       }),
     )
   }
+  // a hub's pads: a faint ring round its area (its mark, name and state are the fleet's: fleetMap.ts)
   if (on.hubs && d.hubs.length) {
     layers.push(
       new ScatterplotLayer<Hub>({
@@ -155,32 +155,11 @@ export function buildDeliveryLayers(d: DeliveryData, on: DeliveryDraw, plan: Lab
         getPosition: (h) => h.at,
         getRadius: (h) => h.radius_m,
         radiusUnits: 'meters',
-        radiusMinPixels: 9,
-        getFillColor: (h) => (h.open ? [74, 140, 214, 90] : [92, 102, 114, 90]),
-        getLineColor: (h) => (h.open ? [127, 184, 255, 255] : [150, 160, 172, 255]),
-        getLineWidth: 2.5,
-        lineWidthUnits: 'pixels',
+        filled: false,
         stroked: true,
-        pickable: true,
-        parameters: { depthCompare: 'always' as const, depthWriteEnabled: false },
-      }),
-      new TextLayer<Hub>({
-        id: LAYER_IDS.hubNames,
-        data: d.hubs.filter((h) => plan.level(`dh:${h.id}`) !== 'none'),
-        getPosition: (h) => h.at,
-        getText: (h) => hubText(h, plan.level(`dh:${h.id}`) === 'full'),
-        getSize: 13,
-        getColor: TEXT,
-        getTextAnchor: 'start',
-        getAlignmentBaseline: 'center',
-        getPixelOffset: (h) => hubOffset(h, screen),
-        updateTriggers: { getText: d.hubs.map((h) => `${h.packs}${plan.level(`dh:${h.id}`)}`).join(), getPixelOffset: screen ? d.hubs.map((h) => hubOffset(h, screen).join()).join() : '' },
-        fontFamily: FONT,
-        fontWeight: 600,
-        outlineWidth: 3,
-        outlineColor: OUTLINE,
-        fontSettings: FONT_SETTINGS,
-        characterSet: 'auto',
+        getLineColor: (h) => (h.open ? [127, 184, 255, 90] : [150, 160, 172, 90]),
+        getLineWidth: 1.5,
+        lineWidthUnits: 'pixels',
         parameters: { depthCompare: 'always' as const, depthWriteEnabled: false },
       }),
     )
@@ -230,10 +209,6 @@ export function buildDeliveryLayers(d: DeliveryData, on: DeliveryDraw, plan: Lab
 /** The hover text of a delivery layer's object, or null for another layer. */
 export function deliveryTooltip(layer: string, object: unknown, elapsedS: number, name: (uid: string) => string): { key: string; text: string } | null {
   switch (layer) {
-    case LAYER_IDS.hubs: {
-      const h = object as Hub
-      return { key: `hub:${h.id}`, text: `${h.name} (${h.id}): ${h.packs} charged pack${h.packs === 1 ? '' : 's'}, ${h.pads} pads${h.open ? '' : ', closed'}` }
-    }
     case LAYER_IDS.zones: {
       const z = object as DropZone
       return { key: `dz:${z.id}`, text: `${z.id} (${z.kind}, ${z.surface}${z.populated ? ', populated' : ''}${z.closed ? ', closed' : ''}): ${observationText(z.observation)}` }

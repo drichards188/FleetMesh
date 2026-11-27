@@ -9,6 +9,7 @@
 // marked `derived`. Display only: nothing here decides or orders anything. Pure (no browser):
 // fleetModel.check.ts runs it under node.
 import type { Hub } from './delivery'
+import type { HubWind } from './hubSummary'
 import type { OrderRef } from './orderWords'
 import type { LngLat, Vehicle } from './types'
 import { isStale } from './types.ts'
@@ -90,6 +91,12 @@ export interface FleetBase {
   radius_m: number
   site: string | null
   packs?: number
+  pads?: number
+  /** false: closed, nothing leaves it */
+  open?: boolean
+  /** the wind there against the strictest limits of the platforms based there (null: no
+   *  scenario weather in this run) */
+  weather?: HubWind | null
   /** its own vehicles (based here) */
   vehicles: number
   counts: Counts

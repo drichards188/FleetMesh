@@ -61,8 +61,9 @@ interface Props {
   preview?: FC
   /** inbox: fit the view to these points (n changes on every request); `aloft`, points at their
    *  height (metres above mean sea level) the view must hold too: the camera then backs off
-   *  until they are in it */
-  fit?: { points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][] } | null
+   *  until they are in it; `zoom`, in to at least this zoom at the points' middle instead (a site's
+   *  mark: in to its hubs, past the fit's usual limit) */
+  fit?: { points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][]; zoom?: number } | null
   /** the view while it moves (4 times a second) and when it stops: centre, bounds (w, s, e,
    *  n) and zoom; what the bridge's level of detail follows (murmur-and) */
   onView?: (center: LngLat, bounds: Bounds, zoom: number) => void
@@ -1296,6 +1297,10 @@ export function MapView({ vehicles, exceptions, taskings, selected, draft, focus
     if (!fit || !m || fit.points.length === 0 || lostRef.current) return
     const bounds = new maplibregl.LngLatBounds(fit.points[0], fit.points[0])
     for (const p of fit.points) bounds.extend(p)
+    if (fit.zoom != null) {
+      m.flyTo({ center: bounds.getCenter(), zoom: Math.max(m.getZoom(), fit.zoom), duration: 800, bearing: m.getBearing() })
+      return
+    }
     // clear of the drawer docked over the right edge, but leaving some of a narrow map to fit in
     // a panel opening on the left (a track's details) keeps its room too, while the map is wide
     // enough for both

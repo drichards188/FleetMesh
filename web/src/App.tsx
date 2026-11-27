@@ -74,6 +74,8 @@ import { domainOf } from './types'
 import { useTraffic, useTrafficSensors, useTrafficTruth } from './useTraffic'
 // the fleet by home base (docs/design/fleet-organisation.md): the Fleet list's and the map's
 import { useFleet } from './useFleet'
+import { HubDetails } from './HubDetails'
+import { hubDetails } from './hubSummary'
 import { fallbackFleet, type FleetDoc } from './fleetModel'
 import { baseLabelCandidates, type BaseMarker, collapseAtBases, EXPAND_ZOOM, SITE_ZOOM, toggleExpanded } from './fleetMap'
 import { BASE_PICK_LAYERS, buildBaseLayers } from './fleetMapLayers'
@@ -202,7 +204,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   const [officerDraft, setOfficerDraft] = useState('')
   const [inboxTab, setInboxTab] = useState<InboxTab>('inbox')
   const [inboxSel, setInboxSel] = useState<InboxSelection>(null)
-  const [fit, setFit] = useState<{ points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][] } | null>(null)
+  const [fit, setFit] = useState<{ points: LngLat[]; n: number; padRight: number; padLeft?: number; aloft?: [number, number, number][]; zoom?: number } | null>(null)
   // the drawer shown lies beside the map rather than over its right edge (the layout's choice, set
   // where the map is laid out: `map` below; never in Cockpit): nothing covers the map then
   const dockBeside = useRef(false)
@@ -243,7 +245,9 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // under the pointer (its predicted path drawn)
   const [trackSel, setTrackSel] = useState<string | null>(null)
   const [trackHover, setTrackHover] = useState<string | null>(null)
-  const escapeTaken = detailsUid != null || showPlatforms || trackSel != null
+  // a hub's details (a click on its mark on the map): its id
+  const [hubSel, setHubSel] = useState<string | null>(null)
+  const escapeTaken = detailsUid != null || showPlatforms || trackSel != null || hubSel != null
   useEffect(() => {
     if (!anySelected || escapeTaken) return
     const onKey = (e: KeyboardEvent) => {
@@ -315,6 +319,8 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   const queuedIntents = decisions?.inbox.queued
   const orderTick = Math.floor(now() / 1000)
   const fitPoints = useCallback((points: LngLat[]) => frame(points, fitPad(dock)), [dock, frame])
+  /** in to at least `zoom` at these points' middle (a site's mark: its hubs apart) */
+  const zoomTo = useCallback((points: LngLat[], zoom: number) => setFit((f) => ({ points, n: (f?.n ?? 0) + 1, padRight: FIT_PAD, zoom })), [])
   const { mem: alertMem, hidden: hiddenAlerts } = useHiddenAlerts(decisions)
   const pending = decisions?.inbox.pending
   const pendingIds = useMemo(() => new Set((pending ?? []).map((i) => i.id)), [pending])
@@ -357,6 +363,12 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     return collapseAtBases(fleetDoc, placed, { keep: pinSet, expanded: openBases, zoom: zoomBand })
   }, [fleetDoc, allVehicles, pinSet, openBases, zoomBand])
   const mapVehicles = useMemo(() => (baseMap.collapsed.size ? allVehicles.filter((v) => !baseMap.collapsed.has(v.uid)) : allVehicles), [allVehicles, baseMap])
+  // the hub whose details are open, and what they say (hubSummary.ts)
+  const hubSelBase = hubSel ? (fleetDoc.bases.find((b) => b.id === hubSel) ?? null) : null
+  const hubSelDetails = useMemo(
+    () => (hubSelBase ? hubDetails(hubSelBase, delivery.parcels.parcels, delivery.parcels.elapsed_s) : null),
+    [hubSelBase, delivery.parcels],
+  )
   const selIntent = inboxSel?.kind === 'intent' ? inboxSel.id : null
   const preview = useMemo(
     () => (pending && pending.length ? previewFeatures(pending, vehicles, selIntent) : EMPTY_PREVIEW),
@@ -481,14 +493,19 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     () => ({
       layers: [...BASE_PICK_LAYERS, ...(parcelsOn ? PARCEL_PICK_LAYERS : []), ...(trafficOn ? TRAFFIC_PICK_LAYERS : [])],
       onPick: (layer: string, o: unknown) => {
-        if (BASE_PICK_LAYERS.includes(layer)) setOpenBases((s) => toggleExpanded(s, o as BaseMarker))
+        if (BASE_PICK_LAYERS.includes(layer)) {
+          // a hub's mark: its details; a site's (zoomed out): in, to its hubs
+          const m = o as BaseMarker
+          if (m.id.startsWith('site:')) zoomTo(fleetDoc.bases.filter((b) => m.bases.includes(b.id)).map((b) => b.at), SITE_ZOOM + 0.6)
+          else setHubSel(m.bases[0])
+        }
         else if (PARCEL_PICK_LAYERS.includes(layer)) {
           setParcelsAt((o as ParcelPlace).key)
           setDock('parcels')
         } else trafficPick.onPick(layer, o)
       },
     }),
-    [parcelsOn, trafficOn, trafficPick],
+    [parcelsOn, trafficOn, trafficPick, zoomTo, fleetDoc],
   )
   const onMapHover = useCallback((layer: string | null, object: unknown) => {
     const id = layer && TRAFFIC_PICK_LAYERS.includes(layer) && object ? (object as ShownTrack).track.id : null
@@ -532,7 +549,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       layer === EXCLUDED_PICK_LAYER
         ? { key: `x:${(object as ExcludedMark).uid}`, text: (object as ExcludedMark).text }
         : BASE_PICK_LAYERS.includes(layer)
-          ? { key: `fb:${(object as BaseMarker).id}`, text: `${(object as BaseMarker).text} (click to ${(object as BaseMarker).open ? 'gather them again' : 'show them one by one'})` }
+          ? { key: `fbt:${(object as BaseMarker).id}`, text: `${(object as BaseMarker).text} · click ${(object as BaseMarker).id.startsWith('site:') ? 'to zoom in to its hubs' : 'for its details'}` }
           : (trafficTooltip(layer, object, (t) => trackTooltip(t, pictureT, nameOf)) ?? deliveryTooltip(layer, object, delivery.parcels.elapsed_s, nameOf) ?? estimateTooltip(layer, object)),
     [delivery.parcels.elapsed_s, nameOf, pictureT],
   )
@@ -550,7 +567,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     { key: 'links', label: 'Links', title: 'Predicted link coverage on the map: up, degraded and down for a link class at an altitude', on: showCoverage, onToggle: () => setShowCoverage((v) => !v) },
     ...(
       [
-        ['hubs', 'Hubs', 'Hubs with the battery packs each has now'],
+        ['hubs', 'Hub areas', "The ring each hub's pads are in (each hub's mark, its state and its details are always shown)"],
         ['zones', 'Drop zones', 'Drop zones, coloured by their latest look: green clear, red occupied or closed, grey not looked at'],
         ['parcels', 'Parcels', 'Parcels where they are, one mark for each place with how many: at a hub, on a vehicle, delivered at a drop zone; a red edge: one there is late. Hover for what they are, click for the list'],
         ['routes', 'Delivery routes', "Each running delivery's route, from the vehicle through its waypoints"],
@@ -950,6 +967,28 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
                   exceptions={exceptions}
                   nodeLoss={nodeLoss}
                   nodeRow={nodeRows.get(detailsUid)}
+                />
+              </ErrorBoundary>
+            </FloatingPanel>
+          )}
+          {hubSelBase && hubSelDetails && (
+            <FloatingPanel id="hub-details" prefer="top-left" reserve={520}>
+              <ErrorBoundary name="Hub details" className="floating">
+                <HubDetails
+                  d={hubSelDetails}
+                  weather={hubSelBase.weather ?? null}
+                  closed={hubSelBase.open === false}
+                  needing={fleetDoc.vehicles.filter((v) => v.base === hubSelBase.id && (v.state === 'attention' || v.state === 'offline'))}
+                  nameOf={nameOf}
+                  open={openBases.has(hubSelBase.id)}
+                  canOpen={openBases.has(hubSelBase.id) || baseMap.markers.some((m) => m.bases.includes(hubSelBase.id) && m.n > 0)}
+                  onToggleOpen={() => setOpenBases((o) => toggleExpanded(o, { bases: [hubSelBase.id] }))}
+                  onVehicle={showVehicle}
+                  onParcels={() => {
+                    setParcelsAt(`hub:${hubSelBase.id}`)
+                    setDock('parcels')
+                  }}
+                  onClose={() => setHubSel(null)}
                 />
               </ErrorBoundary>
             </FloatingPanel>

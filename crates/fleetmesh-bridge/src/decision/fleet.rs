@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use fleetmesh_decide::delivery::{NavTrust, Places};
+use fleetmesh_decide::delivery::{NavTrust, Places, WxLimits};
 use fleetmesh_decide::Clock as _;
 use fleetmesh_decide::{LonLat, Source, State, Uid as DUid};
 use serde_json::{Value, json};
@@ -277,6 +277,17 @@ struct Listed {
     state: FleetState,
     why: String,
     parcel: Option<String>,
+    /// its platform's id in the catalog, from its identity
+    platform: Option<String>,
+}
+
+/// Of the limits of a base's platforms, the strictest on gusts: the platform the wind holds first
+/// (a hub of drones and planes is held by the drones' 11 m/s before the planes' 13).
+fn strictest_gust(cands: impl IntoIterator<Item = (String, WxLimits)>) -> Option<(String, WxLimits)> {
+    cands
+        .into_iter()
+        .filter(|(_, l)| l.gust_soft_mps.is_some())
+        .min_by(|(_, a), (_, b)| a.gust_soft_mps.partial_cmp(&b.gust_soft_mps).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 impl Decision {
@@ -345,7 +356,8 @@ impl Decision {
         for cell in self.world.vehicles() {
             let b = cell.uid;
             let u = super::snapshot::duid(b);
-            let (pos, ap_home, batt, damage) = cell.read(|v| (v.pos, v.home, v.battery_pct, v.damage));
+            let (pos, ap_home, batt, damage, platform) =
+                cell.read(|v| (v.pos, v.home, v.battery_pct, v.damage, v.identity.as_ref().and_then(|i| i.str("platform")).map(str::to_string)));
             let position = pos.map(|p| LonLat::new(p.1, p.0));
             let at_hub = position.and_then(|p| self.places.nearest_hub(p)).filter(|(h, d)| *d <= hub_catchment(h.radius_m)).map(|(h, _)| h.id.clone());
             let link = cell.link_snapshot(clock::mono());
@@ -395,7 +407,7 @@ impl Decision {
             let (state, why) = derive(&facts);
             let base = self.home_hub(&u, ap_home.map(|h| LonLat::new(h.1, h.0)));
             let parcel = facts.work.as_ref().and_then(|w| w.parcel.clone());
-            list.push(Listed { uid: b, duid: u, base, at_hub, state, why, parcel });
+            list.push(Listed { uid: b, duid: u, base, at_hub, state, why, parcel, platform });
         }
         // since when each has been in its state
         let since: BTreeMap<DUid, i64> = {
@@ -422,6 +434,29 @@ impl Decision {
             Value::Object(m)
         };
         let site_of = |hub: &str| sites.iter().find(|s| s.hubs.iter().any(|h| h == hub)).map(|s| s.id.clone());
+        // The wind at each hub against the limits of the platforms based there (the strictest):
+        // whether the weather rule holds or refuses what leaves it. Display only; the rule itself
+        // reads each order's own samples.
+        let rules = self.rules.delivery_rules();
+        let wind_at = |h: &fleetmesh_decide::delivery::Hub| -> Option<Value> {
+            let w = self.weather_point_json(h.lat, h.lon)?;
+            let mut seen = std::collections::BTreeSet::new();
+            let lim = strictest_gust(list.iter().filter(|x| x.base.as_deref() == Some(h.id.as_str())).filter_map(|x| {
+                let p = x.platform.as_deref()?;
+                let facts = self.catalog.get(p)?;
+                let ap = facts.autopilot?;
+                seen.insert(p.to_string()).then(|| (p.to_string(), fleetmesh_decide::delivery_rules::weather_limits(&rules, facts, ap)))
+            }));
+            let e = w["wind_east_mps"].as_f64().unwrap_or(0.0);
+            let n = w["wind_north_mps"].as_f64().unwrap_or(0.0);
+            let l = lim.as_ref().map(|(_, l)| l);
+            Some(json!({
+                "gust_mps": w["gust_mps"], "wind_mps": (e.hypot(n) * 10.0).round() / 10.0,
+                "platform": lim.as_ref().map(|(p, _)| p),
+                "gust_soft_mps": l.and_then(|l| l.gust_soft_mps), "gust_hard_mps": l.and_then(|l| l.gust_hard_mps),
+                "wind_soft_mps": l.and_then(|l| l.wind_soft_mps), "wind_hard_mps": l.and_then(|l| l.wind_hard_mps),
+            }))
+        };
         let bases: Vec<Value> = self
             .places
             .hubs
@@ -436,6 +471,7 @@ impl Decision {
                     "here": list.iter().filter(|x| x.at_hub.as_deref() == Some(id)).count(),
                     "visitors": list.iter().filter(|x| x.at_hub.as_deref() == Some(id) && x.base.as_deref() != Some(id)).count(),
                     "parked": count(&|x| x.at_hub.as_deref() == Some(id)),
+                    "weather": wind_at(h),
                 })
             })
             .collect();
@@ -477,6 +513,18 @@ mod tests {
 
     fn ready() -> Facts {
         Facts { position: at(-122.437, 37.8057), at_hub: Some("hub-marina".into()), battery_pct: Some(90.0), ..Facts::default() }
+    }
+
+    #[test]
+    fn a_hubs_wind_is_judged_by_the_platform_it_holds_first() {
+        use fleetmesh_decide::AutopilotKind;
+        let drone = ("delivery_drone".to_string(), WxLimits::defaults(AutopilotKind::Copter));
+        let plane = ("delivery_plane".to_string(), WxLimits::defaults(AutopilotKind::Plane));
+        let car = ("delivery_car".to_string(), WxLimits::defaults(AutopilotKind::Ugv));
+        let (p, l) = strictest_gust([plane.clone(), drone, car.clone()]).expect("the drone's limits");
+        assert_eq!((p.as_str(), l.gust_soft_mps, l.gust_hard_mps), ("delivery_drone", Some(11.0), Some(14.0)));
+        assert_eq!(strictest_gust([plane]).map(|x| x.0).as_deref(), Some("delivery_plane"));
+        assert!(strictest_gust([car]).is_none(), "a car has no gust limit: no line for its hub");
     }
 
     #[test]

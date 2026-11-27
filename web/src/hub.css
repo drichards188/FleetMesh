@@ -1,0 +1,52 @@
+/* A hub's details (HubDetails.tsx): the vehicle details' frame (.vdetails), its house in the
+   state's colour as on the map, the summary first. */
+.hdetails { width: 340px; }
+.hd-house .walls { fill: rgba(18, 34, 54, 0.94); stroke: var(--air); stroke-width: 2; stroke-linejoin: round; }
+.hd-house .roof { stroke: var(--bg); stroke-width: 0.8; stroke-linejoin: round; fill: var(--air); }
+.hd-house.warn .roof { fill: var(--warn); }
+.hd-house.bad .roof { fill: var(--bad); }
+.hd-house.closed .roof { fill: #8a96a3; }
+.hd-house { flex: none; margin-top: 1px; }
+.hd-name { font: 600 var(--text-title)/var(--leading-title) var(--font-ui); }
+/* its state in words, beside the name: the colour says it too, the words say it first */
+.hd-state { display: inline-block; margin-top: 3px; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
+.hd-state.warn { color: var(--warn); }
+.hd-state.bad { color: var(--bad); }
+.hd-state.ok { color: var(--ok); }
+
+/* the summary: plain sentences, the first (whether it can fly) and a call for the person coloured */
+.hd-summary { margin: 10px 0 2px; }
+.hdetails .hd-summary p { margin: 0 0 4px; line-height: var(--leading-body); }
+.hd-summary p.warn { color: var(--warn); }
+.hd-summary p.bad { color: var(--bad); }
+.hd-summary p.closed { color: var(--muted); }
+
+.hdetails .num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.hdetails dl { grid-template-columns: 108px 1fr; margin-top: 8px; }
+.hd-act { margin-top: 8px; }
+
+/* who needs the person: each with why, its name the way to it */
+.hd-need { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.hd-need li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.hd-need .link { flex: none; background: none; border: 0; padding: 0; color: var(--air); text-decoration: underline dotted; cursor: pointer; font: 600 var(--text-body)/var(--leading-body) var(--font-data); }
+.hd-need .link:hover { color: var(--text); }
+.hd-need .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* its vehicles by state: one bar in the Fleet list's colours, the counts under it */
+.hd-bar { display: flex; height: 8px; gap: 2px; border-radius: 2px; overflow: hidden; }
+.hd-bar > span { background: currentColor; min-width: 3px; }
+.hd-legend { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: var(--text-label); }
+.hd-legend li span { color: var(--muted); }
+
+/* the wind against the limits: calm to past the hard limit, the held and refused bands, the gust
+   (the tall mark) and the mean wind (the short one) */
+.hd-gauge { margin: 2px 0 6px; }
+.hd-gauge-track { position: relative; height: 10px; border-radius: 2px; background: var(--panel-2); border: 1px solid var(--line); }
+.hd-gauge-track .band { position: absolute; top: 0; bottom: 0; }
+.hd-gauge-track .band.warn { background: color-mix(in oklch, var(--warn) 30%, transparent); }
+.hd-gauge-track .band.bad { background: color-mix(in oklch, var(--bad) 32%, transparent); }
+.hd-gauge-track .mark { position: absolute; width: 3px; margin-left: -1.5px; border-radius: 1px; }
+.hd-gauge-track .mark.gust { top: -4px; bottom: -4px; background: var(--text); box-shadow: 0 0 0 1px var(--bg); }
+.hd-gauge-track .mark.wind { top: 2px; bottom: 2px; background: var(--muted); }
+.hd-gauge-ticks { position: relative; height: 16px; font: var(--text-label)/var(--leading-label) var(--font-data); color: var(--muted); }
+.hd-gauge-ticks span { position: absolute; top: 2px; transform: translateX(-50%); white-space: nowrap; }
