@@ -988,6 +988,21 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
                     setParcelsAt(`hub:${hubSelBase.id}`)
                     setDock('parcels')
                   }}
+                  actFor={(uid) => {
+                    const i = (pending ?? []).find((x) => x.uids.map(Number).includes(uid))
+                    if (i) return { label: 'Decide', run: () => openIntent(i.id) }
+                    const a = decisions?.inbox.alerts.find((x) => x.uid === uid)
+                    if (a)
+                      return {
+                        label: 'See the alert',
+                        run: () => {
+                          setDock('inbox')
+                          setInboxTab('inbox')
+                          focusInbox({ kind: 'alert', id: a.id }, [uid], null)
+                        },
+                      }
+                    return null
+                  }}
                   onClose={() => setHubSel(null)}
                 />
               </ErrorBoundary>

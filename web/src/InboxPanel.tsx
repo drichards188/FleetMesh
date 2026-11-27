@@ -11,7 +11,7 @@ import { agoWhen, plainText } from './plainText'
 import { RationaleText } from './Rationale'
 import { reviewEntries } from './reviewEntries'
 import { ApprovalCard } from './ApprovalCard'
-import { OfficerLog, OfficerNote } from './OfficerNote'
+import { OfficerDesk, OfficerLog, OfficerNote } from './OfficerNote'
 import { askFleet, nameOf } from './approvalFleet'
 import { Proposer } from './Proposer'
 import { askSentence } from './approvalText'
@@ -401,6 +401,8 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
     })
   }
   const { needs, info } = inboxOrder(items)
+  // the officer's record names vehicles by uid, as text or a number
+  const callsignOf = (uid: number | string) => nameOf(vehicles, String(uid))
   // rules 7: an AI watch officer is on this run (on watch now, or it settled something): its log
   const officerCounts = decisions?.inbox.counts.triage
   const officerRun = !!officerCounts && (officerCounts.on_watch || officerCounts.handled > 0 || officerCounts.with_officer > 0)
@@ -449,6 +451,7 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
             {/* one list, by consequence, then time left: what asks a person first (keyed, so a card
                 that moves keeps what it has open or typed) */}
             {routes.length > 0 && <p className="ix-route-note">{routes.join('; ')}</p>}
+            {officerRun && <OfficerDesk now={now} nameOf={callsignOf} full={needs.length === 0} onLog={() => setTab('officer')} />}
             <h3 className="ix-h">
               Needs you <span>{needs.length}</span>
             </h3>

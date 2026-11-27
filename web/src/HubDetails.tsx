@@ -22,6 +22,9 @@ interface Props {
   onVehicle: (uid: number) => void
   /** the Parcels list at this hub */
   onParcels: () => void
+  /** what the person can do now for a vehicle that needs them: its card in the Inbox (an order
+   *  to decide, an alert), or nothing yet (its details are a click on its name) */
+  actFor: (uid: number) => { label: string; run: () => void } | null
   onClose: () => void
 }
 
@@ -64,7 +67,7 @@ function WindGauge({ w }: { w: HubWind }) {
 /** A hub, one click from its mark on the map: a few plain sentences first (whether it can fly, what
  *  needs you, what its vehicles and parcels are doing), then the figures behind them. Read-only:
  *  its links show vehicles, the parcels list or its vehicles on the map, and send nothing. */
-export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen, onToggleOpen, onVehicle, onParcels, onClose }: Props) {
+export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen, onToggleOpen, onVehicle, onParcels, actFor, onClose }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -102,14 +105,24 @@ export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen,
           <section>
             <h4>Needs you</h4>
             <ul className="hd-need">
-              {needing.slice(0, NEED_SHOWN).map((v) => (
-                <li key={v.uid}>
-                  <button className="link" onClick={() => onVehicle(v.uid)}>
-                    {nameOf(String(v.uid))}
-                  </button>
-                  <span className="muted">{v.why || (v.state === 'offline' ? 'no telemetry' : 'needs attention')}</span>
-                </li>
-              ))}
+              {needing.slice(0, NEED_SHOWN).map((v) => {
+                const act = actFor(v.uid)
+                return (
+                  <li key={v.uid}>
+                    <button className="link" onClick={() => onVehicle(v.uid)} title="Its details">
+                      {nameOf(String(v.uid))}
+                    </button>
+                    <span className="muted" title={v.why}>
+                      {v.why || (v.state === 'offline' ? 'no telemetry' : 'needs attention')}
+                    </span>
+                    {act && (
+                      <button className="ghost mini hd-do" onClick={act.run}>
+                        {act.label}
+                      </button>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
             {needing.length > NEED_SHOWN && <p className="muted">and {needing.length - NEED_SHOWN} more in the Fleet list</p>}
           </section>

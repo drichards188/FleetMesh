@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { TriageNote } from './decisions'
 import { fmtWorldZ } from './scenarioClock'
+import { type Desk, officerDesk, STALL_RUN, type TriageRecord } from './officerDesk'
+import { useTriage } from './useTriage'
+import { spanText } from './delivery'
 import './officer.css'
 
 /** The AI watch officer on an Inbox card (rules 7, docs/design/watch-officer.md): its
@@ -40,29 +43,6 @@ export function OfficerNote({ triage }: { triage?: TriageNote | null }) {
   return null
 }
 
-/** One item the officer triaged (`GET /api/triage`). */
-interface TriageRecord {
-  item: string
-  class: 'held' | 'alert'
-  kind: string
-  about?: { intent?: number; uids?: number[]; alert?: string; uid?: number; callsign?: string | null; detail?: string; rationale?: { text?: string } | null } | null
-  entered_t: number
-  stage: 'with_officer' | 'bypassed' | 'handled' | 'escalated' | 'turned_down' | 'untriaged'
-  note?: string
-  recommendation?: string | null
-  why?: string
-  intents?: number[]
-  at_t?: number
-  ended?: string
-}
-
-interface TriageState {
-  officer: string | null
-  counts: { on_watch: boolean; with_officer: number; handled: number }
-  open: TriageRecord[]
-  history: TriageRecord[]
-}
-
 const STAGE_LABEL: Record<TriageRecord['stage'], string> = {
   with_officer: 'With the officer',
   bypassed: 'Straight to you',
@@ -90,32 +70,8 @@ function what(r: TriageRecord): string {
  *  audit of what it settled without them (the maintainer's choice: nothing it handled is sampled
  *  into the Inbox). The audit log's `triage.*` events are the record. */
 export function OfficerLog() {
-  const [state, setState] = useState<TriageState | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const { state, error } = useTriage()
   const [filter, setFilter] = useState<Filter>('settled')
-  useEffect(() => {
-    let stop = false
-    let timer: number | undefined
-    const load = async () => {
-      try {
-        const res = await fetch('/api/triage', { cache: 'no-store' })
-        if (!res.ok) throw new Error(`the bridge answered ${res.status}`)
-        const v = (await res.json()) as TriageState
-        if (!stop) {
-          setState(v)
-          setError(null)
-        }
-      } catch (e) {
-        if (!stop) setError((e as Error).message)
-      }
-      if (!stop) timer = window.setTimeout(load, 3000)
-    }
-    void load()
-    return () => {
-      stop = true
-      window.clearTimeout(timer)
-    }
-  }, [])
   if (!state) return <p className="empty">{error ?? 'Reading the officer log'}</p>
   const all = [...state.open, ...state.history]
   const f = FILTERS.find((x) => x.id === filter) ?? FILTERS[0]
@@ -151,3 +107,60 @@ export function OfficerLog() {
     </div>
   )
 }
+
+/** The AI watch officer at work, at the head of the person's Needs you (officerDesk.ts): on watch,
+ *  what it is deciding now and the time it has left (it reaches the person then anyway), what it
+ *  just did and why, and its counts for ten minutes; plainly, when its decisions are not landing.
+ *  `full` while nothing needs the person (the desk is then what the Inbox has to say); otherwise
+ *  its lines alone, under the cards' room. Read-only: the Officer log has every item. */
+export function OfficerDesk({ now, nameOf, full, onLog }: { now: () => number; nameOf: (uid: number | string) => string; full: boolean; onLog: () => void }) {
+  const { state } = useTriage()
+  if (!state?.officer) return null
+  const d: Desk = officerDesk(state, now(), nameOf)
+  return (
+    <section className={`of-desk${d.stalled ? ' stalled' : ''}${d.onWatch ? '' : ' off'}`} aria-label="The AI watch officer" aria-live="polite">
+      <header>
+        <span className={`of-live${d.onWatch ? ' on' : ''}`} aria-hidden="true" />
+        <span className="of-k">AI watch officer</span>
+        <span className="of-state">{d.onWatch ? 'on watch' : 'off watch'}</span>
+        <button className="link of-open" onClick={onLog}>
+          Officer log
+        </button>
+      </header>
+      <p className="of-headline">{d.headline}</p>
+      {d.stalled && (
+        <p className="of-stall" role="alert">
+          Its last {STALL_RUN} items reached you at their deadlines with no decision: its verdicts are not landing. Every item still reaches
+          you; if this goes on, its own log says why (logs/officer.log).
+        </p>
+      )}
+      {d.working.length > 0 && (
+        <ul className="of-working" aria-label="Deciding now">
+          {d.working.slice(0, full ? 4 : 2).map((w) => (
+            <li key={w.item}>
+              <span className="of-what">{w.what}</span>
+              <span className="of-left" title="It reaches you then anyway">
+                {spanText(w.leftS)}
+              </span>
+              <span className="of-clock" aria-hidden="true">
+                <span style={{ transform: `scaleX(${w.left})` }} />
+              </span>
+            </li>
+          ))}
+          {d.working.length > (full ? 4 : 2) && <li className="of-more">and {d.working.length - (full ? 4 : 2)} more</li>}
+        </ul>
+      )}
+      {full && d.recent.length > 0 && (
+        <ul className="of-recent" aria-label="Just done">
+          {d.recent.slice(0, 4).map((x) => (
+            <li key={`${x.item}@${x.atMs}`}>
+              <span className={`of-stage ${x.stage}`}>{x.verb}</span> <span className="of-what">{x.what}</span>
+              {x.why && <p>{x.why}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+

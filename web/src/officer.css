@@ -22,3 +22,30 @@
 .of-when { margin-left: auto; color: var(--muted); font: var(--text-label) var(--font-data); }
 .of-row p { margin: 4px 0 0; color: #c6cfd9; }
 .of-row .of-detail { color: var(--muted); }
+
+/* the officer at work, at the head of Needs you (OfficerDesk): quiet when all lands, its clock
+   draining on what it is deciding, amber when its decisions are not landing */
+.of-desk { margin: 4px 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; background: color-mix(in oklch, var(--violet) 5%, var(--panel)); }
+.of-desk.stalled { border-color: color-mix(in oklch, var(--warn) 55%, var(--line)); }
+.of-desk.off { background: var(--panel); }
+.of-desk header { display: flex; align-items: baseline; gap: 8px; }
+.of-desk .of-k { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--violet); }
+.of-desk .of-state { font-size: var(--text-label); color: var(--muted); }
+.of-desk .of-open { margin-left: auto; background: none; border: 0; padding: 0; color: var(--air); text-decoration: underline dotted; font-size: var(--text-label); }
+/* on watch: a dot that breathes slowly (it says the officer is there, nothing more) */
+.of-live { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); align-self: center; }
+.of-live.on { background: var(--ok); animation: of-breathe 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite alternate; }
+@keyframes of-breathe { from { opacity: 1; } to { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .of-live.on { animation: none; } }
+.of-headline { margin: 6px 0 0; color: var(--text); }
+.of-stall { margin: 6px 0 0; color: var(--warn); }
+.of-working, .of-recent { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.of-working li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: baseline; }
+.of-working .of-left { font: var(--text-label)/var(--leading-label) var(--font-data); color: var(--muted); font-variant-numeric: tabular-nums; }
+/* the time it has left: a bar that drains toward its deadline */
+.of-clock { grid-column: 1 / -1; height: 3px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
+.of-clock > span { display: block; height: 100%; background: var(--violet); transform-origin: left; transition: transform 900ms linear; }
+.of-more { color: var(--muted); font-size: var(--text-label); }
+.of-recent { border-top: 1px solid var(--line); padding-top: 8px; }
+.of-recent li p { margin: 1px 0 0; color: var(--muted); font-size: var(--text-label); }
+.of-recent .of-what { color: var(--text); }

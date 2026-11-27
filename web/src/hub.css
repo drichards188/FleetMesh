@@ -30,7 +30,9 @@
 .hd-need li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
 .hd-need .link { flex: none; background: none; border: 0; padding: 0; color: var(--air); text-decoration: underline dotted; cursor: pointer; font: 600 var(--text-body)/var(--leading-body) var(--font-data); }
 .hd-need .link:hover { color: var(--text); }
-.hd-need .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.hd-need .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+/* the way to act: its card in the Inbox */
+.hd-do { flex: none; color: var(--accent); border-color: #4a3a1f; }
 
 /* its vehicles by state: one bar in the Fleet list's colours, the counts under it */
 .hd-bar { display: flex; height: 8px; gap: 2px; border-radius: 2px; overflow: hidden; }
