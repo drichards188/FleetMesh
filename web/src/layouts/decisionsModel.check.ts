@@ -20,6 +20,7 @@ assert.equal(overMap('inbox', 'fleet'), 'ref', 'the dock resting on the Inbox: t
 assert.equal(overMap(null, 'log'), 'ref', 'the dock closed: the list shown')
 assert.equal(overMap('queue', null), 'dock', "a drawer of the dock's")
 assert.equal(overMap('officer', 'fleet'), 'dock', "a drawer of the dock's wins over a list, which the layout then closes")
+assert.equal(overMap('parcels', 'parcels'), 'ref', 'Parcels asked of the dock (a parcel mark clicked): this layout lists it itself')
 
 // the quiet state's glance
 assert.deepEqual(oursLine(22, 0), { n: 22, words: 'vehicles, none in trouble' })

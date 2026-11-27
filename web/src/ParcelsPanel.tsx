@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { dueText, failureText, filterCounts, filterParcels, isLate, PARCEL_FILTERS, parcelStateLabel, type ParcelFilter } from './delivery'
+import { useEffect, useMemo, useState } from 'react'
+import { dueText, failureText, filterCounts, filterParcels, isLate, PARCEL_FILTERS, parcelPlaceKey, parcelStateLabel, type ParcelFilter } from './delivery'
 import type { DeliveryFeed } from './useDelivery'
 import './delivery.css'
 
@@ -13,17 +13,45 @@ interface Props {
   onPlace: (at: [number, number]) => void
   onClose?: () => void
   banners?: React.ReactNode
+  /** only the parcels at one place (its key, delivery.ts parcelPlaceKey): the map's mark there was
+   *  clicked */
+  place?: string | null
+  /** back to every parcel */
+  onAllPlaces?: () => void
+  /** the list is shown (true) or gone (false): a place asked for lasts while it is shown (keep it
+   *  the same function across renders, a state setter) */
+  onShown?: (shown: boolean) => void
+}
+
+/** A place by its key, in words: "At Crissy Field hub", "On DRONE 11", "Delivered at dz-wind-17". */
+function placeWords(key: string, hubName: (id: string) => string, nameOf: (uid: string) => string): string {
+  const [kind, id] = key.split(/:(.*)/s)
+  if (kind === 'hub') return `At ${hubName(id)}`
+  if (kind === 'vehicle') return `On ${nameOf(id)}`
+  return `Delivered at ${id}`
 }
 
 /** The parcels of a delivery run: each one's state, origin hub, destination, weight, due time and
  *  vehicle, with filters for waiting, assigned, in transit, delivered and late. Read-only: a click
- *  shows a vehicle or a place and sends nothing. Opens from the top bar beside Fleet and Log. */
-export function ParcelsPanel({ feed, nameOf, onVehicle, onPlace, onClose, banners }: Props) {
+ *  shows a vehicle or a place and sends nothing. Opens from the top bar beside Fleet and Log, or
+ *  from a parcel mark on the map with only that place's parcels. */
+export function ParcelsPanel({ feed, nameOf, onVehicle, onPlace, onClose, banners, place = null, onAllPlaces, onShown }: Props) {
+  useEffect(() => {
+    onShown?.(true)
+    return () => onShown?.(false)
+  }, [onShown])
   const [filter, setFilter] = useState<ParcelFilter>('all')
+  // another place's mark was clicked: all its parcels first, whatever filter was on
+  const [placeShown, setPlaceShown] = useState(place)
+  if (place !== placeShown) {
+    setPlaceShown(place)
+    setFilter('all')
+  }
   const { parcels, places } = feed
   const elapsed = parcels.elapsed_s
-  const counts = useMemo(() => filterCounts(parcels.parcels, elapsed), [parcels.parcels, elapsed])
-  const shown = useMemo(() => filterParcels(parcels.parcels, filter, elapsed), [parcels.parcels, filter, elapsed])
+  const here = useMemo(() => (place ? parcels.parcels.filter((p) => parcelPlaceKey(p) === place) : parcels.parcels), [parcels.parcels, place])
+  const counts = useMemo(() => filterCounts(here, elapsed), [here, elapsed])
+  const shown = useMemo(() => filterParcels(here, filter, elapsed), [here, filter, elapsed])
   const hubs = useMemo(() => new Map(places.hubs.map((h) => [h.id, h])), [places.hubs])
   const zones = useMemo(() => new Map(places.drop_zones.map((z) => [z.id, z])), [places.drop_zones])
   return (
@@ -40,6 +68,18 @@ export function ParcelsPanel({ feed, nameOf, onVehicle, onPlace, onClose, banner
         )}
       </header>
       {banners}
+      {place && (
+        <div className="pc-place">
+          <span>
+            {placeWords(place, (id) => hubs.get(id)?.name ?? id, nameOf)}: <b>{here.length}</b> {here.length === 1 ? 'parcel' : 'parcels'}
+          </span>
+          {onAllPlaces && (
+            <button className="link" onClick={onAllPlaces}>
+              All parcels
+            </button>
+          )}
+        </div>
+      )}
       <div className="pc-filters" role="group" aria-label="Filter parcels">
         {PARCEL_FILTERS.map((f) => (
           <button key={f.key} className={`pc-filter${filter === f.key ? ' on' : ''}${f.key === 'late' && counts.late > 0 ? ' late' : ''}`} aria-pressed={filter === f.key} title={f.title} onClick={() => setFilter(f.key)}>
@@ -48,7 +88,7 @@ export function ParcelsPanel({ feed, nameOf, onVehicle, onPlace, onClose, banner
         ))}
       </div>
       <div className="pc-list">
-        {shown.length === 0 && <p className="empty">{parcels.parcels.length ? 'No parcels under this filter' : feed.active ? 'No parcels yet' : 'This run has no parcels: start a delivery scenario (make start SCENARIO=harbour-city)'}</p>}
+        {shown.length === 0 && <p className="empty">{place && !here.length ? 'No parcels here now' : parcels.parcels.length ? 'No parcels under this filter' : feed.active ? 'No parcels yet' : 'This run has no parcels: start a delivery scenario (make start SCENARIO=harbour-city)'}</p>}
         {shown.map((p) => {
           const late = isLate(p, elapsed)
           const hub = hubs.get(p.from)

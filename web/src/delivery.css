@@ -1,5 +1,9 @@
 /* the delivery interface: parcels panel, composer, held-order reasons, load readout, vehicle rows */
 .panel.parcels { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+/* as the dock's drawer (App.tsx parcelsPanel): it fills the drawer */
+.ix.pc-drawer > .panel.parcels { flex: 1 1 auto; background: none; }
+.pc-place { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 0 14px 8px; font-size: var(--text-body); color: var(--text); }
+.pc-place b { font-family: var(--font-data); font-weight: 600; }
 .pc-filters { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 14px 8px; }
 .pc-filter { background: none; border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font-size: var(--text-label); color: var(--muted); }
 .pc-filter b { font-family: var(--font-data); color: var(--text); font-weight: 600; margin-left: 2px; }

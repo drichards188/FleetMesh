@@ -58,9 +58,9 @@ import { OffButton } from './OffButton'
 import { OperatorLoad, ParcelsButton } from './OperatorLoad'
 import { ParcelsPanel } from './ParcelsPanel'
 import { useDelivery } from './useDelivery'
-import { isLate } from './delivery'
+import { isLate, parcelPlaces, type ParcelPlace } from './delivery'
 import { deliveryLabelCandidates } from './deliveryLabels'
-import { buildDeliveryLayers, deliveryTooltip, type DeliveryData, type DeliveryDraw } from './deliveryLayers'
+import { buildDeliveryLayers, deliveryTooltip, PARCEL_PICK_LAYERS, type DeliveryData, type DeliveryDraw } from './deliveryLayers'
 import { deliveryRoutes } from './deliveryRoutes'
 import { suspectAreas } from './suspectAreas'
 import { alertTracks, TRAFFIC_ALERT_KINDS } from './decisions'
@@ -179,6 +179,15 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // approval or a decision); rules 5's Queue of orders held for vehicles the link can't reach now; the situation
   // report (Sitrep.tsx: read-only, the wide one); Swarms (docs/DECISIONS.md, "Swarm units")
   const [dock, setDock] = useState<DockId | null>(null)
+  // the Parcels list at one place (a parcel mark on the map was clicked), or every parcel; the
+  // place lasts while the list is shown (any layout: a drawer, or the Decisions layout's own list)
+  const [parcelsAt, setParcelsAt] = useState<string | null>(null)
+  const [parcelsShown, setParcelsShown] = useState(false)
+  const [parcelsWasShown, setParcelsWasShown] = useState(false)
+  if (parcelsShown !== parcelsWasShown) {
+    setParcelsWasShown(parcelsShown)
+    if (!parcelsShown) setParcelsAt(null)
+  }
   const showInbox = dock === 'inbox'
   const showQueue = dock === 'queue'
   const showSitrep = dock === 'sitrep'
@@ -373,14 +382,15 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     const at = new Map(vs.map((v) => [String(v.uid), v.position]))
     const anyOn = drawn.hubs || drawn.zones || drawn.parcels || drawn.routes || drawn.areas
     if (!anyOn) return null
+    const { hubs, drop_zones: zones } = delivery.places
     return {
-      hubs: delivery.places.hubs,
-      zones: delivery.places.drop_zones,
-      parcels: delivery.parcels.parcels,
-      elapsedS: delivery.parcels.elapsed_s,
+      hubs,
+      zones,
+      places: drawn.parcels
+        ? parcelPlaces(delivery.parcels.parcels, new Map(hubs.map((h) => [h.id, h])), new Map(zones.map((z) => [z.id, z])), (uid) => at.get(uid) ?? null, delivery.parcels.elapsed_s)
+        : [],
       routes: drawn.routes ? deliveryRoutes(state?.taskings ?? [], vs) : [],
       areas: drawn.areas ? suspectAreas(vs, delivery.nav) : [],
-      vehicleAt: (uid) => at.get(uid) ?? null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [delivery, drawn, state?.taskings, orderTick])
@@ -465,15 +475,20 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // a click on a base marker opens its bases (their vehicles drawn one by one), on an open one's
   // closes them again; a click on a track as above
   const trafficOn = trafficInput != null
+  // a click on a parcel mark opens the Parcels list at that place
+  const parcelsOn = drawn.parcels
   const mapPick = useMemo(
     () => ({
-      layers: [...BASE_PICK_LAYERS, ...(trafficOn ? TRAFFIC_PICK_LAYERS : [])],
+      layers: [...BASE_PICK_LAYERS, ...(parcelsOn ? PARCEL_PICK_LAYERS : []), ...(trafficOn ? TRAFFIC_PICK_LAYERS : [])],
       onPick: (layer: string, o: unknown) => {
         if (BASE_PICK_LAYERS.includes(layer)) setOpenBases((s) => toggleExpanded(s, o as BaseMarker))
-        else trafficPick.onPick(layer, o)
+        else if (PARCEL_PICK_LAYERS.includes(layer)) {
+          setParcelsAt((o as ParcelPlace).key)
+          setDock('parcels')
+        } else trafficPick.onPick(layer, o)
       },
     }),
-    [trafficOn, trafficPick],
+    [parcelsOn, trafficOn, trafficPick],
   )
   const onMapHover = useCallback((layer: string | null, object: unknown) => {
     const id = layer && TRAFFIC_PICK_LAYERS.includes(layer) && object ? (object as ShownTrack).track.id : null
@@ -537,7 +552,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
       [
         ['hubs', 'Hubs', 'Hubs with the battery packs each has now'],
         ['zones', 'Drop zones', 'Drop zones, coloured by their latest look: green clear, red occupied or closed, grey not looked at'],
-        ['parcels', 'Parcels', 'Parcels where they are: at their hub, on their vehicle, or at their drop zone; a red ring is late'],
+        ['parcels', 'Parcels', 'Parcels where they are, one mark for each place with how many: at a hub, on a vehicle, delivered at a drop zone; a red edge: one there is late. Hover for what they are, click for the list'],
         ['routes', 'Delivery routes', "Each running delivery's route, from the vehicle through its waypoints"],
         ['areas', 'Interference and outages', 'Areas where vehicles report GNSS interference or a link outage: suspected from what they report, not where a source is'],
       ] as const
@@ -726,7 +741,14 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
         <OffButton label="Sitrep" off={`for a fleet of more than ${GROUP_SCALE}: below that the lists are the report`} />
       ),
     // the Parcels drawer (Cockpit and Rail; the Decisions layout lists Parcels beside Fleet and Log)
-    parcels: <ParcelsButton open={showParcels} onClick={() => setDock((d) => toggleDock(d, 'parcels'))} late={lateParcels} total={delivery.parcels.parcels.length} />,
+    parcels: (
+      <ParcelsButton
+        open={showParcels}
+        onClick={() => setDock((d) => toggleDock(d, 'parcels'))}
+        late={lateParcels}
+        total={delivery.parcels.parcels.length}
+      />
+    ),
     // the operator's load (OperatorLoad.tsx): waiting, the oldest wait, decisions in ten minutes
     load: <OperatorLoad decisions={decisions} now={now} />,
     views: <ViewsMenu entries={views} />,
@@ -744,18 +766,26 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // Inbox, which holds the cards themselves), so no drawer hides one
   const awaitRows = dock && headsWithWaiting(dock) ? awaitingRows(pending ?? [], now(), (i) => askSentence({ kind: i.kind, params: i.params as Record<string, unknown>, uids: i.uids, group: i.group }, askFleet(allVehicles))) : []
   const dockHead = awaitRows.length ? <Awaiting rows={awaitRows} onOpen={openIntent} /> : null
-  const parcelsPanel = (closable: boolean) => (
-    <ErrorBoundary key="parcels" name="Parcels" className="floating">
-      <ParcelsPanel
-        feed={delivery}
-        nameOf={nameOf}
-        onVehicle={showVehicle}
-        onPlace={(at) => frame([at], fitPad(dock))}
-        onClose={closable ? () => setDock((d) => closeDock(d, 'parcels')) : undefined}
-        banners={closable ? dockHead : null}
-      />
-    </ErrorBoundary>
-  )
+  // as the dock's drawer (Cockpit, Rail) it lies over the map's right edge as the others do (`.ix`);
+  // the Decisions layout lists it in a frame of its own
+  const parcelsPanel = (closable: boolean) => {
+    const panel = (
+      <ErrorBoundary key="parcels" name="Parcels" className="floating">
+        <ParcelsPanel
+          feed={delivery}
+          nameOf={nameOf}
+          onVehicle={showVehicle}
+          onPlace={(at) => frame([at], fitPad(dock))}
+          onClose={closable ? () => setDock((d) => closeDock(d, 'parcels')) : undefined}
+          banners={closable ? dockHead : null}
+          place={parcelsAt}
+          onAllPlaces={() => setParcelsAt(null)}
+          onShown={setParcelsShown}
+        />
+      </ErrorBoundary>
+    )
+    return closable ? <section className="ix pc-drawer">{panel}</section> : panel
+  }
   // what the message box can put in at its cursor: the selection (one group by name and size, or a
   // few vehicles by callsign)
   const sel = showTasking ? selectionInsert(null, [...selected], (u) => nameOf(String(u))) : null

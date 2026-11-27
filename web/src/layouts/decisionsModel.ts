@@ -23,10 +23,11 @@ export function toggleRef(shown: RefId | null, id: RefId): RefId | null {
 }
 
 /** What lies over the map's right edge, one at a time: a drawer of the dock's (any but the Inbox,
- *  which is this layout's column and never lies over the map), else the reference list shown,
- *  else nothing. */
+ *  which is this layout's column and never lies over the map, and Parcels, which it lists itself:
+ *  a parcel mark clicked on the map asks the dock for it), else the reference list shown, else
+ *  nothing. */
 export function overMap(dockOpen: string | null, ref: RefId | null): 'dock' | 'ref' | null {
-  if (dockOpen != null && dockOpen !== 'inbox') return 'dock'
+  if (dockOpen != null && dockOpen !== 'inbox' && dockOpen !== 'parcels') return 'dock'
   return ref ? 'ref' : null
 }
 

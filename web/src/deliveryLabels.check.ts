@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { deliveryLabelCandidates } from './deliveryLabels.ts'
 import { planLabels, type LabelCandidate } from './declutter.ts'
-import type { Hub } from './delivery.ts'
+import { parcelPlaces, type Hub, type Parcel } from './delivery.ts'
 
 const hub = { id: 'hub-a', name: 'Marina car hub', at: [-122.443, 37.799], radius_m: 40, pads: 3, packs: 4, open: true } as Hub
 const on = { hubs: true, zones: true, parcels: true, routes: true, areas: true }
@@ -19,4 +19,14 @@ const vehicle: LabelCandidate = { key: 'v:1', at: [200, 200], short: [14, -20, 7
 const plan = planLabels([vehicle, ...cands], { zoom: 12, width: 800, height: 600 })
 assert.notEqual(plan.level('dh:hub-a'), 'none')
 assert.notEqual(plan.level('v:1'), 'full', 'the vehicle label does not print over the hub name in full')
+// a place's parcel count is in the budget beside its mark, below and right of the hub's ring
+// (its name is above): one candidate per place, none for a vehicle carrying its one parcel
+const parcel = (id: string, state: string, vehicle: string | null = null): Parcel => ({ id, state, from: 'hub-a', to: 'dz-1', mass_kg: 1, priority: 2, class: 'normal', ready_s: 0, due_s: 900, vehicle, tries: 0 })
+const places = parcelPlaces([parcel('a', 'ready'), parcel('b', 'ready'), parcel('c', 'loaded', '4')], new Map([[hub.id, hub]]), new Map(), () => [-122.44, 37.8], 0)
+const withParcels = deliveryLabelCandidates({ hubs: [hub], areas: [], places }, on, screen as never)
+assert.deepEqual(withParcels.map((c) => c.key), ['dh:hub-a', 'dp:hub:hub-a'])
+const [name, count] = withParcels
+assert.ok(count.full[1] > name.full[3], 'the count sits below the hub name')
+assert.ok(count.full[0] > 0, 'right of the hub point')
+assert.equal(deliveryLabelCandidates({ hubs: [hub], areas: [], places }, { ...on, parcels: false }, screen as never).length, 1)
 console.log('deliveryLabels.check ok')

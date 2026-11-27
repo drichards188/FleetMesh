@@ -4,7 +4,7 @@
 // what waits, the oldest wait and the decisions of a person in ten minutes (a check's rejection, an
 // expiry and a voiding are not decisions); payload and navigation words.
 import assert from 'node:assert/strict'
-import { decisionsIn, dueText, failureText, filterCounts, filterParcels, inFilter, isLate, loadTone, loadWords, navOf, navWords, observationText, observationTone, operatorLoad, parcelAt, payloadWords, spanText, waitingSince, type DropZone, type Hub, type Parcel } from './delivery.ts'
+import { decisionsIn, dueText, failureText, filterCounts, filterParcels, inFilter, isLate, loadTone, loadWords, navOf, navWords, observationText, observationTone, operatorLoad, parcelPlaceKey, parcelPlaces, payloadWords, placeParcelsText, spanText, waitingSince, type DropZone, type Hub, type Parcel } from './delivery.ts'
 
 const p = (id: string, state: string, due_s: number, o: Partial<Parcel> = {}): Parcel => ({ id, state, from: 'hub-a', to: 'dz-1', mass_kg: 1, priority: 2, class: 'normal', ready_s: 0, due_s, vehicle: null, tries: 0, ...o })
 
@@ -48,12 +48,45 @@ assert.equal(dueText(p('a', 'delivered', 100), 280), 'delivered')
 const hubs = new Map<string, Hub>([['hub-a', { id: 'hub-a', name: 'A', at: [1, 2], radius_m: 50, pads: 2, packs: 3, open: true }]])
 const zones = new Map<string, DropZone>([['dz-1', { id: 'dz-1', kind: 'doorstep', at: [3, 4], radius_m: 4, surface: 'land', closed: false, populated: false, hub: null, observation: null }]])
 const veh = (u: string): [number, number] | null => (u === '7' ? [5, 6] : null)
-assert.deepEqual(parcelAt(p('a', 'waiting', 1), hubs, zones, veh), [1, 2])
-assert.deepEqual(parcelAt(p('a', 'assigned', 1), hubs, zones, veh), [1, 2])
-assert.deepEqual(parcelAt(p('a', 'loaded', 1, { vehicle: '7' }), hubs, zones, veh), [5, 6], 'on its vehicle while loaded')
-assert.deepEqual(parcelAt(p('a', 'loaded', 1, { vehicle: '9' }), hubs, zones, veh), [1, 2], 'a vehicle with no position: its hub')
-assert.deepEqual(parcelAt(p('a', 'delivered', 1), hubs, zones, veh), [3, 4])
-assert.equal(parcelAt(p('a', 'failed', 1), hubs, zones, veh), null)
+assert.equal(parcelPlaceKey(p('a', 'waiting', 1)), null, 'an order not placed yet is nowhere yet')
+assert.equal(parcelPlaceKey(p('a', 'ready', 1)), 'hub:hub-a')
+assert.equal(parcelPlaceKey(p('a', 'assigned', 1, { vehicle: '7' })), 'hub:hub-a', 'assigned: still at its hub')
+assert.equal(parcelPlaceKey(p('a', 'loaded', 1, { vehicle: '7' })), 'vehicle:7')
+assert.equal(parcelPlaceKey(p('a', 'delivered', 1)), 'zone:dz-1')
+assert.equal(parcelPlaceKey(p('a', 'failed', 1)), null)
+
+// one place for each hub, vehicle or drop zone however many parcels are there; orders not placed
+// yet are only counted at their hub
+const many = [
+  ...Array.from({ length: 400 }, (_, k) => p(`w${k}`, 'waiting', 5000)),
+  p('r1', 'ready', 900),
+  p('r2', 'ready', 50),
+  p('a1', 'assigned', 800, { vehicle: '7' }),
+  p('t1', 'loaded', 900, { vehicle: '7' }),
+  p('t2', 'loaded', 900, { vehicle: '9' }),
+  p('d1', 'delivered', 10),
+  p('d2', 'delivered', 10),
+  p('f1', 'failed', 10),
+]
+const places = parcelPlaces(many, hubs, zones, veh, 100)
+assert.deepEqual(places.map((x) => x.key), ['hub:hub-a', 'zone:dz-1', 'vehicle:7'], 'hubs, zones, vehicles; a vehicle with no position is left out')
+const [hubPl, zonePl, vehPl] = places
+assert.deepEqual(hubPl.at, [1, 2])
+assert.equal(hubPl.name, 'A')
+assert.equal(hubPl.radius_m, 50)
+assert.deepEqual(hubPl.parcels.map((x) => x.id), ['r2', 'a1', 'r1'], 'the late one first, then by due time')
+assert.equal(hubPl.late, 1)
+assert.equal(hubPl.later, 400, 'the orders not placed yet are counted, not drawn')
+assert.deepEqual(zonePl.parcels.map((x) => x.id), ['d1', 'd2'])
+assert.equal(zonePl.late, 0, 'delivered is never late')
+assert.deepEqual(vehPl.at, [5, 6])
+assert.equal(vehPl.parcels.length, 1)
+
+// a place's parcels in words
+assert.equal(placeParcelsText(hubPl, 100), '3 parcels: 2 waiting for a vehicle, 1 assigned (1 late); 400 more not ordered yet')
+assert.equal(placeParcelsText(zonePl, 100), '2 parcels delivered')
+assert.equal(placeParcelsText(vehPl, 100), 't1 in transit, 1 kg to dz-1, due in 13 min')
+assert.equal(placeParcelsText({ parcels: [p('d1', 'delivered', 10)], late: 0, later: 0 }, 100), 'd1 delivered, 1 kg')
 
 // observations
 assert.equal(observationText(null), 'not looked at')

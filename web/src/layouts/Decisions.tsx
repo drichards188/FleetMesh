@@ -42,8 +42,10 @@ export function Decisions({ parts }: LayoutProps) {
   const [dockWas, setDockWas] = useState(open)
   if (open !== dockWas) {
     setDockWas(open)
-    if (open != null && open !== 'inbox') setRef(null)
-    else if (dockWas != null && dockWas !== 'inbox') setRef('fleet')
+    // Parcels asked of the dock (a parcel mark clicked on the map): this layout lists it itself
+    if (open === 'parcels') setRef('parcels')
+    else if (open != null && open !== 'inbox') setRef(null)
+    else if (dockWas != null && dockWas !== 'inbox' && dockWas !== 'parcels') setRef('fleet')
   }
 
   /** a reference list shown (null: none), any drawer of the dock's closed for it */

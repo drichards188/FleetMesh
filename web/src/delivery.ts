@@ -199,19 +199,99 @@ export function dueText(p: Pick<Parcel, 'state' | 'due_s'>, elapsedS: number): s
   return left >= 0 ? `due in ${spanText(left)}` : `late by ${spanText(-left)}`
 }
 
-/** Where a parcel is on the map: its vehicle's position while loaded, else its hub (waiting,
- *  assigned) or its drop zone (delivered). Null where nothing says. */
-export function parcelAt(
-  p: Parcel,
+// ---- parcels by place (the map draws one mark for each place, with how many are there) ----------
+
+export type ParcelPlaceKind = 'hub' | 'vehicle' | 'zone'
+
+/** Where a parcel is now, as a place: `hub:<id>` open at its hub (ready, or assigned to a vehicle
+ *  not yet there), `vehicle:<uid>` loaded on it, `zone:<id>` delivered there. Null while its order
+ *  is not placed yet (waiting for its ready time: it is not at the hub yet) and once it failed. */
+export function parcelPlaceKey(p: Pick<Parcel, 'state' | 'from' | 'to' | 'vehicle'>): string | null {
+  switch (p.state) {
+    case 'ready':
+    case 'assigned':
+      return `hub:${p.from}`
+    case 'loaded':
+      return p.vehicle ? `vehicle:${p.vehicle}` : `hub:${p.from}`
+    case 'delivered':
+      return `zone:${p.to}`
+    default:
+      return null
+  }
+}
+
+export interface ParcelPlace {
+  /** `hub:<id>`, `vehicle:<uid>` or `zone:<id>` (parcelPlaceKey) */
+  key: string
+  kind: ParcelPlaceKind
+  /** the hub's or drop zone's id, or the vehicle's uid */
+  id: string
+  /** the hub's name, the drop zone's id, or the vehicle's uid (the caller has its callsign) */
+  name: string
+  at: LngLat
+  /** the hub's or drop zone's radius (0 for a vehicle), for where the mark goes beside it */
+  radius_m: number
+  /** the parcels there now, most pressing first: late ones, then by due time */
+  parcels: Parcel[]
+  late: number
+  /** a hub's orders not placed yet (their ready time is still to come); 0 elsewhere */
+  later: number
+}
+
+/** The places parcels are now, one each however many are there: hubs first, then drop zones, then
+ *  vehicles, each by id (a stable order for the label budget). A place with no position (a vehicle
+ *  not in the picture) is left out; the Parcels list still has its parcels. */
+export function parcelPlaces(
+  parcels: readonly Parcel[],
   hubs: ReadonlyMap<string, Hub>,
   zones: ReadonlyMap<string, DropZone>,
   vehicleAt: (uid: string) => LngLat | null,
-): LngLat | null {
-  if (p.state === 'loaded') return (p.vehicle ? vehicleAt(p.vehicle) : null) ?? hubs.get(p.from)?.at ?? null
-  if (p.state === 'delivered') return zones.get(p.to)?.at ?? null
-  if (p.state === 'failed') return null
-  return hubs.get(p.from)?.at ?? null
+  elapsedS: number,
+): ParcelPlace[] {
+  const by = new Map<string, Parcel[]>()
+  const later = new Map<string, number>()
+  for (const p of parcels) {
+    if (p.state === 'waiting') later.set(p.from, (later.get(p.from) ?? 0) + 1)
+    const key = parcelPlaceKey(p)
+    if (!key) continue
+    const list = by.get(key)
+    if (list) list.push(p)
+    else by.set(key, [p])
+  }
+  const out: ParcelPlace[] = []
+  for (const [key, list] of by) {
+    const [kind, id] = key.split(/:(.*)/s) as [ParcelPlaceKind, string]
+    const hub = kind === 'hub' ? hubs.get(id) : undefined
+    const zone = kind === 'zone' ? zones.get(id) : undefined
+    const at = kind === 'vehicle' ? vehicleAt(id) : (hub?.at ?? zone?.at ?? null)
+    if (!at) continue
+    const sorted = filterParcels(list, 'all', elapsedS)
+    out.push({ key, kind, id, name: hub?.name ?? id, at, radius_m: hub?.radius_m ?? zone?.radius_m ?? 0, parcels: sorted, late: sorted.filter((p) => isLate(p, elapsedS)).length, later: kind === 'hub' ? (later.get(id) ?? 0) : 0 })
+  }
+  const rank: Record<ParcelPlaceKind, number> = { hub: 0, zone: 1, vehicle: 2 }
+  return out.sort((a, b) => rank[a.kind] - rank[b.kind] || a.id.localeCompare(b.id, undefined, { numeric: true }))
 }
+
+const PLACE_STATE_WORDS: Record<string, string> = { ready: 'waiting for a vehicle', assigned: 'assigned', loaded: 'in transit', delivered: 'delivered' }
+
+/** What a place's parcels are, in a few words: "3 parcels: 2 waiting for a vehicle, 1 assigned (1
+ *  late)"; one parcel by its id. Its place is said by the caller. */
+export function placeParcelsText(pl: Pick<ParcelPlace, 'parcels' | 'late' | 'later'>, elapsedS: number): string {
+  const n = pl.parcels.length
+  const later = pl.later ? `; ${pl.later} more not ordered yet` : ''
+  const words = (p: Parcel) => PLACE_STATE_WORDS[p.state] ?? parcelStateLabel(p.state).toLowerCase()
+  if (n === 1) {
+    const p = pl.parcels[0]
+    if (p.state === 'delivered') return `${p.id} delivered, ${p.mass_kg} kg${later}`
+    return `${p.id} ${words(p)}, ${p.mass_kg} kg to ${p.to}, ${dueText(p, elapsedS)}${later}`
+  }
+  const states = new Map<string, number>()
+  for (const p of pl.parcels) states.set(words(p), (states.get(words(p)) ?? 0) + 1)
+  const late = pl.late ? ` (${pl.late} late)` : ''
+  if (states.size === 1) return `${n} parcels ${[...states.keys()][0]}${late}${later}`
+  return `${n} parcels: ${[...states].map(([s, k]) => `${k} ${s}`).join(', ')}${late}${later}`
+}
+
 
 // ---- drop zones and vehicles ----------------------------------------------------------------------
 
