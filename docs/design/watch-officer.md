@@ -84,12 +84,14 @@ How the current items sort (to be settled per reason code in the policy file):
   the person as one item. A group order is one ordinary order naming several vehicles
   (`Engine::grouping`, rules 34); MCP's `make_group` only makes the console's groups and is not
   this.
-- **Turn down the dispatcher's held order** that adds exposure (a `deliver`, a `pickup`, a
-  `reroute`), with its reason, optionally proposing the safer order that replaces it. The officer
+- **Turn down the dispatcher's held order** that adds exposure (a `deliver` or a `pickup`), with
+  its reason, optionally proposing the safer order that replaces it. The officer
   gains no authority over another's order: the dispatcher (the bridge's own automation, agent
   `dispatcher`) withdraws its own proposal, which it may already do (`AgentPort::withdraw`, owner
-  only), with the officer's reason, and holds the parcel back from offering the same order again
-  until something material changes. Only the dispatcher's orders, never an operator's or another
+  only), with the officer's reason. The job's next proposal waits the scenario's `retry_after_s`
+  (a pickup's vehicle waits as long before it is offered a parcel), and the turn-down counts as
+  one of the parcel's tries, so a parcel that never improves fails after its tries (a
+  `delivery_failed` issue) rather than being offered for ever. Only the dispatcher's orders, never an operator's or another
   agent's, and never a safety order (`land_now`, `abort`, `return_to_hub`, `hold`): withdrawing
   one can raise exposure, so those always reach the person. The policy grants it per kind and
   reason code (section 6).
@@ -103,7 +105,7 @@ How the current items sort (to be settled per reason code in the policy file):
 
 The triage deadline is deterministic and the bridge's, never the officer's: an item not triaged
 within `triage_deadline_s` of entering the queue (a policy value; a first draft of 60 s for an
-issue, 30 s for a held order, less than `approval.expire_s`) goes to the Inbox marked
+issue, 30 s for a held order, less than `approval.expire_s`; `sim/policy.toml` gives 90 s and 60 s, since a model's turn with its tool calls takes tens of seconds) goes to the Inbox marked
 "untriaged". The same holds for every item at once when the officer's session drops, its budget
 is spent or it hits a usage limit: nothing waits on a silent officer. An urgent item (a safety
 order, a high-severity alert) bypasses triage and goes straight to the person.
@@ -120,7 +122,7 @@ triage_deadline_s = { issue = 60, held = 30 }
 # the issues it may handle (the rest escalate untouched)
 issues = ["drop_not_clear", "delivery_failed", "parcel_no_vehicle", "return_failed", "traffic_conflict"]
 # held orders it may reject or replace, by kind and reason code; never a safety kind
-reject = { kinds = ["deliver", "pickup", "reroute"], codes = ["ENERGY_MARGIN_THIN", "PAYLOAD_NEAR_MAX", "WX_GUST_LIMIT"] }
+reject = { kinds = ["deliver", "pickup"], codes = ["ENERGY_MARGIN_THIN", "PAYLOAD_NEAR_MAX", "WX_GUST_LIMIT_MARGINAL"] }
 # straight to the person, never queued
 bypass = { kinds = ["land_now", "abort"], severity = ["high"] }
 ```
@@ -181,8 +183,13 @@ officer. At each fleet size:
 
 ## 11. Build order
 
-Step 1 is built (rules 7, 2026-11-26), with the MCP tool `triage_item` for `handled` and
-`escalated`; `turned_down` is refused until step 2 gives the dispatcher its side.
+Steps 1 to 5 are built (rules 7, 2026-11-26 and 27): the triage in the bridge; `triage_item` with
+all three verdicts, a turn-down being the dispatcher's own withdrawal; the officer woken by
+`triage.item` changes, with the four tests in its prompt; `AI=claude` or `codex` on `make start`
+and `make up` and an AI choice in the menu (`scripts/up.sh` starts the officer once the bridge
+answers, after checking its CLI's login, and an officer that stops leaves the stack running); and
+the console's escalated and untriaged cards and its Officer log. Step 6 (phase 8's measures) is
+open.
 
 1. Policy `[officer]` and the triage queue in the bridge (queue, deadline, bypass), logged, with
    replay, behind `OFFICER_TRIAGE_SINCE`; Inbox filtering. With no officer, no change.

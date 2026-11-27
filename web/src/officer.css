@@ -1,0 +1,24 @@
+/* the AI watch officer in the Inbox (rules 7, docs/design/watch-officer.md): its recommendation at the
+   top of a card it passed on, the mark of one that reached the person untriaged, and the Officer log */
+.of-note { margin: 6px 0 8px; padding: 7px 9px; border-left: 3px solid var(--violet, #a78bfa); background: color-mix(in srgb, var(--violet, #a78bfa) 9%, transparent); border-radius: 2px; font-size: var(--text-body); }
+.of-note .of-k { display: block; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--violet, #a78bfa); margin-bottom: 2px; }
+.of-note .of-bottom { margin: 0; font-weight: 600; color: var(--text); }
+.of-note ul { margin: 3px 0 0; padding-left: 16px; color: #c6cfd9; }
+.of-note .of-why { margin: 4px 0 0; color: var(--muted); }
+.of-note.untriaged { border-left-color: var(--warn, #f5b041); background: color-mix(in srgb, var(--warn, #f5b041) 8%, transparent); }
+.of-note.untriaged .of-k { color: var(--warn, #f5b041); }
+
+.of-log { display: flex; flex-direction: column; gap: 8px; }
+.of-head { margin: 0; color: var(--muted); font-size: var(--text-body); }
+.of-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.of-row { padding: 8px 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2, #151b23); }
+.of-row header { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.of-stage { font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; padding: 1px 6px; border-radius: 2px; border: 1px solid currentColor; }
+.of-stage.handled, .of-stage.turned_down { color: #53c28b; }
+.of-stage.escalated { color: var(--violet, #a78bfa); }
+.of-stage.untriaged { color: var(--warn, #f5b041); }
+.of-stage.with_officer, .of-stage.bypassed { color: var(--muted); }
+.of-what { font-weight: 600; }
+.of-when { margin-left: auto; color: var(--muted); font: var(--text-label) var(--font-data); }
+.of-row p { margin: 4px 0 0; color: #c6cfd9; }
+.of-row .of-detail { color: var(--muted); }

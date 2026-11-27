@@ -475,3 +475,27 @@ What changed:
   `[officer]` (`Policy::as_logged`), and a triage event in such a log is flagged.
 
 Detail: docs/design/watch-officer.md.
+
+## 2026-11-27: The watch officer runs from the menu, and a turn-down is the dispatcher's own
+
+Building on rules 7 (the entry above), with no rules change:
+
+- **Turning an order down** (`triage_item` `turned_down`) works within `[officer.handle.turn_down]`:
+  the dispatcher withdraws its own held pickup or deliver with the officer's reason, and its next
+  proposal waits the scenario's `retry_after_s` with the turn-down counted as one of the parcel's
+  tries, so a parcel that never improves fails after its tries (a `delivery_failed` issue) rather
+  than being offered for ever. Reroutes are left out: the dispatcher's jobs hold pickups and
+  deliveries only. The gust code the policy names is the soft band's, `WX_GUST_LIMIT_MARGINAL`.
+- **The deadlines are 60 s for a held order and 90 s for an alert** (`sim/policy.toml`): the first
+  live officer's turn with its tool calls took 4 to 8 s, but a busy wake takes longer, and an
+  order still reaches the person at least 15 s before its approval expires.
+- **The officer is started by `scripts/up.sh`** with `FLEETMESH_OFFICER=claude|codex`
+  (`make start SCENARIO=... AI=claude`, or the menu's AI choice, offered only for a CLI installed
+  here): its CLI and login are checked before anything starts, it starts once the bridge answers,
+  and it is not among the processes whose exit stops the stack, so an officer that stops (a
+  budget, a usage limit) leaves the person with every item. Its CLI never inherits a parent Claude
+  Code session's markers. The menu no longer offers a faster clock (it sped tidewater's clock, not
+  the deliveries: bd fleetmesh-uef).
+- **A deadlock fixed.** Reading the Inbox took the triage lock and then the decision lock while
+  the decision loop took them the other way round, and a live bridge hung (it would not stop).
+  The decision lock is now always taken first; a test reads the Inbox while the loop ticks.

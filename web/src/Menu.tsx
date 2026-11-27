@@ -1,6 +1,6 @@
 import { Bluf } from './Bluf'
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, useEffect, useState } from 'react'
-import { type ConsoleMode, type ConsoleState, endScenario, setConsoleMode, isActive, type Launch, type LaunchOptions, type LauncherState, type PolicyId, type Scenario, type Stage, startScenario } from './launcher'
+import { type AiMode, type ConsoleMode, type ConsoleState, endScenario, setConsoleMode, isActive, type Launch, type LaunchOptions, type LauncherState, type PolicyId, type Scenario, type Stage, startScenario } from './launcher'
 import { DOMAIN_LABEL, type Domain } from './types'
 import { FleetBackdrop, FleetLegend } from './FleetBackdrop'
 import './menu.css'
@@ -17,6 +17,12 @@ const POLICY_LABEL: Record<PolicyId, string> = { standard: 'Standing approvals',
 const POLICY_NOTE: Record<PolicyId, string> = {
   standard: 'Approved delivery points stand: routine deliveries need no person (sim/policy.toml).',
   strict: 'The comparison procedure: a person confirms each drop zone, valid for an hour, before deliveries go there (sim/policy-strict.toml).',
+}
+const AI_LABEL: Record<AiMode, string> = { none: 'None', claude: 'Claude', codex: 'Codex' }
+const AI_NOTE: Record<AiMode, string> = {
+  none: 'No AI on watch: every held order and alert comes straight to you.',
+  claude: 'The AI watch officer on your own Claude Code login triages every held order and alert first: it settles what the policy lets it, and passes the rest to you with its recommendation. You see what it handled in the Officer log. FleetMesh never sees your credentials.',
+  codex: 'The AI watch officer on your own Codex CLI login triages every held order and alert first: it settles what the policy lets it, and passes the rest to you with its recommendation. You see what it handled in the Officer log. FleetMesh never sees your credentials.',
 }
 const SCALE_LABEL: Record<string, string> = { '1': 'Full', '0.5': 'Half', '0.25': 'Quarter' }
 const scaleLabel = (k: number) => SCALE_LABEL[String(k)] ?? `${k}x`
@@ -53,18 +59,20 @@ function cardFacts(s: Scenario): string[] {
 
 /** the options a launch was started with, as the menu names them */
 function optionWords(kind: Launch['kind'], o: LaunchOptions): string[] {
-  if (kind === 'open_world') return ['free command, nothing scripted']
-  return [`${scaleLabel(o.scale ?? 1).toLowerCase()} size`, `${o.rate ?? 1}x clock`, `${POLICY_LABEL[o.policy ?? 'standard'].toLowerCase()}`]
+  const ai = o.ai && o.ai !== 'none' ? `AI officer: ${AI_LABEL[o.ai]}` : 'no AI officer'
+  if (kind === 'open_world') return ['free command, nothing scripted', ai]
+  return [`${scaleLabel(o.scale ?? 1).toLowerCase()} size`, `${POLICY_LABEL[o.policy ?? 'standard'].toLowerCase()}`, ai]
 }
 
 /** the same start from a terminal (eval/launcher.py's cli_text) */
 function cliFor(s: Scenario, o: LaunchOptions): string {
-  if (s.kind === 'open_world') return s.cli ?? ''
+  const ai = o.ai && o.ai !== 'none' ? ` AI=${o.ai}` : ''
+  if (s.kind === 'open_world') return (s.cli ?? '') + ai
   const out = [`make start SCENARIO=${s.id}`]
   if (o.scale !== undefined && o.scale !== 1) out.push(`SCALE=${o.scale}`)
   if (o.rate !== undefined && o.rate !== s.rate) out.push(`FLEETMESH_RATE=${o.rate}`)
   if (o.policy && o.policy !== s.policy) out.push('POLICY=sim/policy-strict.toml')
-  return out.join(' ')
+  return out.join(' ') + ai
 }
 
 /** how long vehicles usually take, as the menu says while it waits */
@@ -422,7 +430,7 @@ function Now({ launch: l, now, onUpdate, onReturn }: { launch: Launch; now: numb
         (confirm ? (
           <div className="mm-confirm" role="alertdialog" aria-label="End the scenario">
             <span>
-              End {l.title}? Everything it started stops: the vehicles, the bridge, the link emulator, the traffic simulator and tidewater.
+              End {l.title}? Everything it started stops: the vehicles, the bridge, the link emulator, the traffic simulator, tidewater{l.options.ai && l.options.ai !== 'none' ? ' and the AI watch officer' : ''}.
             </span>
             <button className="mm-danger" disabled={busy} onClick={end}>
               {busy ? 'Ending…' : 'End it'}
@@ -466,6 +474,7 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
   const [scale, setScale] = useState<number>(mine?.scale ?? 1)
   const [rate, setRate] = useState<number | undefined>(mine?.rate ?? s.rate)
   const [policy, setPolicy] = useState<PolicyId | undefined>(mine?.policy ?? s.policy)
+  const [ai, setAi] = useState<AiMode>(mine?.ai ?? s.ai ?? 'none')
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -475,7 +484,7 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
   const vehicles = sized?.vehicles ?? s.vehicles
   const domains = sized?.domains ?? s.domains
   const sitlNote = s.sitl ? (s.sitl === vehicles ? 'all in ArduPilot SITL' : `${s.sitl} in ArduPilot SITL, ${(vehicles ?? 0) - s.sitl} stand-ins`) : 'all stand-ins'
-  const options: LaunchOptions = scenario ? { scale, rate, policy } : {}
+  const options: LaunchOptions = scenario ? { scale, rate, policy, ai } : { ai }
 
   const start = async (replace: boolean) => {
     setBusy(true)
@@ -517,7 +526,7 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
                 <>
                   <Fact k="Conditions">{realConditions(s) ? `Real tide, current and wind from tidewater (${s.tidewater}), from ${fmtAt(s.at)}` : 'No tidewater data here'}</Fact>
                   <Fact k="Duration">No limit: it runs until you end it</Fact>
-                  <Fact k="Scripted">Nothing: no parcels, no timeline, no AI on watch</Fact>
+                  <Fact k="Scripted">Nothing: no parcels, no timeline</Fact>
                 </>
               )}
               <Fact k="Scored">Nothing: a run is recorded (the audit log, which replay re-derives), not scored</Fact>
@@ -527,9 +536,9 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
           {!s.runnable && <p className="mm-why">Not started from the menu: {s.why_not}</p>}
         </div>
         <div className="mm-plan">
-          {s.runnable && scenario && (
+          {s.runnable && (
             <div className="mm-opts">
-              {s.scales && s.scales.length > 1 && (
+              {scenario && s.scales && s.scales.length > 1 && (
                 <fieldset className="mm-opt">
                   <legend>Fleet and demand</legend>
                   <div className="seg" role="radiogroup" aria-label="Fleet and demand">
@@ -543,7 +552,7 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
                   <p className="mm-note">{scale === 1 ? 'The scenario at its own size.' : `${scaleLabel(scale)} of its vehicles and of its parcels; every unit keeps at least one vehicle.`}</p>
                 </fieldset>
               )}
-              {s.rates && s.rates.length > 1 && (
+              {scenario && s.rates && s.rates.length > 1 && (
                 <fieldset className="mm-opt">
                   <legend>Scenario clock</legend>
                   <div className="seg" role="radiogroup" aria-label="Scenario clock">
@@ -556,7 +565,7 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
                   <p className="mm-note">{rate === 1 ? 'Real time: an hour of the scenario takes an hour.' : `${rate} times real time: the scenario's ${Math.round((s.duration_s ?? 0) / 60)} min take ${Math.round((s.duration_s ?? 0) / 60 / (rate ?? 1))}.`}</p>
                 </fieldset>
               )}
-              {s.policies && s.policies.length > 1 && (
+              {scenario && s.policies && s.policies.length > 1 && (
                 <fieldset className="mm-opt">
                   <legend>Drop zones</legend>
                   <div className="seg" role="radiogroup" aria-label="Drop zones">
@@ -570,6 +579,21 @@ function Detail({ s, cur, onUpdate, onReturn }: { s: Scenario; cur: Launch | nul
                   {policy && <p className="mm-note">{POLICY_NOTE[policy]}</p>}
                 </fieldset>
               )}
+              <fieldset className="mm-opt">
+                <legend>AI watch officer</legend>
+                <div className="seg" role="radiogroup" aria-label="AI watch officer">
+                  {(s.ais ?? ['none']).map((a) => (
+                    <button key={a} role="radio" aria-checked={ai === a} className={ai === a ? 'on' : ''} onClick={() => setAi(a)}>
+                      {AI_LABEL[a]}
+                      {a === (s.ai ?? 'none') && <small>default</small>}
+                    </button>
+                  ))}
+                </div>
+                <p className="mm-note">
+                  {AI_NOTE[ai]}
+                  {(s.ais ?? ['none']).length === 1 && ' Neither the Claude Code nor the Codex CLI is installed here, so no officer can run.'}
+                </p>
+              </fieldset>
             </div>
           )}
           {s.runnable && (

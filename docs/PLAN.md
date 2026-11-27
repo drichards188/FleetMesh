@@ -24,7 +24,7 @@ makes the answer measurable.
 | 10 | Rename and first commit | done (first commit 5c1003c) | [DECISIONS.md](DECISIONS.md) |
 | 11 | Other traffic and the company's picture of it | phases 1 to 3 done (rules 3: separation from other traffic, automation first); console layer by the console | [traffic.md](design/traffic.md) |
 | 12 | External interfaces (identity broadcasts, UTM, ATC and VTS, city and responders) | backlog | [external-interfaces.md](design/external-interfaces.md) |
-| 13 | AI watch officer triages the Inbox | step 1 built (rules 7: the triage queue, deadlines, replay); steps 2 to 6 in bd (fleetmesh-ic4) | [watch-officer.md](design/watch-officer.md) |
+| 13 | AI watch officer triages the Inbox | built (rules 7): triage, verdicts, the officer, the menu's AI choice, the console; phase 8's two arms open (fleetmesh-ic4.6) | [watch-officer.md](design/watch-officer.md) |
 
 ## 1. Vehicle-side port (done)
 
@@ -164,15 +164,16 @@ Needs: the open items below settled or filed; `make check` green on a fresh chec
 Exit: `git log` shows one clean first commit, linear history after it, `make check` green on a
 fresh checkout, `docs/` carries no reference to removed features.
 
-## 13. AI watch officer (in progress)
+## 13. AI watch officer (built)
 
 Deterministic code raises the alerts and holds; the AI watch officer triages them; only what it
-cannot confidently handle reaches the person, with its recommendation; the rest is in the audit
-trail. Rules 7 (2026-11-26, DECISIONS.md) built the bridge's side: the triage queue, the
-deterministic deadlines and the officer's absence, the `triage_item` verdict tool, the person's
-filtered Inbox, `GET /api/triage`, and replay of every step. Next: the dispatcher's side of turning
-an order down, the officer's wake table and prompt, the menu's AI choice, the console's cards and
-audit view, and phase 8's two arms.
+cannot confidently handle reaches the person, with its recommendation; the rest is in the Officer
+log. Rules 7 (2026-11-26, DECISIONS.md): the triage queue with deterministic deadlines and the
+officer's absence, the `triage_item` verdicts (a turn-down is the dispatcher's own withdrawal),
+the officer woken by `triage.item` with the four tests in its prompt, `AI=claude|codex` on
+`make start` and the menu, the console's escalated and untriaged cards and its Officer log, and
+replay of every step. Next: phase 8 measures the person alone against the person with the officer
+(bd fleetmesh-ic4.6).
 
 Design: [watch-officer.md](design/watch-officer.md). Needs: phases 2 to 4. Feeds phase 8.
 

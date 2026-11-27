@@ -117,6 +117,10 @@ def _flap_escalates(c: Change) -> bool:
     return c.get("condition") == "gps_glitch"
 
 
+# Triage items the stronger model takes: the navigation monitor acted on a vehicle whose fix is in
+# doubt (a spoof or a jam looks like this).
+GRAVE_TRIAGE = ("nav_monitor",)
+
 # The trigger table. `wake`: the change wakes the model. `escalate`: that wake goes to the
 # stronger model (a suspected spoof). Kinds not listed are notes.
 TRIGGERS: tuple[Row, ...] = (
@@ -149,6 +153,11 @@ TRIGGERS: tuple[Row, ...] = (
     # share of the wakes (`Waker.tasking_room`); guidance withdrawn (`tasking.retired`) is a note
     Row(TASKING, always, never, "the operator posted new tasking"),
     Row(UNANSWERED, always, never, "a request of the operator's has no answer from you yet"),
+    # rules 7: an Inbox item waits for your triage (docs/design/watch-officer.md); each is its own
+    # subject, so a second item is never held behind the first. A navigation alert (a suspected
+    # spoof or jam) goes to the stronger model. One that left you without a verdict is a note.
+    Row("triage.item", always, lambda c: c.get("item_kind") in GRAVE_TRIAGE,
+        "an Inbox item waits for your triage verdict"),
 )
 ROWS = {r.kind: r for r in TRIGGERS}
 
@@ -173,15 +182,15 @@ def _h(v: Any) -> Any:
 
 
 def subject(c: Change) -> tuple:
-    """What a change is about, for the per-subject limits: its kind, the item (alert,
-    vehicle, operator tasking or intent) and, where there is one, the instance: a
+    """What a change is about, for the per-subject limits: its kind, the item (a triage item,
+    alert, vehicle, operator tasking or intent) and, where there is one, the instance: a
     flapping condition, an intent's new state, a tasking item's posting time (a bridge restarted
     numbers its items again). Hashable whatever the change holds."""
     k = _h(c.get("kind"))
     if str(k).startswith("intent."):
         return ("intent", _h(c.get("intent")), _h(c.get("to") or c.get("state")))
     item: tuple = ()
-    for name in ("alert", "uid", "tasking"):
+    for name in ("item", "alert", "uid", "tasking"):
         if c.get(name) is not None:
             item = (name, _h(c.get(name)))
             break

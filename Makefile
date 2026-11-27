@@ -20,15 +20,15 @@ build:   ## release builds of the Rust crates a run starts: bridge, stand-ins, l
 
 DELIVERY_SCENARIOS := $(notdir $(wildcard sim/scenarios/*))
 
-start:   ## the main menu (eval/launcher.py): open http://localhost:5173 and start a scenario there; Ctrl-C ends the running one and stops the launcher. SCENARIO=harbour-city (or wind-event, coastal-boat; make scenarios lists them) starts that delivery scenario on stand-ins instead (SCALE=0.25 for a fraction of its fleet and demand)
-	@if [ -n "$(SCENARIO)" ]; then ./scripts/scenario.sh $(SCENARIO) $(ARGS); \
+start:   ## the main menu (eval/launcher.py): open http://localhost:5173 and start a scenario there; Ctrl-C ends the running one and stops the launcher. SCENARIO=harbour-city (or wind-event, coastal-boat; make scenarios lists them) starts that delivery scenario on stand-ins instead (SCALE=0.25 for a fraction of its fleet and demand; AI=claude or codex adds the AI watch officer on your own CLI login)
+	@if [ -n "$(SCENARIO)" ]; then $(if $(AI),FLEETMESH_OFFICER=$(AI)) ./scripts/scenario.sh $(SCENARIO) $(ARGS); \
 	elif [ -f eval/launcher.py ]; then $(PY) -m eval.launcher; else $(call skip,eval/launcher.py); fi
 
 scenarios: ## list the delivery scenarios (sim/scenarios): make start SCENARIO=name
 	@for s in $(DELIVERY_SCENARIOS); do echo "$$s"; done
 
-up:      ## fleet + link emulator + bridge + web (FLEET=, ARGS=; FLEETMESH_LINKEMU=0 bypasses the emulator; FLEETMESH_TRAFFIC=0 starts no traffic simulator; ports: scripts/up.sh; FLEETMESH_SCENARIO=<tidewater scenario> with FLEETMESH_AT adds real tide, current and wind)
-	./scripts/up.sh --fleet $(FLEET) $(ARGS)
+up:      ## fleet + link emulator + bridge + web (FLEET=, ARGS=; FLEETMESH_LINKEMU=0 bypasses the emulator; FLEETMESH_TRAFFIC=0 starts no traffic simulator; ports: scripts/up.sh; FLEETMESH_SCENARIO=<tidewater scenario> with FLEETMESH_AT adds real tide, current and wind; AI=claude or codex adds the AI watch officer)
+	$(if $(AI),FLEETMESH_OFFICER=$(AI)) ./scripts/up.sh --fleet $(FLEET) $(ARGS)
 
 # a setting that comes from make's command line only: a shell may export N for something else
 cmd_arg = $(if $(filter command line,$(origin $(1))),$($(1)))

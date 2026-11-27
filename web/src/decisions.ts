@@ -89,9 +89,23 @@ export type IntentParams = {
   [k: string]: unknown
 }
 
+/** Rules 7 (docs/design/watch-officer.md): where an Inbox item stands in the AI watch officer's
+ *  triage, when an officer is on the run: passed on to the person with its recommendation,
+ *  reached the person without its verdict, or sent straight to the person. */
+export interface TriageNote {
+  stage: 'escalated' | 'untriaged' | 'bypassed' | 'with_officer' | 'arriving'
+  note?: string
+  recommendation?: string | null
+  why?: string
+  intents?: number[]
+  at_t?: number
+}
+
 export interface Intent {
   id: number
   created_t: number
+  /** rules 7: the AI watch officer's triage of it, when it waits in the Inbox */
+  triage?: TriageNote
   /** rules 29: `handover`, the previous watch's order the fleet file handed over at the start (id: that file) */
   source: { kind: 'human' | 'agent' | 'handover'; id: string }
   kind: string
@@ -201,6 +215,8 @@ export interface Alert {
   folded_into?: string
   /** an issue automation raised: what happened, what it did, what the person might do */
   issue?: { problem: string; did: string; recommend: string }
+  /** rules 7: the AI watch officer's triage of it */
+  triage?: TriageNote
   /** a traffic alert: the track it is about (`trk-...`, as GET /api/traffic names it) */
   track_id?: string
   /** a traffic alert about more than one track (a broadcast and what the sensors see instead) */
@@ -214,7 +230,16 @@ export interface Inbox {
   queued?: Intent[]
   /** rules 30: the review's loss items (presumed or flagged, and confirmed); absent before rules 30 */
   review?: { node_losses?: ReviewNodeLoss[]; nodes_lost?: ReviewNodeLost[] }
-  counts: { pending: number; alerts: number; queued?: number; review?: number; /** decisions a person made in the last ten minutes (the bridge counts them) */ decided_10m?: number }
+  counts: {
+    pending: number
+    alerts: number
+    queued?: number
+    review?: number
+    /** decisions a person made in the last ten minutes (the bridge counts them) */
+    decided_10m?: number
+    /** rules 7: the AI watch officer: on watch, items with it now, items it settled this run */
+    triage?: { on_watch: boolean; with_officer: number; handled: number }
+  }
 }
 
 export interface Decisions {

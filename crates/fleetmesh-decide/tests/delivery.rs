@@ -2410,6 +2410,12 @@ mod triage {
         r
     }
 
+    /// The shipped policy's deadlines (held, alert), ms.
+    fn deadlines(r: &Rig) -> (i64, i64) {
+        let d = &r.engine.policy().officer.as_ref().expect("[officer]").deadline_s;
+        (i64::from(d.held) * 1000, i64::from(d.alert) * 1000)
+    }
+
     fn whats(r: &Rig) -> Vec<String> {
         replay_any(&r.log.text()).mismatches.into_iter().map(|m| m.what).collect()
     }
@@ -2419,8 +2425,8 @@ mod triage {
         let mut r = on_watch();
         r.clock.advance_ms(5_000);
         rec(&mut r, EventBody::TriageVerdict { item: "alert:delivery:p-1".into(), by: officer(), verdict: Verdict::Handled, note: "retry in 10 min".into(), recommendation: None, intents: vec![] });
-        // the held order's 30 s pass
-        r.clock.advance_ms(25_000);
+        // the held order's deadline passes (it was routed 5 s ago)
+        r.clock.advance_ms(deadlines(&r).0 - 5_000);
         rec(&mut r, EventBody::TriageReleased { item: "intent:7".into(), why: Release::Deadline });
         // a new alert, and the officer goes quiet
         assert!(matches!(routed(&mut r, "alert:link:3", alert("lost_link")), Route::Officer { .. }));
@@ -2438,14 +2444,15 @@ mod triage {
         // a land_now goes straight to the person; this log held it for the officer
         let mut input = held("dispatcher", &[]);
         input.kind = "land_now".into();
-        rec(&mut r, EventBody::TriageRouted { item: "intent:9".into(), input, route: Route::Officer { deadline_t: t0().plus_ms(30_000) }, about: serde_json::Value::Null });
+        let held_ms = deadlines(&r).0;
+        rec(&mut r, EventBody::TriageRouted { item: "intent:9".into(), input, route: Route::Officer { deadline_t: t0().plus_ms(held_ms) }, about: serde_json::Value::Null });
         assert!(whats(&r).iter().any(|w| w == "triage routing differs"), "{:?}", whats(&r));
     }
 
     #[test]
     fn an_item_kept_from_the_person_past_its_deadline_is_found() {
         let mut r = on_watch();
-        r.clock.advance_ms(40_000);
+        r.clock.advance_ms(deadlines(&r).0 + 10_000);
         rec(&mut r, EventBody::TriageReleased { item: "intent:7".into(), why: Release::Deadline });
         assert!(whats(&r).iter().any(|w| w.contains("did not reach the person in time")), "{:?}", whats(&r));
     }

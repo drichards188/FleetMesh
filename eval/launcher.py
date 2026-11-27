@@ -14,6 +14,8 @@ menu asks:
   and traffic, tidewater's tide, current and wind when the data is in the checkout), with the
   options scenario.sh takes: a fraction of the fleet and demand (SCALE) and the strict drop-zone
   procedure (POLICY);
+- either with the AI watch officer (AI=claude or codex: scripts/up.sh starts agents/watch_officer.py
+  on the user's own CLI login, docs/design/watch-officer.md), offered only for a CLI installed here;
 - the open world: what `make up` runs with tidewater's conditions (the delivery demo fleet in
   ArduPilot SITL, no demand, nothing scripted), offered only when SITL is built here.
 
@@ -33,7 +35,7 @@ The API, on 127.0.0.1 only (the console reaches it through Vite's proxy under /l
 
     GET  /launcher/api/state   the scenarios, and the current launch with its progress
     POST /launcher/api/start   {"scenario": <id>, "scale": 1 | 0.5 | 0.25,
-                               "policy": "standard" | "strict",
+                               "policy": "standard" | "strict", "ai": "none" | "claude" | "codex",
                                "replace": true (end the running one first)}
     POST /launcher/api/end     end the running scenario
     POST /launcher/api/console {"mode": "build" | "dev"}: how the console is served (eval/webconsole.py)
@@ -54,6 +56,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -102,9 +105,16 @@ CHOICE_VARS = (
     "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "ARGS", "FLEET", "SCENARIO", "SCALE", "POLICY",
     "FLEETMESH_SCENARIO", "FLEETMESH_SCENARIO_NAME", "FLEETMESH_SCENARIO_DIR", "FLEETMESH_SCENARIO_SCALE",
     "FLEETMESH_AT", "FLEETMESH_RATE", "FLEETMESH_FLEET", "FLEETMESH_AREAS", "FLEETMESH_POLICY",
-    "FLEETMESH_LINK_EVENTS", "FLEETMESH_TRAFFIC_SCENARIO",
+    "FLEETMESH_LINK_EVENTS", "FLEETMESH_TRAFFIC_SCENARIO", "AI", "FLEETMESH_OFFICER",
 )
-START_KEYS = {"scenario", "scale", "rate", "policy", "replace"}
+START_KEYS = {"scenario", "scale", "rate", "policy", "ai", "replace"}
+# the AI watch officer's CLIs (agents/watch_officer.py backends), offered when installed here
+OFFICER_CLIS = ("claude", "codex")
+
+
+def officer_choices() -> list[str]:
+    """The AI choices a launch offers: none, and each officer CLI installed here."""
+    return ["none", *[c for c in OFFICER_CLIS if shutil.which(c)]]
 DOMAINS = ("air", "ground", "surface")  # sim/platforms.toml's, in the menu's order
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 # how long vehicles usually take to be navigation-ready (the menu says so while it waits)
@@ -227,6 +237,8 @@ def scenario_entry(d: Path, root: Path = REPO) -> dict[str, Any] | None:
         "at": at,
         "duration_s": float(sc["duration_s"]) if sc.get("duration_s") else None,
         "traffic": bool(sc.get("traffic")) and (d / str(sc["traffic"])).exists(),
+        "ai": "none",
+        "ais": officer_choices(),
         "cli": f"make start SCENARIO={name}",
     }
 
@@ -265,6 +277,8 @@ def open_world_entry(root: Path = REPO) -> dict[str, Any] | None:
         "tidewater": tw,
         "at": OPEN_WORLD_AT,
         "duration_s": None,
+        "ai": "none",
+        "ais": officer_choices(),
         "cli": f"FLEETMESH_SCENARIO=tidewater/scenarios/{OPEN_WORLD_TIDEWATER}.toml FLEETMESH_AT={OPEN_WORLD_AT} make up" if tw != "none" else "make up",
     }
 
@@ -291,6 +305,7 @@ class Choice:
     scale: float = 1.0
     rate: float | None = None
     policy: str | None = None
+    ai: str = "none"
     replace: bool = False
 
 
@@ -310,10 +325,13 @@ def validate_start(body: Any, entries: list[dict[str, Any]]) -> Choice:
     replace = body.get("replace", False)
     if not isinstance(replace, bool):
         raise BadRequest("replace is true or false")
+    ai = body.get("ai", entry.get("ai", "none"))
+    if ai not in entry.get("ais", ["none"]):
+        raise BadRequest(f"ai {ai!r}: one of {', '.join(entry.get('ais', ['none']))} (an officer's CLI must be installed here)")
     if entry["kind"] == "open_world":
         if any(body.get(k) is not None for k in ("scale", "rate", "policy")):
-            raise BadRequest("the open world takes no options: its fleet, conditions and policy are make up's")
-        return Choice(sid, "open_world", replace=replace)
+            raise BadRequest("the open world takes no options but the AI: its fleet, conditions and policy are make up's")
+        return Choice(sid, "open_world", ai=ai, replace=replace)
     scale = body.get("scale", 1.0)
     if isinstance(scale, bool) or not isinstance(scale, (int, float)) or float(scale) not in SCALES:
         raise BadRequest(f"scale {scale!r}: one of {', '.join(f'{k:g}' for k in SCALES)}")
@@ -323,7 +341,7 @@ def validate_start(body: Any, entries: list[dict[str, Any]]) -> Choice:
     policy = body.get("policy", entry["policy"])
     if policy not in entry["policies"]:
         raise BadRequest(f"policy {policy!r}: one of {', '.join(entry['policies'])}")
-    return Choice(sid, "scenario", scale=float(scale), rate=rate, policy=policy, replace=replace)
+    return Choice(sid, "scenario", scale=float(scale), rate=rate, policy=policy, ai=ai, replace=replace)
 
 
 def command(choice: Choice) -> list[str]:
@@ -337,8 +355,9 @@ def command(choice: Choice) -> list[str]:
 
 def cli_text(choice: Choice, entry: dict[str, Any]) -> str:
     """The same choice as a person types it."""
+    officer = f" AI={choice.ai}" if choice.ai != "none" else ""
     if choice.kind == "open_world":
-        return entry["cli"]
+        return entry["cli"] + officer
     out = [f"make start SCENARIO={choice.scenario}"]
     if choice.scale != 1.0:
         out.append(f"SCALE={choice.scale:g}")
@@ -346,7 +365,7 @@ def cli_text(choice: Choice, entry: dict[str, Any]) -> str:
         out.append(f"FLEETMESH_RATE={choice.rate:g}")
     if choice.policy != entry["policy"]:
         out.append(f"POLICY={POLICIES[choice.policy or 'standard']}")
-    return " ".join(out)
+    return " ".join(out) + officer
 
 
 def launch_env(base: dict[str, str], console_port: int, choice: Choice | None = None, entry: dict[str, Any] | None = None) -> dict[str, str]:
@@ -357,6 +376,8 @@ def launch_env(base: dict[str, str], console_port: int, choice: Choice | None = 
     env.update({"FLEETMESH_WEB": "0", "FLEETMESH_WEB_PORT": str(console_port), "PYTHONUNBUFFERED": "1"})
     if choice is None or entry is None:
         return env
+    if choice.ai != "none":
+        env["FLEETMESH_OFFICER"] = choice.ai
     if choice.kind == "open_world":
         if entry.get("tidewater") not in (None, "none"):
             env.update({"FLEETMESH_SCENARIO": f"tidewater/scenarios/{entry['tidewater']}.toml", "FLEETMESH_AT": entry["at"]})
@@ -596,7 +617,7 @@ class Launch:
 
     def public(self) -> dict[str, Any]:
         c = self.choice
-        options = {} if c.kind == "open_world" else {"scale": c.scale, "rate": c.rate, "policy": c.policy}
+        options = {"ai": c.ai} if c.kind == "open_world" else {"scale": c.scale, "rate": c.rate, "policy": c.policy, "ai": c.ai}
         return {
             "id": self.id,
             "scenario": c.scenario,

@@ -636,6 +636,9 @@ struct Job {
     via: Vec<LonLat>,
     /// Rules 3: tried a route round other traffic during this wait.
     replanned: bool,
+    /// Rules 7: the watch officer turned this job's held order down: its next proposal waits
+    /// `retry_after_s`, and the turn-down counts as a try.
+    turned_down: bool,
 }
 
 impl Job {
@@ -652,6 +655,7 @@ impl Job {
             escalated: false,
             via: Vec::new(),
             replanned: false,
+            turned_down: false,
         }
     }
 }
@@ -1307,6 +1311,53 @@ impl Decision {
         }
     }
 
+    /// Rules 7: the watch officer turned down the dispatcher's held order `id`
+    /// (docs/design/watch-officer.md section 4). The officer gains no authority over it: the
+    /// dispatcher withdraws its own proposal, with the officer's reason, and the job's next
+    /// proposal waits `retry_after_s` with the turn-down counted as a try (so a parcel that never
+    /// improves fails after its tries, an issue, rather than being offered for ever). Only a
+    /// pickup or a deliver the dispatcher holds for a job now.
+    pub(super) fn officer_turn_down(&self, id: IntentId, officer: &AgentId, why: &str) -> Result<(), String> {
+        let (uid, job) = {
+            let rt = self.rt();
+            rt.jobs
+                .iter()
+                .find(|(_, j)| j.intent == Some(id))
+                .map(|(u, j)| (u.clone(), j.clone()))
+                .ok_or_else(|| format!("{id} is not an order the dispatcher holds for a delivery now"))?
+        };
+        if !matches!(job.stage, Stage::Pickup | Stage::Deliver) {
+            return Err(format!("{id} is the dispatcher's {:?}: only a pickup or a deliver can be turned down", job.stage).to_lowercase());
+        }
+        let reason = format!("turned down by the watch officer {officer}: {why}");
+        self.agent_withdraw(&AgentId::new(DISPATCHER), id.0, &reason, Some("pending_approval")).map_err(|e| e.detail)?;
+        if let Some(j) = self.rt().jobs.get_mut(&uid) {
+            j.turned_down = true;
+        }
+        self.log_delivery(
+            "withdrawn",
+            Some(&uid),
+            job.parcel.as_deref(),
+            &format!("{id} withdrawn: the watch officer {officer} turned it down ({why}); the parcel waits {:.0} min", self.auto().retry_after_s / 60.0),
+            json!({ "intent": id.0, "officer": officer.as_str(), "turned_down": true }),
+        );
+        Ok(())
+    }
+
+    /// A dispatcher job for the tests: `intent` held for `uid`'s pickup or delivery of `parcel`.
+    #[cfg(test)]
+    pub(super) fn test_job(&self, uid: &str, parcel: &str, deliver: bool, intent: IntentId) {
+        let stage = if deliver { Stage::Deliver } else { Stage::Pickup };
+        let now = self.clock.now();
+        self.rt().jobs.insert(DUid::new(uid), Job::new(Some(parcel.into()), stage, Some(intent), now.0));
+    }
+
+    /// Whether the tests' job for `uid` was turned down by the officer.
+    #[cfg(test)]
+    pub(super) fn test_turned_down(&self, uid: &str) -> Option<bool> {
+        self.rt().jobs.get(&DUid::new(uid)).map(|j| j.turned_down)
+    }
+
     async fn job_ended(&self, uid: &DUid, job: &Job, id: IntentId, state: State, now: Time) {
         let ok = state == State::Done;
         match job.stage {
@@ -1335,7 +1386,10 @@ impl Decision {
                         }
                         rt.jobs.remove(uid);
                     }
-                    self.rt().cooldown.insert(uid.clone(), now.0 + 120_000);
+                    // rules 7: turned down by the watch officer, the vehicle waits longer before
+                    // it is offered a parcel again
+                    let pause = if job.turned_down { (self.auto().retry_after_s * 1000.0) as i64 } else { 120_000 };
+                    self.rt().cooldown.insert(uid.clone(), now.0 + pause);
                     self.log_delivery("parcel", Some(uid), Some(&p), &format!("pickup of {p} by {uid} ended {state:?}: the parcel is open again"), json!({ "state": "ready" }));
                 }
             }
@@ -1424,7 +1478,14 @@ impl Decision {
                 };
                 self.log_delivery("parcel", Some(uid), Some(&p), &format!("delivery of {p} by {uid} ended {state:?} before the parcel was released (try {tries})"), json!({ "state": "loaded", "ended": format!("{state:?}") }));
                 if tries < 3 && (state != State::Rejected || sequencing) {
-                    let pause = if sequencing { (self.auto().hold_retry_s * 1000.0) as i64 } else { 30_000 };
+                    // rules 7: an order the watch officer turned down waits retry_after_s
+                    let pause = if job.turned_down {
+                        (self.auto().retry_after_s * 1000.0) as i64
+                    } else if sequencing {
+                        (self.auto().hold_retry_s * 1000.0) as i64
+                    } else {
+                        30_000
+                    };
                     let mut rt = self.rt();
                     if let Some(j) = rt.jobs.get_mut(uid) {
                         j.intent = None;

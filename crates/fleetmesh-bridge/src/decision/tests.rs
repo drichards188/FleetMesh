@@ -795,3 +795,8 @@ mod groups;
 /// Operator groups and tasking: the stores an operator writes and an agent only reads
 /// (`tests/operator_stores.rs`).
 mod operator_stores;
+
+/// Rules 7: the AI watch officer's triage through the bridge: an item goes to the officer first,
+/// reaches the person only as it says or at its deadline, and a turned-down order is the
+/// dispatcher's own withdrawal (`tests/triage.rs`).
+mod triage;

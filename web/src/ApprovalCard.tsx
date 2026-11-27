@@ -7,6 +7,7 @@ import { RationaleText } from './Rationale'
 import { StepUpField } from './StepUp'
 import { Proposer } from './Proposer'
 import { DeliveryHolds } from './DeliveryHolds'
+import { OfficerNote } from './OfficerNote'
 import { stepUpProof, stepUpReady, useStepUp } from './stepUpState'
 import { reportView } from './operatorView'
 import { askSentence, DONT_SEND, NOTHING_SENT, placeLine, sendLabel } from './approvalText'
@@ -143,6 +144,7 @@ export function ApprovalCard({ intent: i, vehicles, now, selected, onFocus, onDo
         <span className="ix-id">i{i.id}</span>
         <Countdown intent={i} now={now} />
       </header>
+      <OfficerNote triage={i.triage} />
 
       <p className="ap-ask">{askSentence({ kind: i.kind, params: i.params as Record<string, unknown>, uids: i.uids, group: i.group }, fleet)}</p>
 

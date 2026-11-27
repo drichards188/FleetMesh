@@ -207,6 +207,19 @@ def render(c: dict) -> str:
         gone = " (the bridge no longer lists it)" if c.get("gone") else ""
         return (f"{t} operator tasking {c.get('tasking')} was withdrawn{gone} and no longer applies; it read "
                 f"{quote(c.get('text', ''))}")
+    if k == "triage.item":
+        about = c.get("about") or {}
+        left = ""
+        if isinstance(c.get("deadline_t"), (int, float)) and isinstance(c.get("t"), (int, float)):
+            left = f", {max(0, c['deadline_t'] - c['t']):.0f} s to its deadline"
+        if c.get("class") == "held":
+            codes = ", ".join(c.get("codes") or []) or "no codes"
+            return (f"{t} TRIAGE {c.get('item')}: a held {c.get('item_kind')} on {about.get('uids')} proposed by "
+                    f"{c.get('proposed_by') or 'a person'} ({codes}){left}")
+        return (f"{t} TRIAGE {c.get('item')}: alert {c.get('item_kind')} ({c.get('severity')}) on "
+                f"{about.get('callsign') or about.get('uid')}, the bridge's detail {quote(about.get('detail', ''))}{left}")
+    if k == "triage.gone":
+        return f"{t} {c.get('item')} no longer waits for you (decided, released to the person at its deadline, or gone)"
     if k == "feed.reset":
         return f"{t} the bridge restarted (run {c.get('run')}): read the picture again"
     if k == "feed.truncated":

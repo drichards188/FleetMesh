@@ -19,6 +19,8 @@ reshaped for delivery: nothing in it is connected to anything real.
 - `make setup` takes about 30 minutes; run it detached and look in now and then:
   `mkdir -p logs && setsid nohup make setup > logs/setup.out 2>&1 < /dev/null &`
 - `make start` opens the menu at http://localhost:5173; `make down` stops everything.
+- The menu's AI choice (or `AI=claude` on `make start SCENARIO=...`) adds the AI watch officer,
+  which triages the Inbox before the person on the person's own Claude Code or Codex login.
 
 ## Acting for the person: the boundary
 

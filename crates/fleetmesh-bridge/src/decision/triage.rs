@@ -8,6 +8,9 @@
 //! audit trail (`GET /api/triage`, the audit log's `triage.*` events). Items already in the Inbox
 //! when the officer comes on watch stay with the person.
 //!
+//! Lock order: the decision lock (`Decision::lock`) before this one, never the other way (the tick
+//! takes the decision lock, then this; a reader that wants both reads the engine first and lets go).
+//!
 //! Everything here is a view and a log: no order's state, checks or routing change, and the
 //! officer approves nothing. An order it holds stays `pending_approval` and expires as before;
 //! the routing makes sure it reaches the person first.
@@ -268,14 +271,24 @@ impl Triage {
     /// The officer's verdict on an item it holds, checked against the policy
     /// (docs/design/watch-officer.md section 4): the event to log, or why it is refused.
     pub fn verdict(&mut self, p: &OfficerPolicy, by: &AgentId, item: &str, v: VerdictIn, now: Time) -> Result<EventBody, String> {
+        self.check(p, by, item, &v)?;
         let VerdictIn { verdict, note, recommendation, intents } = v;
+        let r = self.active.get_mut(item).expect("checked");
+        r.stage = Stage::Decided { verdict, note: note.clone(), recommendation: recommendation.clone(), intents: intents.clone(), at: now };
+        Ok(EventBody::TriageVerdict { item: item.to_string(), by: by.clone(), verdict, note, recommendation, intents })
+    }
+
+    /// Whether the officer may give this verdict on this item now (the policy's limits), without
+    /// giving it.
+    pub fn check(&self, p: &OfficerPolicy, by: &AgentId, item: &str, v: &VerdictIn) -> Result<(), String> {
+        let (verdict, note, recommendation) = (v.verdict, &v.note, &v.recommendation);
         if by.as_str() != p.agent {
             return Err(format!("only the watch officer ({}) triages the Inbox", p.agent));
         }
         if !self.on_watch {
             return Err("the officer is not on watch".into());
         }
-        let r = self.active.get_mut(item).ok_or_else(|| {
+        let r = self.active.get(item).ok_or_else(|| {
             if item.starts_with("intent:") || item.starts_with("alert:") {
                 format!("{item} is not with the officer: it is arriving (its triage starts within a second: try again) or no longer in the Inbox")
             } else {
@@ -311,8 +324,31 @@ impl Triage {
                 }
             }
         }
-        r.stage = Stage::Decided { verdict, note: note.clone(), recommendation: recommendation.clone(), intents: intents.clone(), at: now };
-        Ok(EventBody::TriageVerdict { item: item.to_string(), by: by.clone(), verdict, note, recommendation, intents })
+        Ok(())
+    }
+
+    /// The items waiting for the officer's verdict now, with what to tell it of each (the
+    /// change feed's `triage.item`).
+    pub fn waiting(&self) -> Vec<(String, Value)> {
+        self.active
+            .values()
+            .filter_map(|r| match r.stage {
+                Stage::Officer { deadline } => Some((
+                    r.item.clone(),
+                    json!({
+                        "item": r.item,
+                        "class": r.input.class,
+                        "item_kind": r.input.kind,
+                        "severity": r.input.severity,
+                        "codes": r.input.codes,
+                        "proposed_by": r.input.agent,
+                        "about": r.about,
+                        "deadline_t": deadline.0 as f64 / 1000.0,
+                    }),
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The officer's view of what it holds, and the counts the person's Inbox shows.

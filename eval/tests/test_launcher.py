@@ -81,3 +81,19 @@ def test_a_launch_runs_its_own_choice_whatever_the_shell_exported(entries):
     assert env["FLEETMESH_RATE"] == f"{e['rate']:g}" and env["POLICY"] == "sim/policy.toml"
     quarter = L.launch_env(shell, 5173, L.validate_start({"scenario": "harbour-city", "scale": 0.25, "policy": "strict"}, entries), e)
     assert quarter["SCALE"] == "0.25" and quarter["POLICY"] == "sim/policy-strict.toml"
+
+
+def test_the_ai_choice_is_only_a_cli_installed_here(entries, monkeypatch):
+    for e in entries:
+        assert e["ai"] == "none" and e["ais"][0] == "none"
+        assert set(e["ais"]) <= {"none", "claude", "codex"}
+    e = dict(by_id(entries, "harbour-city"), ais=["none", "claude"])
+    c = L.validate_start({"scenario": "harbour-city", "ai": "claude"}, [e])
+    assert c.ai == "claude"
+    assert L.cli_text(c, e) == "make start SCENARIO=harbour-city AI=claude"
+    env = L.launch_env({"FLEETMESH_OFFICER": "codex", "AI": "codex"}, 5173, c, e)
+    assert env["FLEETMESH_OFFICER"] == "claude" and "AI" not in env
+    none = L.launch_env({"FLEETMESH_OFFICER": "codex"}, 5173, L.validate_start({"scenario": "harbour-city"}, [e]), e)
+    assert "FLEETMESH_OFFICER" not in none, "a shell's officer never rides along"
+    with pytest.raises(L.BadRequest):
+        L.validate_start({"scenario": "harbour-city", "ai": "codex"}, [e])

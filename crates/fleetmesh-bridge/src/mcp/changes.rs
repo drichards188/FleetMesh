@@ -93,6 +93,9 @@ struct Digest {
     intents: BTreeMap<u64, Int>,
     /// Review flags by id (`F-<n>`): status, and what to say about a new one.
     flags: BTreeMap<String, (String, Value)>,
+    /// Rules 7: the Inbox items waiting for the watch officer's triage, by item key, with what
+    /// to say about each (docs/design/watch-officer.md).
+    triage: BTreeMap<String, Value>,
     /// The newest vehicle event this digest covers (its `RecentEvent::seq`).
     events_seq: u64,
 }
@@ -208,6 +211,7 @@ fn digest(mcp: &Mcp) -> (Digest, Vec<RecentEvent>) {
             },
         );
     }
+    d.triage = mcp.decision.triage_waiting().into_iter().collect();
     let events = mcp.decision.recent_events(None, EVENTS_PER_READ);
     d.events_seq = events.first().map_or(0, |e| e.seq);
     (d, events)
@@ -337,6 +341,17 @@ fn diff(a: &Digest, b: &Digest, events: &[RecentEvent]) -> Diff {
     for (id, al) in &a.alerts {
         if !b.alerts.contains_key(id) {
             out.push(("alert.cleared", None, al.summary.clone()));
+        }
+    }
+    // rules 7: an item came to the officer for triage, or left it without a verdict
+    for (item, about) in &b.triage {
+        if !a.triage.contains_key(item) {
+            out.push(("triage.item", None, about.clone()));
+        }
+    }
+    for (item, about) in &a.triage {
+        if !b.triage.contains_key(item) {
+            out.push(("triage.gone", None, with(about, json!({ "now": "no longer waiting for you (decided, released to the person at its deadline, or gone from the Inbox)" }))));
         }
     }
     if b.events_seq > a.events_seq {

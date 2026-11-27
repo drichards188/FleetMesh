@@ -463,7 +463,10 @@ pub fn tools() -> Vec<Tool> {
                  their link, changed navigation readiness or source, or whose navigation \
                  filter flags its GPS as glitching (a jammed or spoofed fix looks like \
                  this); alerts raised and cleared; intents created or changed state (yours \
-                 marked mine); new vehicle events. Pass the cursor of your last answer as \
+                 marked mine); new vehicle events; and, with a watch officer on watch, Inbox \
+                 items that came to it for triage (triage.item: give each a verdict with \
+                 triage_item before its deadline_t) or left it without one (triage.gone). \
+                 Pass the cursor of your last answer as \
                  since; the first call (no since) answers a cursor to start from, and a \
                  cursor of an earlier bridge answers reset. Changes are seen between reads \
                  (any agent's read refreshes the feed, at most once a second), so a \
@@ -766,20 +769,19 @@ pub async fn call(
             let p = params!(TriageParams);
             use fleetmesh_decide::officer::Verdict;
             let refused = |status: u16, detail: String| DecisionError { status, detail, intent: None };
-            match p.verdict.as_str() {
-                "handled" | "escalated" => {
-                    let verdict = if p.verdict == "handled" { Verdict::Handled } else { Verdict::Escalated };
+            let verdict = match p.verdict.as_str() {
+                "handled" => Some(Verdict::Handled),
+                "escalated" => Some(Verdict::Escalated),
+                "turned_down" => Some(Verdict::TurnedDown),
+                _ => None,
+            };
+            match verdict {
+                Some(verdict) => {
                     let intents = p.intents.iter().map(|i| fleetmesh_decide::IntentId(*i)).collect();
                     let v = crate::decision::triage::VerdictIn { verdict, note: p.note, recommendation: p.recommendation, intents };
                     mcp.decision.triage_verdict(agent, &p.item, v).map_err(|why| refused(403, why))
                 }
-                // the dispatcher holding a parcel back after the officer turns its order down
-                // comes with bd fleetmesh-ic4.2
-                "turned_down" => Err(refused(
-                    409,
-                    "turning down a dispatcher's order is not available yet: escalate it with your recommendation".into(),
-                )),
-                other => Err(refused(400, format!("verdict {other:?}: handled, escalated or turned_down"))),
+                None => Err(refused(400, format!("verdict {:?}: handled, escalated or turned_down", p.verdict))),
             }
         }
         "withdraw_intent" => {

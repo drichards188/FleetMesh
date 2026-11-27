@@ -11,6 +11,7 @@ import { agoWhen, plainText } from './plainText'
 import { RationaleText } from './Rationale'
 import { reviewEntries } from './reviewEntries'
 import { ApprovalCard } from './ApprovalCard'
+import { OfficerLog, OfficerNote } from './OfficerNote'
 import { askFleet, nameOf } from './approvalFleet'
 import { Proposer } from './Proposer'
 import { askSentence } from './approvalText'
@@ -19,7 +20,7 @@ import { fmtWorldZ } from './scenarioClock'
 import type { Tasking, Vehicle } from './types'
 import './inbox.css'
 
-export type InboxTab = 'inbox' | 'decisions'
+export type InboxTab = 'inbox' | 'decisions' | 'officer'
 
 /** What the operator is looking at: an intent (`i2`) or an alert (`link:3`). */
 export type InboxSelection = { kind: 'intent'; id: number } | { kind: 'alert'; id: string } | null
@@ -128,6 +129,7 @@ function AlertCard({
         {who && <span className="ix-who">{who}</span>}
         <span className="ix-age" title="since">since {fmtWorldZ(a.since_t * 1000)}</span>
       </header>
+      <OfficerNote triage={a.triage} />
       {/* the consequence first, the bridge's detail with its epoch stamps in words under More */}
       <Bluf
         className="ix-adetail"
@@ -399,6 +401,9 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
     })
   }
   const { needs, info } = inboxOrder(items)
+  // rules 7: an AI watch officer is on this run (on watch now, or it settled something): its log
+  const officerCounts = decisions?.inbox.counts.triage
+  const officerRun = !!officerCounts && (officerCounts.on_watch || officerCounts.handled > 0 || officerCounts.with_officer > 0)
   // the policy's route, said once for every approval below (not on each card)
   const routes = [...new Set(pending.map((i) => i.policy?.reason).filter((r): r is string => !!r))]
 
@@ -413,6 +418,11 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
           <button className={tab === 'decisions' ? 'on' : ''} onClick={() => setTab('decisions')}>
             Decisions
           </button>
+          {officerRun && (
+            <button className={tab === 'officer' ? 'on' : ''} onClick={() => setTab('officer')} title="Every item the AI watch officer triaged: what it settled without you, and what it passed on">
+              Officer log{officerCounts?.handled ? ` (${officerCounts.handled})` : ''}
+            </button>
+          )}
         </div>
         <button className="ghost close" onClick={onClose} aria-label="Close inbox">
           Close
@@ -430,7 +440,9 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
       )}
 
       <div className="ix-scroll">
-        {tab === 'decisions' ? (
+        {tab === 'officer' ? (
+          <OfficerLog />
+        ) : tab === 'decisions' ? (
           <DecisionsList intents={intents} vehicles={vehicles} now={now} />
         ) : (
           <>

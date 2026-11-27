@@ -131,11 +131,25 @@ SCRUB = {
 }
 
 
+# A Claude Code session that started the stack (a person asking Claude Code to run it) marks its
+# children as its own: the officer's CLI is a session of its own, never a child of that one, so
+# these markers never reach it (not credentials: a provider setting such as
+# CLAUDE_CODE_USE_BEDROCK stays).
+PARENT_SESSION = (
+    "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+)
+
+
 def child_env(provider: str, extra: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
     """The environment for the CLI: ours without the API-key variables (their names are
-    returned, never their values), plus `extra`."""
+    returned, never their values) and without a parent Claude Code session's markers, plus
+    `extra`."""
     env = dict(os.environ)
     removed = [k for k in SCRUB[provider] if env.pop(k, None) is not None]
+    for k in PARENT_SESSION:
+        env.pop(k, None)
     env.update(extra or {})
     return env, removed
 

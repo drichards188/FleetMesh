@@ -26,6 +26,12 @@
 #   FLEETMESH_WEB_PORT          5173   console (vite)
 #   FLEETMESH_TIDEWATER_PORT    8770   tidewater serve (reused if one already answers there)
 #   FLEETMESH_TRAFFIC_HTTP_PORT 8767   traffic simulator HTTP (/health /sensors /truth /stats)
+#
+# FLEETMESH_OFFICER=claude (or codex) also starts the AI watch officer (agents/watch_officer.py,
+# docs/design/watch-officer.md) on the user's own CLI login, once the bridge answers: it triages
+# the Inbox before the person. Its CLI and login are checked before anything starts; an officer
+# that stops later (a budget spent, a usage limit) leaves the stack running and the person gets
+# every item. `make start SCENARIO=harbour-city AI=claude` sets it.
 #   FLEETMESH_TRAFFIC_SBS_PORT  8768   traffic simulator ADS-B feed (TCP, SBS text)
 #   FLEETMESH_TRAFFIC_AIS_PORT  8769   traffic simulator AIS feed (TCP, NMEA)
 #   FLEETMESH_TRAFFIC_JSON_PORT 8771   traffic simulator JSON feed (TCP)
@@ -150,10 +156,27 @@ case "${FLEETMESH_AUTH:-dev}" in
   *) echo "FLEETMESH_AUTH=${FLEETMESH_AUTH}: dev (the default) or credentials" >&2; exit 1 ;;
 esac
 
+# rules 7: the AI watch officer, when asked for: its CLI and login before anything starts
+officer="${FLEETMESH_OFFICER:-}"
+[ "$officer" = none ] && officer=""
+if [ -n "$officer" ]; then
+  case "$officer" in
+    claude|codex) ;;
+    *) echo "FLEETMESH_OFFICER=$officer: claude, codex or none" >&2; exit 1 ;;
+  esac
+  if ! .venv/bin/python agents/watch_officer.py --backend "$officer" --preflight > logs/officer-preflight.log 2>&1; then
+    echo "officer: the $officer CLI is not ready (logs/officer-preflight.log):" >&2
+    tail -3 logs/officer-preflight.log >&2
+    exit 1
+  fi
+fi
+
 echo $$ > logs/up.pid
 pids=()
+officer_pid=""
 cleanup() {
   trap - INT TERM EXIT
+  [ -n "$officer_pid" ] && kill "$officer_pid" 2>/dev/null || true
   [ ${#pids[@]} -gt 0 ] && kill "${pids[@]}" 2>/dev/null || true
   wait 2>/dev/null || true
   rm -f logs/up.pid logs/tidewater-serve.pid logs/linkemu.pid logs/traffic.pid
@@ -292,6 +315,24 @@ if [ -n "${FLEETMESH_SCENARIO:-}" ]; then
       --rate "${FLEETMESH_RATE:-1}" --instances "$instances" > logs/tidewater.log 2>&1 & pids+=($!)
   fi
   echo "tidewater: $FLEETMESH_SCENARIO from $FLEETMESH_AT (logs/tidewater*.log)"
+fi
+
+# rules 7: the officer starts once the bridge answers; not among the processes whose exit stops
+# the stack (its items go to the person without it)
+if [ -n "$officer" ]; then
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  brief_args=()
+  if [ -n "${FLEETMESH_SCENARIO_DIR:-}" ] && [ -f "$FLEETMESH_SCENARIO_DIR/scenario.toml" ]; then
+    .venv/bin/python -c 'import sys, tomllib; sc = tomllib.load(open(sys.argv[1], "rb")); print("# " + str(sc.get("title", "")) + "\n\n" + str(sc.get("brief", "")).strip())' \
+      "$FLEETMESH_SCENARIO_DIR/scenario.toml" > "logs/officer-brief-$stamp.md" && brief_args=(--brief "logs/officer-brief-$stamp.md")
+  fi
+  (
+    for _ in $(seq 180); do curl -sf -m 2 "http://127.0.0.1:$FLEETMESH_HTTP_PORT/api/state" > /dev/null && break; sleep 1; done
+    exec .venv/bin/python agents/watch_officer.py --backend "$officer" --url "http://127.0.0.1:$FLEETMESH_HTTP_PORT/mcp" \
+      --agent agent-watch --situation-log "logs/officer-$stamp.jsonl" --minutes 1440 "${brief_args[@]}"
+  ) > logs/officer.log 2>&1 &
+  officer_pid=$!
+  echo "officer: the AI watch officer on your $officer login triages the Inbox (logs/officer.log, logs/officer-$stamp.jsonl)"
 fi
 
 echo "$starting starting; logs in ./logs"

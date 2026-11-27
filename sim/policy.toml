@@ -65,8 +65,8 @@ agent = "agent-watch"
 absent_after_s = 20
 
 [officer.deadline_s]
-held = 30              # an order waiting for a person
-alert = 60
+held = 60              # an order waiting for a person (a model's turn takes tens of seconds)
+alert = 90
 before_expiry_s = 15   # an order reaches the person at least this long before its approval expires
 
 # straight to the person, never held for the officer
@@ -78,9 +78,10 @@ severity = []
 # what the officer may settle without the person; anything else it may only pass on
 [officer.handle]
 alerts = ["drop_not_clear", "delivery_failed", "return_failed", "parcel_no_vehicle", "zone_not_approved", "fleet_conflict", "return_held", "traffic_conflict"]
-# the dispatcher's held orders it may turn down, when every holding code is one of these (bd
-# fleetmesh-ic4.2 builds the dispatcher's side); never a safety order
-turn_down = { kinds = ["deliver", "pickup", "reroute"], codes = ["ENERGY_MARGIN_THIN", "PAYLOAD_NEAR_MAX", "WX_GUST_LIMIT"] }
+# the dispatcher's held pickups and deliveries it may turn down, when every holding code is one of
+# these: the dispatcher withdraws its own order and offers the parcel again after the scenario's
+# retry_after_s, the turn-down counting as a try; never a safety order
+turn_down = { kinds = ["deliver", "pickup"], codes = ["ENERGY_MARGIN_THIN", "PAYLOAD_NEAR_MAX", "WX_GUST_LIMIT_MARGINAL"] }
 
 [approval]
 expire_s = 120                              # a pending approval waits this long, then expires

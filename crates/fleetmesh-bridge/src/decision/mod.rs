@@ -2296,6 +2296,12 @@ impl Decision {
         self.triage.lock().unwrap_or_else(|e| e.into_inner()).json(officer.as_ref())
     }
 
+    /// The items waiting for the watch officer's verdict (rules 7; the change feed's
+    /// `triage.item`).
+    pub fn triage_waiting(&self) -> Vec<(String, Value)> {
+        self.triage.lock().unwrap_or_else(|e| e.into_inner()).waiting()
+    }
+
     /// An agent made an MCP call: the watch officer's presence (rules 7).
     pub fn agent_seen(&self, agent: &fleetmesh_decide::AgentId) {
         let officer = self.lock().engine.policy().officer.as_ref().map(|o| o.agent.clone());
@@ -2306,12 +2312,26 @@ impl Decision {
 
     /// The watch officer's verdict on an item it holds (rules 7, docs/design/watch-officer.md
     /// section 4): logged, or refused with why.
-    pub fn triage_verdict(&self, by: &fleetmesh_decide::AgentId, item: &str, v: triage::VerdictIn) -> Result<Value, String> {
+    pub fn triage_verdict(&self, by: &fleetmesh_decide::AgentId, item: &str, mut v: triage::VerdictIn) -> Result<Value, String> {
         let verdict = v.verdict;
-        let mut core = self.lock();
-        let Some(officer) = core.engine.policy().officer.clone() else {
+        let Some(officer) = self.lock().engine.policy().officer.clone() else {
             return Err("this run's policy has no [officer]: nothing is triaged".into());
         };
+        // turning down a dispatcher's order: the policy's limits first, then the dispatcher
+        // withdraws its own proposal, then the verdict is logged (docs/design/watch-officer.md 4)
+        if verdict == fleetmesh_decide::officer::Verdict::TurnedDown {
+            self.triage.lock().unwrap_or_else(|e| e.into_inner()).check(&officer, by, item, &v)?;
+            let id = item
+                .strip_prefix("intent:")
+                .and_then(|n| n.parse::<u64>().ok())
+                .map(IntentId)
+                .ok_or_else(|| format!("{item} is not an order"))?;
+            self.officer_turn_down(id, by, &v.note)?;
+            if !v.intents.contains(&id) {
+                v.intents.insert(0, id);
+            }
+        }
+        let mut core = self.lock();
         let now = self.clock.now();
         let ev = {
             let mut t = self.triage.lock().unwrap_or_else(|e| e.into_inner());
@@ -2360,47 +2380,57 @@ impl Decision {
     /// out, an escalated item with its recommendation) or for an agent (`officer` true: every
     /// item, each with where it stands in triage) (rules 7, [`triage`]).
     fn inbox_view(&self, officer: bool) -> Value {
-        let triage = self.triage.lock().unwrap_or_else(|e| e.into_inner());
-        let pending: Vec<Value> = {
+        // the engine's and the alerts' reads first, then triage's: never the triage lock while
+        // taking the decision lock (the tick takes the decision lock, then triage's)
+        let held: Vec<(IntentId, Value)> = {
             let core = self.lock();
             core.engine
                 .inbox()
                 .into_iter()
-                .filter_map(|i| {
-                    let (shown, note) = triage.view(&triage::intent_key(i.id()));
+                .map(|i| {
+                    let mut v = intent_json(i, None, self.tol());
+                    v["why"] = json!(why_human(i));
+                    (i.id(), v)
+                })
+                .collect()
+        };
+        let mut alerts = self.current_alerts();
+        let mut alert_notes: BTreeMap<String, Value> = BTreeMap::new();
+        let (pending, triage_counts) = {
+            let triage = self.triage.lock().unwrap_or_else(|e| e.into_inner());
+            let pending: Vec<Value> = held
+                .into_iter()
+                .filter_map(|(id, mut v)| {
+                    let key = triage::intent_key(id);
+                    let (shown, note) = triage.view(&key);
                     if !shown && !officer {
                         return None;
                     }
-                    let mut v = intent_json(i, None, self.tol());
-                    v["why"] = json!(why_human(i));
                     if let Some(n) = note {
                         v["triage"] = n;
                     } else if !shown {
                         v["triage"] = json!({ "stage": "with_officer" });
                     }
                     if officer && v["triage"].is_object() {
-                        v["triage"]["item"] = json!(triage::intent_key(i.id()));
+                        v["triage"]["item"] = json!(key);
                     }
                     Some(v)
                 })
-                .collect()
-        };
-        let mut alerts = self.current_alerts();
-        let mut alert_notes: BTreeMap<String, Value> = BTreeMap::new();
-        alerts.retain(|a| {
-            let key = triage::alert_key(&a.id);
-            let (shown, note) = triage.view(&key);
-            let note = note.or_else(|| (!shown).then(|| json!({ "stage": "with_officer" })));
-            if let Some(mut n) = note {
-                if officer {
-                    n["item"] = json!(key);
+                .collect();
+            alerts.retain(|a| {
+                let key = triage::alert_key(&a.id);
+                let (shown, note) = triage.view(&key);
+                let note = note.or_else(|| (!shown).then(|| json!({ "stage": "with_officer" })));
+                if let Some(mut n) = note {
+                    if officer {
+                        n["item"] = json!(key);
+                    }
+                    alert_notes.insert(a.id.clone(), n);
                 }
-                alert_notes.insert(a.id.clone(), n);
-            }
-            shown || officer
-        });
-        let triage_counts = triage.counts();
-        drop(triage);
+                shown || officer
+            });
+            (pending, triage.counts())
+        };
         // rules 5: orders held for vehicles the link can't carry them to now
         let queued = {
             let core = self.lock();

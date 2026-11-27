@@ -12,6 +12,8 @@ export type Stage = 'waiting' | 'starting' | 'bridge' | 'ready' | 'running' | 'e
 /** the drop-zone procedure: standing approvals (sim/policy.toml) or the strict comparison one
  *  (sim/policy-strict.toml, a person confirms each zone every hour) */
 export type PolicyId = 'standard' | 'strict'
+/** the AI watch officer (docs/design/watch-officer.md) on the user's own CLI, or none */
+export type AiMode = 'none' | 'claude' | 'codex'
 
 /** A delivery scenario's fleet at a fraction of its size (SCALE), as sim/swarm.py plans it. */
 export interface ScaleOption {
@@ -55,6 +57,9 @@ export interface Scenario {
   policies?: PolicyId[]
   /** simulated air and sea traffic around the fleet */
   traffic?: boolean
+  /** the AI watch officer: the default, and the choices (none, and each CLI installed here) */
+  ai?: AiMode
+  ais?: AiMode[]
   /** the same from a terminal */
   cli?: string
 }
@@ -64,6 +69,7 @@ export interface LaunchOptions {
   scale?: number
   rate?: number
   policy?: PolicyId
+  ai?: AiMode
 }
 
 /** One launch: its stages as the launcher saw them, and its end. */
@@ -126,6 +132,7 @@ export interface StartRequest {
   scale?: number
   rate?: number
   policy?: PolicyId
+  ai?: AiMode
   /** end the running scenario first */
   replace?: boolean
 }

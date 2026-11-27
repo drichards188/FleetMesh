@@ -27,6 +27,11 @@ here is connected to anything real.
   lost link) and routed by policy: sent at once, or held for a person.
 - **Agents propose and explain; they never approve.** Approval is a person's, and the engine
   enforces it.
+- **An AI watch officer triages the Inbox, if you want one.** On your own Claude Code or Codex
+  login, it sees every held order and alert first, settles what the policy lets it (alerts
+  automation already dealt with, a dispatcher's order it turns down), and passes the rest to you
+  with its recommendation. Anything it has not decided by its deadline reaches you anyway, and the
+  Officer log lists everything it handled for you to audit.
 - **Every decision is logged** in a hash-chained audit log that replay can re-derive. Behaviour
   changes are versioned rules, so an old log replays under the rules it ran with.
 - **Other traffic, seen as a private company would see it.** A simulator flies arrivals and
@@ -66,7 +71,8 @@ make down                         # stops everything
 ```
 
 `make start` alone opens the menu at http://localhost:5173; with `SCENARIO=` it starts that
-scenario (add `SCALE=0.25` for a fraction of its fleet). The bridge answers at http://127.0.0.1:8765.
+scenario (add `SCALE=0.25` for a fraction of its fleet, `AI=claude` or `AI=codex` for the AI watch
+officer). The bridge answers at http://127.0.0.1:8765.
 `POLICY=sim/policy-strict.toml` runs a scenario with a person confirming every drop zone, for
 comparison. See `AGENTS.md` for more on using it, and `CLAUDE.md` for developers.
 
