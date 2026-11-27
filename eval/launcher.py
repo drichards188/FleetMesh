@@ -12,8 +12,8 @@ menu asks:
 - a delivery scenario (sim/scenarios/<name>/scenario.toml): what `make start SCENARIO=<name>`
   runs (`scripts/scenario.sh` itself: its fleet on stand-ins, its hubs, demand, scripted events
   and traffic, tidewater's tide, current and wind when the data is in the checkout), with the
-  options scenario.sh takes: a fraction of the fleet and demand (SCALE), a faster scenario clock
-  (FLEETMESH_RATE) and the strict drop-zone procedure (POLICY);
+  options scenario.sh takes: a fraction of the fleet and demand (SCALE) and the strict drop-zone
+  procedure (POLICY);
 - the open world: what `make up` runs with tidewater's conditions (the delivery demo fleet in
   ArduPilot SITL, no demand, nothing scripted), offered only when SITL is built here.
 
@@ -32,8 +32,8 @@ whatever it started and says why, with its log.
 The API, on 127.0.0.1 only (the console reaches it through Vite's proxy under /launcher):
 
     GET  /launcher/api/state   the scenarios, and the current launch with its progress
-    POST /launcher/api/start   {"scenario": <id>, "scale": 1 | 0.5 | 0.25, "rate": <one the
-                               scenario offers>, "policy": "standard" | "strict",
+    POST /launcher/api/start   {"scenario": <id>, "scale": 1 | 0.5 | 0.25,
+                               "policy": "standard" | "strict",
                                "replace": true (end the running one first)}
     POST /launcher/api/end     end the running scenario
     POST /launcher/api/console {"mode": "build" | "dev"}: how the console is served (eval/webconsole.py)
@@ -82,10 +82,11 @@ OPEN_WORLD_TIDEWATER = "golden-gate-weather"
 OPEN_WORLD_AT = "2026-06-14T10:00:00Z"
 ARDUPILOT = Path(os.environ.get("ARDUPILOT_HOME") or Path.home() / "ardupilot")
 # what a scenario offers (scripts/scenario.sh's settings): a fraction of its fleet and demand,
-# a faster clock besides its own, and the drop-zone procedure (the strict one is the comparison
-# setting of docs/DECISIONS.md, 2026-11-25)
+# and the drop-zone procedure (the strict one is the comparison setting of docs/DECISIONS.md,
+# 2026-11-25). No faster clock: FLEETMESH_RATE speeds only the conditions' clock (tidewater), while
+# the delivery runtime's parcels and scripted events keep real time (bd fleetmesh-uef).
 SCALES = (1.0, 0.5, 0.25)
-RATES = (1, 2, 5)
+RATES: tuple[int, ...] = ()
 POLICIES = {"standard": "sim/policy.toml", "strict": "sim/policy-strict.toml"}
 # the default stack's ports (scripts/up.sh's defaults; each FLEETMESH_* variable overrides one)
 DEFAULT_PORTS = {

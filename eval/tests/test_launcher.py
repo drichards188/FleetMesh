@@ -44,10 +44,10 @@ def test_the_open_world_comes_last_when_it_runs_here():
 
 
 def test_a_start_takes_only_what_the_scenario_offers(entries):
-    c = L.validate_start({"scenario": "harbour-city", "scale": 0.25, "rate": 5, "policy": "strict"}, entries)
-    assert (c.kind, c.scale, c.rate, c.policy) == ("scenario", 0.25, 5, "strict")
+    c = L.validate_start({"scenario": "harbour-city", "scale": 0.25, "policy": "strict"}, entries)
+    assert (c.kind, c.scale, c.rate, c.policy) == ("scenario", 0.25, 1, "strict")
     assert L.command(c) == ["scripts/scenario.sh", "harbour-city"]
-    assert L.cli_text(c, by_id(entries, "harbour-city")) == "make start SCENARIO=harbour-city SCALE=0.25 FLEETMESH_RATE=5 POLICY=sim/policy-strict.toml"
+    assert L.cli_text(c, by_id(entries, "harbour-city")) == "make start SCENARIO=harbour-city SCALE=0.25 POLICY=sim/policy-strict.toml"
     d = L.validate_start({"scenario": "wind-event"}, entries)
     assert (d.scale, d.rate, d.policy) == (1.0, by_id(entries, "wind-event")["rate"], "standard")
     assert L.cli_text(d, by_id(entries, "wind-event")) == "make start SCENARIO=wind-event"
@@ -60,7 +60,7 @@ def test_a_start_takes_only_what_the_scenario_offers(entries):
         {"scenario": "../harbour-city"},
         {"scenario": "harbour-city", "scale": 0.3},
         {"scenario": "harbour-city", "scale": True},
-        {"scenario": "harbour-city", "rate": 3},
+        {"scenario": "harbour-city", "rate": 5},
         {"scenario": "harbour-city", "policy": "sim/other.toml"},
         {"scenario": "harbour-city", "operator": "live"},
         {"scenario": "harbour-city", "replace": "yes"},
