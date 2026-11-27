@@ -156,6 +156,8 @@ class Proc:
 
 class ClaudeBackend:
     provider = PROVIDER
+    # what the CLI puts before each FleetMesh tool's name (a bare name is refused)
+    tool_prefix = FLEETMESH_PREFIX
 
     def __init__(self, cfg: ClaudeConfig, run_dir: Path, url: str, agent: str, key: str | None,
                  prompt_path: Path, max_turns: int = 12):

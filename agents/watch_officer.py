@@ -45,7 +45,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from watch.backend import BackendCrashed, LimitReached, LockdownBreach, PreflightError  # noqa: E402
-from watch.claude import ClaudeBackend, ClaudeConfig  # noqa: E402
+from watch.claude import FLEETMESH_PREFIX, ClaudeBackend, ClaudeConfig  # noqa: E402
 from watch.codex import CodexBackend, CodexConfig  # noqa: E402
 from watch.limits import LimitHit  # noqa: E402
 from watch.picture import NoChangesTool, Poller, compose, render_mine  # noqa: E402
@@ -89,13 +89,45 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def build_prompt(brief: str | None, tasking: bool = False) -> str:
+def build_prompt(brief: str | None, tasking: bool = False, tool_prefix: str = "") -> str:
     """The system prompt: agents/watch/prompt.md, the operator tasking section where the driver
-    reads the operator's tasking (`tasking`), and the run's brief."""
+    reads the operator's tasking (`tasking`), the names the CLI gives the FleetMesh tools where it
+    prefixes them (`tool_prefix`), and the run's brief."""
     base = PROMPT.read_text().rstrip()
     if tasking:
         base += "\n\n" + TASKING_PROMPT.read_text().rstrip()
+    if tool_prefix:
+        base += "\n\n" + tool_names_section(tool_prefix)
     return base + "\n\n## Situation brief\n\n" + ((brief or "").strip() or "(no brief given)") + "\n"
+
+
+def tool_names_section(prefix: str) -> str:
+    """This prompt names the tools bare (`triage_item`); a CLI that prefixes them refuses a bare
+    name, and a model refused once may decide the tool is not there (live, 2026-11-27: every
+    verdict of a run refused, every item reaching the person at its deadline)."""
+    return ("## Your tools' names\n\n"
+            f"In this CLI every FleetMesh tool carries the server's prefix: call `get_inbox` as "
+            f"`{prefix}get_inbox`, `triage_item` as `{prefix}triage_item`, and so on for each tool named "
+            "here. A bare name is refused and does nothing; the tool is there under its full name.")
+
+
+def misnamed(refused: list[dict], bridge_tools: set[str], prefix: str) -> list[str]:
+    """The FleetMesh tools a turn called by their bare name where the CLI names them with its
+    prefix: refused, so nothing it meant reached the bridge."""
+    out: list[str] = []
+    for r in refused:
+        name = str(r.get("name") or "")
+        if prefix and not name.startswith(prefix) and name in bridge_tools and name not in out:
+            out.append(name)
+    return out
+
+
+def rename_note(names: list[str], prefix: str) -> str:
+    """What the officer is told at once after calling a tool by its bare name."""
+    calls = ", ".join(f"`{n}` is `{prefix}{n}`" for n in names)
+    return (f"The CLI refused your call{'s' if len(names) > 1 else ''} by the bare name: {calls}. "
+            "The tool is there under that full name. Nothing you meant reached the bridge: make those "
+            "calls again now by the full name, with the same arguments, before the items' deadlines.")
 
 
 class RunDirError(ValueError):
@@ -648,6 +680,31 @@ class Officer:
                            text=f"the model asked for {r.get('name')}, outside the FleetMesh server; the CLI refused it")
         for u in turn.unknown_items:
             self.log.write("lockdown.unknown_item", n=wake.n, item_type=u.get("type"), item=u.get("item"))
+        prefix = getattr(self.backend, "tool_prefix", "")
+        bad = misnamed(turn.refused, self.bridge_tools, prefix)
+        if bad and turn.stop != "error":
+            # told at once, it calls them again by the full name, so its verdicts land before their
+            # deadlines instead of every item reaching the person untriaged
+            self.log.write("tools.renamed", n=wake.n, tools=bad)
+            try:
+                again = await self.race((self.backend.escalate if escalate else self.backend.turn)(rename_note(bad, prefix), deadline))
+            except Stopped:
+                raise
+            except LockdownBreach as e:
+                if e.turn is not None:
+                    self.log.write("turn", n=wake.n, escalated=escalate, retry="renamed", **e.turn.as_dict())
+                self.log.write("lockdown.breach", n=wake.n, error=str(e))
+                self.log.write("error", n=wake.n, error=f"lockdown breach: {e}; the run stops")
+                return "lockdown"
+            except (LimitReached, BackendCrashed) as e:
+                self.log.write("error", n=wake.n, error=f"calling them again by the full name did not run: {e}")
+            else:
+                self.turns += 1
+                self.proposed += again.proposals()
+                self.log.write("turn", n=wake.n, escalated=escalate, retry="renamed", **again.as_dict())
+                for r in again.refused:
+                    self.log.write("lockdown.refused", n=wake.n, tool=r.get("name"), input=r.get("input"),
+                                   text=f"the model asked for {r.get('name')}, outside the FleetMesh server; the CLI refused it")
         if turn.stop == "error":
             # an error turn (overloaded after the CLI's retries, say): what it was told
             # comes back for the next wake, an escalation it spent is returned
@@ -808,7 +865,8 @@ async def main_async(args) -> int:
     until = args.until if args.until else time.time() + args.minutes * 60
     brief = args.brief.read_text() if args.brief else None
     # the operator tasking section only where the driver reads the operator's tasking
-    prompt_text = build_prompt(brief, tasking=not args.no_tasking)
+    # Claude Code names an MCP server's tools mcp__<server>__<tool>; Codex's are its own
+    prompt_text = build_prompt(brief, tasking=not args.no_tasking, tool_prefix=FLEETMESH_PREFIX if args.backend == "claude" else "")
     try:
         run_dir = make_run_dir(args.run_dir)
     except RunDirError as e:
