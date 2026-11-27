@@ -3,7 +3,7 @@ title = "Drone hub during a wind event"
 tidewater = "golden-gate-weather"
 at = "2026-06-14T17:00:00Z"
 rate = 1
-duration_s = 4200
+duration_s = 1500
 seed = 22
 fleet = "fleet.toml"
 dispatch = "dispatch.toml"
@@ -17,7 +17,7 @@ order = 2
 brief = """
 One drone hub at Crissy Field and its delivery drones, serving about 30 drop zones within 4 km: the Presidio, the Marina, Fort Mason and Fort Point.
 
-Conditions move from fine to marginal to forbidden and back over the scenario. Scripted gusts ramp through the drones' soft limit (11 m/s) and past the hard one (14 m/s) over the archive's real mean wind, so holds pile up in the Inbox and then drain.
+Conditions move from fine to marginal to forbidden and back within the first quarter of an hour. Scripted gusts ramp through the drones' soft limit (11 m/s) about a minute in and past the hard one (14 m/s) at about 8 minutes, over the archive's real mean wind, so holds pile up in the Inbox and then drain.
 
 The question it asks: when the weather turns, how do the number and kind of decisions change, and does the operator keep up?
 """
@@ -25,8 +25,8 @@ The question it asks: when the weather turns, how do the number and kind of deci
 [summary]
 headline = "A drone hub in a wind event: gusts through the soft and hard limits, then recovery"
 bullets = [
-  "0 to 25 min: gusts of 7 to 7.5 m/s, routine deliveries",
-  "25 min: gusts of 12.5 m/s, into the soft band; payloads derate and marginal orders are held",
-  "40 min: gusts of 15.5 m/s, past the hard limit; airborne drones should be ordered home",
-  "45 to 60 min: gusts ease to 12 and then 8 m/s; the backlog drains",
+  "1 min: gusts pass the drones' 11 m/s soft limit; payloads derate and marginal orders are held",
+  "8 min: gusts pass the 14 m/s hard limit, peaking at 15.5 m/s at 10 min; airborne drones should be ordered home",
+  "11 to 15 min: gusts ease back through the soft band and under it",
+  "15 to 25 min: the backlog drains",
 ]

@@ -7,24 +7,27 @@ wind_north_mps = 1.0
 visibility_m = 15000
 archive = "tidewater/data/cache/golden-gate-2026-06/weather.json"
 
+# The arc, compressed so a run starts on it (linear between frames, the last held): the soft limit
+# (11 m/s) is crossed at about 55 s, the hard limit (14) at about 465 s, back under the hard limit at
+# about 677 s and under the soft limit at about 885 s; the rest of the run is the backlog draining.
 [[weather.timeline]]
 at_s = 0.0
 values = { gust_mps = 7.0 }
 [[weather.timeline]]
-at_s = 900.0
+at_s = 20.0
 values = { gust_mps = 7.5 }
 [[weather.timeline]]
-at_s = 1500.0
+at_s = 70.0
 values = { gust_mps = 12.5 }
 [[weather.timeline]]
-at_s = 2100.0
+at_s = 420.0
 values = { gust_mps = 13.5 }
 [[weather.timeline]]
-at_s = 2400.0
+at_s = 600.0
 values = { gust_mps = 15.5 }
 [[weather.timeline]]
-at_s = 2700.0
+at_s = 780.0
 values = { gust_mps = 12.0 }
 [[weather.timeline]]
-at_s = 3600.0
+at_s = 1200.0
 values = { gust_mps = 8.0 }

@@ -52,7 +52,7 @@ delivering, returning, holding, needs attention.
 | scenario | what it asks |
 | --- | --- |
 | `harbour-city` | What does a normal hour look like at moderate scale? 54 vehicles at the Marina and Pier 39, with crossings to Sausalito and Angel Island. |
-| `wind-event` | 40 drones at Crissy Field while the wind goes from fine to marginal to forbidden over thirty minutes. Does the operator keep up? |
+| `wind-event` | 40 drones at Crissy Field while the wind goes from fine to marginal to forbidden, starting a minute in. Does the operator keep up? |
 | `coastal-boat` | Slow boats out through the Golden Gate on a changing current, a link that changes radio, and a position fix under interference. Can the operator tell what is wrong? |
 
 Each scenario takes a scale factor, so the same scenario runs from a handful of vehicles to

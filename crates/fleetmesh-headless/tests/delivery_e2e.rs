@@ -331,9 +331,9 @@ fn under_the_strict_procedure_a_person_confirms_the_zones() {
 
 /// Rules 3 (other traffic): harbour-city's scripted traffic, with the traffic simulator in process
 /// and the bridge's tracker making the picture. A medical helicopter crossing the drones' routes low
-/// at 600 s is kept clear of by automation alone (no inbox item for traffic, ever); the Pier hub's AIS
-/// receiver down from 2400 s for ten minutes is exactly one issue alert (the picture degraded); the
-/// tour helicopter broadcasting a position 700 m off from 1500 s is an issue alert naming both
+/// at 360 s is kept clear of by automation alone (no inbox item for traffic, ever); the Pier hub's AIS
+/// receiver down from 1860 s for ten minutes is exactly one issue alert (the picture degraded); the
+/// tour helicopter broadcasting a position 700 m off from 960 s is an issue alert naming both
 /// tracks once the Pier hub's radar sees it; every traffic alert says what happened, what
 /// automation did and what to do; and the log, the picture in each decision included, replays.
 #[test]
@@ -379,7 +379,7 @@ fn harbour_city_keeps_clear_of_other_traffic_and_asks_a_person_only_about_issues
             }
         }
         // the picture, and what automation does for the crossing helicopter, while it crosses
-        if (600.0..=800.0).contains(&t) {
+        if (360.0..=560.0).contains(&t) {
             if crossing.is_none() {
                 let truth = ep.api("GET", "/api/traffic/truth", None)["body"].clone();
                 assert_eq!(truth["simulator_truth"], json!(true), "a dev run's truth says what it is: {truth}");

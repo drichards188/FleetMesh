@@ -150,6 +150,51 @@ def test_the_wind_event_ramp_crosses_the_drone_limits():
     assert min(gusts) < 11.0 < 14.0 < max(gusts)
 
 
+def crossing_s(frames, mps):
+    """When the scripted gust (linear between frames) first reaches `mps`."""
+    pts = [(f["at_s"], f["values"]["gust_mps"]) for f in frames]
+    for (t0, g0), (t1, g1) in zip(pts, pts[1:]):
+        if g0 < mps <= g1:
+            return t0 + (mps - g0) / (g1 - g0) * (t1 - t0)
+    return None
+
+
+def test_the_wind_turns_about_a_minute_in_and_the_arc_ends_inside_the_run():
+    # a run starts on the event, not on a quiet half hour (2026-11-27)
+    frames = load("wind-event", "events.toml")["weather"]["timeline"]
+    soft, hard = crossing_s(frames, 11.0), crossing_s(frames, 14.0)
+    assert soft is not None and soft <= 90, soft
+    assert hard is not None and soft < hard
+    assert frames[-1]["at_s"] < load("wind-event", "scenario.toml")["duration_s"]
+
+
+def first_scripted_s(name):
+    """The first scripted thing a run meets: a link or GNSS event, a drop zone's crowd, an issue of
+    the other traffic, or a restriction that comes into force (an area's `valid_from`)."""
+    import json
+    from datetime import datetime
+
+    sc = load(name, "scenario.toml")
+    ev = load(name, "events.toml")
+    tr = load(name, "traffic.toml")
+    times = [e["at_s"] for e in ev.get("event", []) + ev.get("dropzone_event", [])]
+    times += [i["at_s"] for i in tr.get("issue", [])]
+    start = datetime.fromisoformat(sc["at"].replace("Z", "+00:00"))
+    for path in (ROOT / "scenarios" / name / sc["areas"]).glob("*.geojson"):
+        for feat in json.loads(path.read_text())["features"]:
+            since = feat["properties"].get("valid_from")
+            if since:
+                times.append((datetime.fromisoformat(since.replace("Z", "+00:00")) - start).total_seconds())
+    return min(times)
+
+
+# coastal-boat's events follow its boats (the jammer waits until boat 1 is clear of the harbour,
+# the spoof until boat 2 is near Sausalito), so they cannot simply move earlier (fleetmesh-2m9)
+@pytest.mark.parametrize("name", ["harbour-city", "wind-event"])
+def test_a_run_meets_something_in_its_first_two_minutes(name):
+    assert first_scripted_s(name) <= 120
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_every_drop_zone_is_an_approved_delivery_point(name):
     # rules 2: delivery points are approved ahead of time (surveyed, or chosen by the customer);

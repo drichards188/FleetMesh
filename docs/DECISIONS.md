@@ -499,3 +499,15 @@ Building on rules 7 (the entry above), with no rules change:
 - **A deadlock fixed.** Reading the Inbox took the triage lock and then the decision lock while
   the decision loop took them the other way round, and a live bridge hung (it would not stop).
   The decision lock is now always taken first; a test reads the Inbox while the loop ticks.
+
+## 2026-11-27: Scenarios start on their event
+
+- **The wind-event arc runs in its first quarter hour.** Its gusts pass the drones' soft limit at
+  about 55 s (was 22 minutes), the hard limit at about 8 minutes and fall back under the soft limit
+  at about 15, and the run is 25 minutes (was 70): a person started it and then waited 20 minutes
+  for anything to happen. Its other traffic's issues come within the arc too.
+- **harbour-city's scripted events moved 9 minutes earlier** (the street fair from a minute in, the
+  crowd at a Fort Mason zone at 6 minutes), its hour kept; the medical helicopter moved 4, to 6
+  minutes, when drones are out for automation to keep clear of it.
+- **coastal-boat is unchanged**: its events follow its boats (bd fleetmesh-2m9).
+- A test keeps the first two starting on something within two minutes.

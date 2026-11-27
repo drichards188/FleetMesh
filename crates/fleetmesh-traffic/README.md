@@ -105,8 +105,8 @@ receiver, by id and optionally `sensor` kind, or a network feed, silent for a wh
 
 | Scenario | Seed | Issues |
 | --- | --- | --- |
-| harbour-city | 11 | drone without Remote ID at Marina Green (900 s), container ship under the bridge (1500 s), tour helicopter's ADS-B 700 m off (1500 s, 10 min), hub-pier AIS down (2400 s, 10 min) |
-| wind-event | 22 | fewer drones, kayaks, seaplanes, tours; more sailors. Drone without Remote ID by the Crissy Field hub (600 s), hub-presidio 1090 down (1200 s, 15 min), Bay tour aircraft's ADS-B 1.2 km off (2000 s, 15 min), network ADS-B outage (3000 s, 5 min) |
+| harbour-city | 11 | medical helicopter low across the waterfront (360 s), drone without Remote ID at Marina Green (360 s), container ship under the bridge (960 s), tour helicopter's ADS-B 700 m off (960 s, 10 min), hub-pier AIS down (1860 s, 10 min) |
+| wind-event | 22 | fewer drones, kayaks, seaplanes, tours; more sailors. Drone without Remote ID by the Crissy Field hub (30 s, 5 min), hub-presidio 1090 down (120 s, 10 min), Bay tour aircraft's ADS-B 1.2 km off (360 s, 10 min), network ADS-B outage (960 s, 4 min) |
 | coastal-boat | 33 | container ship (1800 s) and tanker (4500 s) under the bridge, a fishing boat dark off Alcatraz (2400 s, 30 min), hub-pier 1090 down (4000 s), drone without Remote ID over the pier (5000 s) |
 
 ## Wire formats (docs/design/traffic.md section 5)

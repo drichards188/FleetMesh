@@ -5,7 +5,7 @@
 # the strict comparison procedure (POLICY=sim/policy-strict.toml).
 [[item]]
 id = "r-01"
-when = { at_s = 900, window_s = 300 }
+when = { at_s = 360, window_s = 300 }
 match = { kind = "deliver", reason = "DZ_PEOPLE_NEAR" }
 reference = "reject"
 note = "a crowd at dz-fort-mason-3 (strict procedure only; from rules 2 an alert, not a decision)"

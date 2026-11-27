@@ -3,7 +3,7 @@
 name = "wind-event"
 seed = 22
 at = "2026-06-14T17:00:00Z"
-duration_s = 4200
+duration_s = 1500
 
 # The world's QNH at the scenario's hour: the weather archive's sea-level pressure
 # (tidewater/data/cache/golden-gate-2026-06/weather.json, 2026-06-14 17:00Z), the QNH the bridge
@@ -30,37 +30,37 @@ sailing-cityfront = 1.3
 [[issue]]
 kind = "drone_no_rid"
 name = "unidentified drone by the Crissy Field hub"
-at_s = 600
-duration_s = 600
+at_s = 30
+duration_s = 300
 lat = 37.8045
 lon = -122.4620
 ground_m = 3
 agl_m = 50
 
-# The Crissy Field hub's ADS-B 1090 receiver goes down for 15 minutes.
+# The Crissy Field hub's ADS-B 1090 receiver goes down for 10 minutes.
 [[issue]]
 kind = "receiver_down"
 name = "hub-presidio 1090 receiver down"
-at_s = 1200
-duration_s = 900
+at_s = 120
+duration_s = 600
 receiver = "hub-presidio"
 sensor = "adsb_1090"
 
-# A light aircraft on the Bay tour broadcasting a position 1.2 km off for 15 minutes.
+# A light aircraft on the Bay tour broadcasting a position 1.2 km off for 10 minutes.
 [[issue]]
 kind = "adsb_bad_position"
 name = "Bay tour aircraft broadcasting a wrong position"
-at_s = 2000
-duration_s = 900
+at_s = 360
+duration_s = 600
 stream = "ga-bay-tour"
 class = "ga"
 offset_m = 1200
 bearing_deg = 300
 
-# The commercial ADS-B feed goes silent for five minutes.
+# The commercial ADS-B feed goes silent for four minutes.
 [[issue]]
 kind = "receiver_down"
 name = "network ADS-B feed outage"
-at_s = 3000
-duration_s = 300
+at_s = 960
+duration_s = 240
 receiver = "net-adsb"

@@ -23,7 +23,7 @@ ground_radar = ["radar-pier"]
 [[issue]]
 kind = "drone_no_rid"
 name = "unidentified drone at Marina Green"
-at_s = 900
+at_s = 360
 duration_s = 900
 lat = 37.8063
 lon = -122.4385
@@ -36,7 +36,7 @@ agl_m = 70
 [[issue]]
 kind = "flight"
 name = "medical helicopter crossing the waterfront low"
-at_s = 600
+at_s = 360
 stream = "medevac"
 class = "helicopter"
 route = [[37.7900, -122.4320, 400, 70], [37.8250, -122.4320, 400, 70], [37.8600, -122.4000, 1500, 110]]
@@ -45,7 +45,7 @@ route = [[37.7900, -122.4320, 400, 70], [37.8250, -122.4320, 400, 70], [37.8600,
 [[issue]]
 kind = "ship_arrival"
 name = "container ship for Oakland"
-at_s = 1500
+at_s = 960
 stream = "ships-oakland"
 class = "cargo"
 vessel_name = "ORIENT HARMONY"
@@ -55,7 +55,7 @@ vessel_name = "ORIENT HARMONY"
 [[issue]]
 kind = "adsb_bad_position"
 name = "tour helicopter broadcasting a wrong position"
-at_s = 1500
+at_s = 960
 duration_s = 600
 stream = "heli-tour"
 class = "helicopter"
@@ -66,7 +66,7 @@ bearing_deg = 60
 [[issue]]
 kind = "receiver_down"
 name = "hub-pier AIS receiver down"
-at_s = 2400
+at_s = 1860
 duration_s = 600
 receiver = "hub-pier"
 sensor = "ais"

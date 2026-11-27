@@ -77,14 +77,15 @@ the doorsteps and kerbs start unconfirmed.
 **Policy.** The defaults in [delivery-orders.md](delivery-orders.md), section 9. The weather rule
 bands at their defaults.
 
-**Scripted events** (`at_s` from the start):
+**Scripted events** (`at_s` from the start; the first a minute in, so a run starts on something):
 
 | at | event | effect |
 | --- | --- | --- |
-| 600 s | `restriction` tr-street-fair, no_go, polygon over Marina Green, 1800 s | routes crossing it need reroutes; keep-out monitor proposes them |
-| 900 s | `dropzone.occupied` at dz-fort-mason-3 (a crowd), 240 s | a delivery to that zone finds it occupied |
-| 1200 s | cellular congestion, circle 1.2 km around Pier 39, extra loss 5%, 40 ms, 600 s | link degraded for vehicles there; some drones fail over to LOS |
-| 1500 s | tower outage: Fort Mason tower `cut` for 300 s | vehicles near it lose cellular; failover to the backup |
+| 60 s | `restriction` tr-street-fair, no_go, polygon over Marina Green, 1800 s | routes crossing it need reroutes; keep-out monitor proposes them |
+| 360 s | `dropzone.occupied` at dz-fort-mason-3 (a crowd), 240 s | a delivery to that zone finds it occupied |
+| 660 s | cellular congestion, circle 1.2 km around Pier 39, extra loss 5%, 40 ms, 600 s | link degraded for vehicles there; some drones fail over to LOS |
+| 960 s | tower outage: Fort Mason tower `cut` for 300 s | vehicles near it lose cellular; failover to the backup |
+| 1460 s | GNSS degraded in the urban canyon near Fisherman's Wharf, 240 s | positions less accurate there; navigation trust degrades |
 | 2100 s | one drone's battery fact stops reporting (stand-in fault) | `ENERGY_BATTERY_UNKNOWN` holds for it |
 | 2400 s | low tide at a boat dock (tidewater supplies the level) | `TIDE_DOCK_LEVEL` or `TIDE_SHALLOW` holds on the Angel Island dock |
 
@@ -116,12 +117,13 @@ vehicle ends the hour at a hub; the log replays; the attention report is produce
 
 ## 4. Scenario 2: Drone hub during a wind event
 
-**Question.** When conditions move from fine to marginal to forbidden over thirty minutes, how
-does the number and kind of decisions change, and does the operator keep up?
+**Question.** When conditions move from fine to marginal to forbidden within a quarter of an hour,
+how does the number and kind of decisions change, and does the operator keep up?
 
 **Setting.** One hub at Crissy Field (37.8068, -122.4460), 40 delivery drones, no other platform,
 delivering to about 30 drop zones within 4 km (Presidio, Marina, Fort Mason, Fort Point). One
-tower at the hub. The scenario runs 70 minutes starting at 10:00 local.
+tower at the hub. The scenario runs 25 minutes starting at 10:00 local; the wind turns about a
+minute in, so a run starts on the event rather than on a quiet half hour.
 
 **Weather.** Mean wind comes from the HRRR archive for 14 June (tidewater's Golden Gate scenario
 notes a funnelling peak of 7.6 m/s through the Gate). The weather crate does not accept scripted
@@ -134,49 +136,51 @@ the event is scripted gusts, which it does accept:
 at_s = 0
 values = { gust_mps = 7.0 }
 [[weather.timeline]]
-at_s = 900
+at_s = 20
 values = { gust_mps = 7.5 }
 [[weather.timeline]]
-at_s = 1500            # ramp up through the soft band (drone soft gust 11, hard 14)
+at_s = 70              # ramp up through the soft band (drone soft gust 11, hard 14)
 values = { gust_mps = 12.5 }
 [[weather.timeline]]
-at_s = 2100
+at_s = 420
 values = { gust_mps = 13.5 }
 [[weather.timeline]]
-at_s = 2400            # a spike above the hard limit
+at_s = 600             # a spike above the hard limit
 values = { gust_mps = 15.5 }
 [[weather.timeline]]
-at_s = 2700
+at_s = 780
 values = { gust_mps = 12.0 }
 [[weather.timeline]]
-at_s = 3600
+at_s = 1200
 values = { gust_mps = 8.0 }
 ```
 
 The values interpolate linearly and hold the last. The scripted gust affects the rules and the
 keep-out monitor, not the vehicles' physics (SITL wind comes from tidewater and has no gust
-channel from this file). A scripted weather cell also covers the hub region from 1320 s so that
+channel from this file). A scripted weather cell also covers the hub region from about 55 s so that
 in-flight drones receive keep-out stages. Open question 1 asks whether to build a stronger
 archive slice instead.
 
-**Demand.** 6 parcels a minute for the whole run (about 420), mass 0.2 to 2.4 kg, a third above 1.5
+**Demand.** 6 parcels a minute from 30 s for the whole run (about 150), mass 0.2 to 2.4 kg, a third above 1.5
 kg. The payload rule derates multirotors from a gust of 7 m/s down to 60% at the hard limit, so the
 effective maximum is about 2.1 kg at a gust of 10 and about 1.7 kg at 12.5: heavy parcels become
 `PAYLOAD_OVER_DERATED` refusals early in the ramp.
 
 **Timeline and what should happen.** Linear interpolation of the gust table puts the soft limit
-(11 m/s) at about 1320 s, the hard limit (14 m/s) at about 2175 s, the fall back below the hard
-limit at about 2529 s and below the soft limit at about 2925 s.
+(11 m/s) at about 55 s, the hard limit (14 m/s) at about 465 s, the fall back below the hard
+limit at about 677 s and below the soft limit at about 885 s. (Until 2026-11-27 the same arc ran
+over 70 minutes with the soft limit at 22 minutes; a run then spent its first 20 minutes on
+nothing.)
 
 | time | gust m/s | rules | expected inbox |
 | --- | --- | --- | --- |
-| 0 to 1320 s | 7 to 11 | all allow (below soft 11) | almost empty |
-| 1320 to 2175 s | 11 to 14 | every `deliver` returns `WX_GUST_MARGINAL` hold; heavy parcels refused; in-flight drones get keep-out `hold` stages from the weather cell | **surge**: about 6 held orders a minute arriving |
-| 2175 to 2529 s | above 14 (peak 15.5) | hard limit: new `deliver`, `pickup` and `reroute` refused (`WX_GUST_LIMIT`); `return_to_hub` auto for every airborne drone | held items expire or are rejected; the inbox drains as refusals replace holds |
-| 2529 to 2925 s | 14 down to 11 | back in the soft band | a second, shorter surge |
-| after 2925 s | below 11 | allow | normal |
+| 0 to 55 s | 7 to 11 | all allow (below soft 11) | almost empty |
+| 55 to 465 s | 11 to 14 | every `deliver` returns `WX_GUST_MARGINAL` hold; heavy parcels refused; in-flight drones get keep-out `hold` stages from the weather cell | **surge**: about 6 held orders a minute arriving |
+| 465 to 677 s | above 14 (peak 15.5 at 600 s) | hard limit: new `deliver`, `pickup` and `reroute` refused (`WX_GUST_LIMIT`); `return_to_hub` auto for every airborne drone | held items expire or are rejected; the inbox drains as refusals replace holds |
+| 677 to 885 s | 14 down to 11 | back in the soft band | a second, shorter surge |
+| after 885 s | below 11 | allow | normal; the backlog drains |
 
-The inbox surge between about 1320 and 2175 s is the point. Without a policy change, 6 arrivals a minute at
+The inbox surge between about 55 and 465 s is the point. Without a policy change, 6 arrivals a minute at
 a handling time of 10 s is utilisation 1.0 for one operator. A well-run response is for the
 operator to approve only deliveries that are short, light and well-provisioned, and to reject or
 let expire the rest, and to bring the fleet home before the spike.

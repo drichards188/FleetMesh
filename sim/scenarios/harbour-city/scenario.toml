@@ -25,9 +25,9 @@ The question it asks: how many decisions does one person face in an hour when mo
 [summary]
 headline = "A normal hour at a harbour city: two hubs, all four platforms, parcels three a minute"
 bullets = [
-  "10 to 40 min: a street fair closes Marina Green; routes across it need a way round",
-  "15 min: a crowd at a Fort Mason drop zone",
-  "20 and 25 min: cellular congestion at Pier 39, then the Fort Mason tower goes out and vehicles fail over to their backup radio",
-  "33 min: GNSS degraded in the urban canyon near Fisherman's Wharf",
+  "1 to 31 min: a street fair closes Marina Green; routes across it need a way round",
+  "6 min: a crowd at a Fort Mason drop zone",
+  "11 and 16 min: cellular congestion at Pier 39, then the Fort Mason tower goes out and vehicles fail over to their backup radio",
+  "24 min: GNSS degraded in the urban canyon near Fisherman's Wharf",
   "Real tide at the boat docks, real wind over the water",
 ]

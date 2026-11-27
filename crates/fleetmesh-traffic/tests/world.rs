@@ -142,19 +142,19 @@ fn every_scenario_loads_and_its_issues_appear() {
         let _ = ids;
         assert!(t.sensors().len() >= 12, "{name}");
     }
-    // harbour-city: the drone without Remote ID is up at 20 minutes, the helicopter's broadcasts
-    // are off at 26
+    // harbour-city: the drone without Remote ID is up at 11 minutes, the helicopter's broadcasts
+    // are off at 17
     let mut t = make("harbour-city", None);
     let start = t.start_ms();
     t.step_to(start + 1_000);
     let at = |t: &Traffic, s: i64| t.truth_at(start + s * 1000);
-    let drone = at(&t, 1200).into_iter().find(|o| o.stream == "issue-drone-no-rid").expect("the drone");
+    let drone = at(&t, 660).into_iter().find(|o| o.stream == "issue-drone-no-rid").expect("the drone");
     assert_eq!(drone.class, "drone");
     assert!(drone.equipage.rid.is_none());
-    let heli = at(&t, 1560).into_iter().find(|o| o.stream == "issue-adsb-bad-position").expect("the helicopter");
+    let heli = at(&t, 1020).into_iter().find(|o| o.stream == "issue-adsb-bad-position").expect("the helicopter");
     assert!(heli.faults.contains(&"position_offset"), "{:?}", heli.faults);
-    let ship = at(&t, 1500).into_iter().find(|o| o.stream == "issue-ship-arrival").expect("the ship");
-    // under the bridge at 1500 s
+    let ship = at(&t, 960).into_iter().find(|o| o.stream == "issue-ship-arrival").expect("the ship");
+    // under the bridge at 960 s
     assert!((ship.lon - -122.479).abs() < 0.01 && (ship.lat - 37.813).abs() < 0.01, "{} {}", ship.lat, ship.lon);
 }
 
