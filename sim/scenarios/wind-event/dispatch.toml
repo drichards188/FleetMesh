@@ -19,6 +19,19 @@ mass_kg = [0.2, 2.4]
 priority_mix = [0.05, 0.60, 0.28, 0.07]
 due_s = 1500
 
+# The exception (docs/design/incidents.md section 6): medical supplies for a doorstep in the
+# Presidio, urgent, ordered at about 17 minutes as the wind eases. A ground stop may still be in
+# force (it lifts at about 20); no play decides an urgent parcel, so it asks the person: fly now,
+# with the gust at the zone just over the descent limit, or wait for the stop to lift.
+[[parcel]]
+id = "p-clinic"
+from = "hub-crissy"
+to = "dz-wind-01"
+mass_kg = 0.6
+ready_s = 1020
+due_s = 600
+priority = 3
+
 [[hub]]
 id = "hub-crissy"
 name = "Crissy Field hub"

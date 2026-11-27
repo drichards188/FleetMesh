@@ -178,9 +178,16 @@ nothing.)
 | 55 to 465 s | 11 to 14 | every `deliver` returns `WX_GUST_MARGINAL` hold; heavy parcels refused; in-flight drones get keep-out `hold` stages from the weather cell | **surge**: about 6 held orders a minute arriving |
 | 465 to 677 s | above 14 (peak 15.5 at 600 s) | hard limit: new `deliver`, `pickup` and `reroute` refused (`WX_GUST_LIMIT`); `return_to_hub` auto for every airborne drone | held items expire or are rejected; the inbox drains as refusals replace holds |
 | 677 to 885 s | 14 down to 11 | back in the soft band | a second, shorter surge |
+| about 300 s | drone 3's GNSS degraded for 240 s | its navigation trust degraded | not the wind's: shown on its own, never folded into the wind's incident |
 | after 885 s | below 11 | allow | normal; the backlog drains |
+| about 1020 s | about 9.4 at the zones | an urgent clinic parcel (priority 3, `p-clinic`) is outside any play | the person decides: fly now with the zone's gust over its 8 m/s descent limit (`DZ_GUST_AT_ZONE`, a hold) or wait for the stop to lift (about 1185 s) |
 
-The inbox surge between about 55 and 465 s is the point. Without a policy change, 6 arrivals a minute at
+The inbox surge between about 55 and 465 s is the point. From rules 8 (docs/design/incidents.md)
+the surge is one incident, "Wind at Crissy Field hub", and the person can answer it once: a
+ground stop that lifts itself once the gust has stayed under 11 m/s for five minutes (about
+1185 s), after which the backlog goes out most urgent first. Run item by item and with plays, the
+scenario compares the decisions made, the time to the first, the late parcels and whether the odd
+one out (drone 3's GNSS) was caught. Without a policy change, 6 arrivals a minute at
 a handling time of 10 s is utilisation 1.0 for one operator. A well-run response is for the
 operator to approve only deliveries that are short, light and well-provisioned, and to reject or
 let expire the rest, and to bring the fleet home before the spike.

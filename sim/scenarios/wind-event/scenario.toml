@@ -25,8 +25,10 @@ The question it asks: when the weather turns, how do the number and kind of deci
 [summary]
 headline = "A drone hub in a wind event: gusts through the soft and hard limits, then recovery"
 bullets = [
-  "1 min: gusts pass the drones' 11 m/s soft limit; payloads derate and marginal orders are held",
+  "1 min: gusts pass the drones' 11 m/s soft limit; every departure is held or refused, a pattern to answer once",
+  "5 min: one drone's GNSS degrades among the wind's holds: not the wind's, and not to be missed",
   "8 min: gusts pass the 14 m/s hard limit, peaking at 15.5 m/s at 10 min; airborne drones should be ordered home",
   "11 to 15 min: gusts ease back through the soft band and under it",
-  "15 to 25 min: the backlog drains",
+  "17 min: an urgent clinic parcel asks whether to fly before the wind has fully settled",
+  "15 to 25 min: the backlog drains, the most urgent first",
 ]

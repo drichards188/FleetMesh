@@ -31,3 +31,14 @@ values = { gust_mps = 12.0 }
 [[weather.timeline]]
 at_s = 1200.0
 values = { gust_mps = 8.0 }
+
+# The odd one out (docs/design/incidents.md section 6): drone 3's GNSS degrades for four minutes
+# from about 5 minutes, in the middle of the wind's holds: its trouble is not the wind's, and
+# grouping the wind's items must not hide it.
+[[event]]
+name = "drone 3 GNSS degraded at the hub"
+at_s = 300
+duration_s = 240
+uids = [3]
+gnss = { effect = "degrade", severity = 0.8 }
+
