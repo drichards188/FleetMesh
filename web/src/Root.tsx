@@ -4,7 +4,7 @@ import { type LauncherState, probeLauncher, useLauncher } from './launcher'
 import { Menu } from './Menu'
 
 /** What the page shows first. With the launcher (`make start`) the main menu, and the console on
- *  the scenario it runs; without one (`make up`, `make goldengate`), the console as it always was. */
+ *  the scenario it runs; without one (`make up`, `make start SCENARIO=`), the console as it always was. */
 export function Root() {
   // undefined: still asking (a moment: the launcher is local)
   const [probe, setProbe] = useState<LauncherState | null | undefined>(undefined)

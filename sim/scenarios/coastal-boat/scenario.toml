@@ -12,3 +12,21 @@ traffic = "traffic.toml"
 areas = "areas"
 reference = "reference.toml"
 policy = "sim/policy.toml"
+# the main menu (eval/launcher.py): where it is listed, and what it says
+order = 3
+brief = """
+Boats from the Pier 39 hub with drones and a plane in the same harbour. One boat carries a 40 kg supply parcel to a vessel anchored about 28 km west, out through the Golden Gate; another takes a smaller parcel to a mooring at Sausalito.
+
+The route meets the real ebb and flood through the Gate and the Potato Patch shoal at low water. Out past Point Bonita the boat leaves cellular range and fails over to its satellite link. Near the port, a jammer degrades the fleet's GNSS, and later a spoof walks one boat's position away from the truth.
+
+The question it asks: with slow vehicles, a changing current, a link that changes radio and a position fix under attack, can the operator tell what is wrong and what to do?
+"""
+
+[summary]
+headline = "A coastal boat leg: real tide and current, a satellite failover, GNSS jammed and spoofed"
+bullets = [
+  "A 40 kg supply leg about 28 km offshore, hours each way at boat speed",
+  "30 min: a jammer near the harbour approach degrades GNSS for 15 minutes",
+  "70 min: a spoof walks boat 2's position off near Sausalito for 20 minutes",
+  "The return meets the turning current: wait for slack water, or go",
+]

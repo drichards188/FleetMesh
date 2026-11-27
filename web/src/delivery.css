@@ -72,13 +72,6 @@
 .vd-nav.untrusted { color: var(--bad); }
 .vd-nav.trusted { color: var(--ok); }
 
-/* delivery scenarios in the menu's help */
-.mm-delivery { margin: 14px 0 0; font-size: var(--text-body); color: #c6cfd9; }
-.mm-delivery h2 { margin: 0 0 4px; }
-.mm-delivery dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
-.mm-delivery dt { font-family: var(--font-data); color: var(--text); }
-.mm-delivery dd { margin: 0; }
-.mm-delivery code { font-family: var(--font-data); color: var(--accent); }
 .dc-wrap { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; }
 .dc-wrap > summary { cursor: pointer; font: 600 var(--text-label)/var(--leading-label) var(--font-ui); letter-spacing: var(--caps-tracking); text-transform: uppercase; color: var(--muted); }
 .dc-wrap .dc { border-top: 0; margin-top: 4px; padding-top: 0; border: 0; padding: 0; min-width: 0; }

@@ -2,31 +2,37 @@ import { useCallback, useEffect, useState } from 'react'
 import type { Domain } from './types'
 
 /** The launcher (`make start`, eval/launcher.py): FleetMesh's main menu. It serves this console and
- *  starts and stops one scenario at a time (the open world, what `make goldengate` runs, or a
- *  situation, what `make situation` runs); the console asks it under /launcher, which Vite
- *  proxies only when the launcher runs it. Without one (a stack started with `make up` or `make
- *  goldengate`) the probe finds nothing and the console is what it always was. */
+ *  starts and stops one scenario at a time (a delivery scenario, what `make start SCENARIO=<name>`
+ *  runs, or the open world, what `make up` runs with tidewater's conditions); the console asks it
+ *  under /launcher, which Vite proxies only when the launcher runs it. Without one (a stack started
+ *  with `make up` or `make start SCENARIO=`) the probe finds nothing and the console is what it
+ *  always was. */
 
 export type Stage = 'waiting' | 'starting' | 'bridge' | 'ready' | 'running' | 'ended' | 'stopping' | 'stopped' | 'failed'
-export type OperatorMode = 'live' | 'autoplay'
-export type AiMode = 'claude' | 'codex' | 'none'
+/** the drop-zone procedure: standing approvals (sim/policy.toml) or the strict comparison one
+ *  (sim/policy-strict.toml, a person confirms each zone every hour) */
+export type PolicyId = 'standard' | 'strict'
 
-/** A scenario of the menu: the open world, or a situation (sim/situations/*.toml); never a
- *  situation's director's notes. */
+/** A delivery scenario's fleet at a fraction of its size (SCALE), as sim/swarm.py plans it. */
+export interface ScaleOption {
+  scale: number
+  vehicles: number
+  domains: Record<Domain, number>
+}
+
+/** A scenario of the menu: a delivery scenario (sim/scenarios/<name>/), or the open world. The
+ *  launcher lists only what runs here. */
 export interface Scenario {
   id: string
-  kind: 'open_world' | 'situation'
+  kind: 'scenario' | 'open_world'
   default: boolean
-  /** the guided tutorial (a situation with `tutorial = true`): offered apart, at the top of the
-   *  menu, started with its own modes in one click */
-  tutorial?: boolean
   title: string
   brief: string
-  /** a headline and a few bullets for the brief (a situation's `[summary]`), when it has one */
+  /** a headline and a few bullets for the brief (a scenario's `[summary]`), when it has one */
   summary?: { headline: string; bullets: string[] } | null
   runnable: boolean
-  /** why it can't start from the menu (headless only, a draft) */
   why_not: string | null
+  /** at full size */
   vehicles?: number
   /** how many of them run in ArduPilot SITL (the rest are stand-ins) */
   sitl?: number
@@ -38,28 +44,35 @@ export interface Scenario {
   /** the tidewater scenario, or "none" */
   tidewater?: string
   at?: string
-  /** situation time (s); null: the open world runs until it is ended */
+  /** scenario time (s); null: the open world runs until it is ended */
   duration_s?: number | null
+  /** a delivery scenario's options: its fleet at a fraction of its size, its clock rates (its
+   *  own among them), its drop-zone procedures; and its own defaults */
+  scales?: ScaleOption[]
   rate?: number
-  /** the situation's own defaults, and what it allows */
-  operator?: OperatorMode
-  ai?: AiMode
-  operators?: OperatorMode[]
-  ais?: AiMode[]
-  orders?: number
-  steps?: number
-  watch?: number
+  rates?: number[]
+  policy?: PolicyId
+  policies?: PolicyId[]
+  /** simulated air and sea traffic around the fleet */
+  traffic?: boolean
   /** the same from a terminal */
   cli?: string
+}
+
+/** What a delivery scenario was started with. */
+export interface LaunchOptions {
+  scale?: number
+  rate?: number
+  policy?: PolicyId
 }
 
 /** One launch: its stages as the launcher saw them, and its end. */
 export interface Launch {
   id: string
   scenario: string
-  kind: 'open_world' | 'situation'
+  kind: 'scenario' | 'open_world'
   title: string
-  options: { operator?: OperatorMode; ai?: AiMode; ai_label?: string }
+  options: LaunchOptions
   cli: string
   stage: Stage
   detail: string
@@ -75,8 +88,8 @@ export interface Launch {
   /** its command's output */
   log: string
   bridge_port: number
-  /** a situation's run (its id and logs), once the runner reports */
-  run: { id?: string; audit_log?: string; situation_log?: string } | null
+  /** a delivery scenario's clock as the bridge last said it (s) */
+  clock: { elapsed_s: number; duration_s: number | null } | null
   /** the bridge answers: the console can show it */
   stack_up: boolean
 }
@@ -103,8 +116,6 @@ export interface LauncherState {
   launcher: { console_port: number; api_port: number }
   console?: ConsoleState
   scenarios: Scenario[]
-  /** whether the AI CLIs are installed here (the runner checks their login itself) */
-  ai_cli: Record<string, boolean>
   current: Launch | null
   /** the launcher's clock (s) */
   now: number
@@ -112,8 +123,9 @@ export interface LauncherState {
 
 export interface StartRequest {
   scenario: string
-  operator?: OperatorMode
-  ai?: AiMode
+  scale?: number
+  rate?: number
+  policy?: PolicyId
   /** end the running scenario first */
   replace?: boolean
 }

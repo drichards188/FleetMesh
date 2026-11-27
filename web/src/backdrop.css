@@ -1,0 +1,12 @@
+/* the main menu's backdrop (FleetBackdrop.tsx) and the legend of its link styles. The canvas
+   sits under the menu's opaque panels (the menu's root isolates its stacking), takes no pointer
+   events and is never selectable. Its colours come from menu.css (--dom-*, --mm-*) and index.css
+   (--bg, --text, --accent, --violet, --bad, --line, --mono), each with a fallback in the code. */
+.fm-backdrop { position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%; pointer-events: none; user-select: none; animation: fm-backdrop-in 1.6s ease-out both; }
+@keyframes fm-backdrop-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .fm-backdrop { animation: none; } }
+
+/* the link styles, in the rail's spare room */
+.fm-legend { display: inline-flex; align-items: center; gap: 14px; margin-left: 12px; font: 600 9px var(--mono, monospace); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted, #7d8b9a); opacity: 0.85; pointer-events: none; }
+.fm-legend > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+@media (max-width: 1240px) { .fm-legend { display: none; } }

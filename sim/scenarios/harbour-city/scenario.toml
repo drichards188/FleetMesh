@@ -12,3 +12,22 @@ traffic = "traffic.toml"
 areas = "areas"
 reference = "reference.toml"
 policy = "sim/policy.toml"
+# the main menu (eval/launcher.py): where it is listed, and what it says
+order = 1
+brief = """
+A normal hour on the north San Francisco waterfront, from the Marina to Fisherman's Wharf, with crossings to Sausalito and Angel Island. Two hubs: the Marina's (drones, cars and the planes) and Pier 39's (drones and boats).
+
+Parcels come in about three a minute at full size, from 0.2 to 4 kg, to about 40 approved delivery points. Most need no one: automation sends them, waits out a crowded drop zone and keeps clear of other traffic, and tells you what it cannot settle.
+
+The question it asks: how many decisions does one person face in an hour when most things go well?
+"""
+
+[summary]
+headline = "A normal hour at a harbour city: two hubs, all four platforms, parcels three a minute"
+bullets = [
+  "10 to 40 min: a street fair closes Marina Green; routes across it need a way round",
+  "15 min: a crowd at a Fort Mason drop zone",
+  "20 and 25 min: cellular congestion at Pier 39, then the Fort Mason tower goes out and vehicles fail over to their backup radio",
+  "33 min: GNSS degraded in the urban canyon near Fisherman's Wharf",
+  "Real tide at the boat docks, real wind over the water",
+]

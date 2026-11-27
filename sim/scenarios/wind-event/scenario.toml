@@ -12,3 +12,21 @@ traffic = "traffic.toml"
 areas = "areas"
 reference = "reference.toml"
 policy = "sim/policy.toml"
+# the main menu (eval/launcher.py): where it is listed, and what it says
+order = 2
+brief = """
+One drone hub at Crissy Field and its delivery drones, serving about 30 drop zones within 4 km: the Presidio, the Marina, Fort Mason and Fort Point.
+
+Conditions move from fine to marginal to forbidden and back over the scenario. Scripted gusts ramp through the drones' soft limit (11 m/s) and past the hard one (14 m/s) over the archive's real mean wind, so holds pile up in the Inbox and then drain.
+
+The question it asks: when the weather turns, how do the number and kind of decisions change, and does the operator keep up?
+"""
+
+[summary]
+headline = "A drone hub in a wind event: gusts through the soft and hard limits, then recovery"
+bullets = [
+  "0 to 25 min: gusts of 7 to 7.5 m/s, routine deliveries",
+  "25 min: gusts of 12.5 m/s, into the soft band; payloads derate and marginal orders are held",
+  "40 min: gusts of 15.5 m/s, past the hard limit; airborne drones should be ordered home",
+  "45 to 60 min: gusts ease to 12 and then 8 m/s; the backlog drains",
+]

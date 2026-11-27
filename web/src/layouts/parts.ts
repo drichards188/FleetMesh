@@ -25,7 +25,7 @@ import type { LngLat, Tasking } from '../types'
 /** The top bar's pieces, each rendered, null while it is not shown. Cockpit sets them in
  *  `header.topbar` in this order (the drawer buttons in `nav.dock-tabs`). */
 export interface BarParts {
-  /** the main menu's button (R24); null without the launcher (`make up`, `make goldengate`) */
+  /** the main menu's button (R24); null without the launcher (`make up`, `make start SCENARIO=`) */
   menu: ReactNode
   /** "FLEETMESH", small */
   brand: ReactNode

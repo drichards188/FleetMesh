@@ -107,10 +107,10 @@ class WebConsole:
 
     # ---- processes
     def _env(self) -> dict[str, str]:
-        from .launcher import MAKE_VARS  # the launcher's own list of make variables to drop
+        from .launcher import CHOICE_VARS  # the launcher's own list of make and scenario variables to drop
 
         return {
-            **{k: v for k, v in os.environ.items() if k not in MAKE_VARS},
+            **{k: v for k, v in os.environ.items() if k not in CHOICE_VARS},
             "FLEETMESH_BRIDGE_URL": f"http://127.0.0.1:{self.api_port + 1}",
             "FLEETMESH_LAUNCHER_URL": f"http://127.0.0.1:{self.api_port}",
         }
