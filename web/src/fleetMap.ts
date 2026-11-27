@@ -15,6 +15,9 @@ import { countsText, type Counts, type FleetDoc, type FleetStateId } from './fle
 import { hubView, siteView, type HubView } from './hubSummary.ts'
 import type { LngLat } from './types'
 
+/** The fleet view's words for a vehicle whose order or alert is with the watch officer. */
+export const WITH_OFFICER = /with the watch officer/
+
 /** Below this zoom the bases of a site share one marker. */
 export const SITE_ZOOM = 15
 /** From this zoom every vehicle is drawn on its own (its pads are metres apart on the screen). */
@@ -76,12 +79,14 @@ export function collapseAtBases(doc: FleetDoc, placed: ReadonlySet<number>, o: C
     }
   const collapsed = new Set<number>()
   const perBase: BaseMarker[] = []
+  // its own vehicles whose order or alert the watch officer is deciding (the fleet view's why)
+  const officer = (hub: string) => doc.vehicles.filter((v) => v.base === hub && WITH_OFFICER.test(v.why)).length
   for (const b of doc.bases) {
     const e = byBase.get(b.id)
     const gathers = e != null && e.uids.length >= MIN_COLLAPSE
     const open = gathers && o.expanded.has(b.id)
     if (gathers && !open) for (const u of e.uids) collapsed.add(u)
-    perBase.push({ id: `base:${b.id}`, name: b.name || b.id, at: b.at, bases: [b.id], counts: gathers && !open ? e.counts : {}, n: gathers && !open ? e.uids.length : 0, text: '', open, view: hubView(b) })
+    perBase.push({ id: `base:${b.id}`, name: b.name || b.id, at: b.at, bases: [b.id], counts: gathers && !open ? e.counts : {}, n: gathers && !open ? e.uids.length : 0, text: '', open, view: hubView(b, officer(b.id)) })
   }
   let markers = perBase
   if (o.zoom == null || o.zoom < SITE_ZOOM) {
@@ -101,7 +106,7 @@ export function collapseAtBases(doc: FleetDoc, placed: ReadonlySet<number>, o: C
       const counts: Counts = {}
       for (const x of mine) for (const [k, n] of Object.entries(x.counts)) counts[k as FleetStateId] = (counts[k as FleetStateId] ?? 0) + (n ?? 0)
       const at: LngLat = [mine.reduce((s, x) => s + x.at[0], 0) / mine.length, mine.reduce((s, x) => s + x.at[1], 0) / mine.length]
-      const view = siteView(site.id, site.name, doc.bases.filter((b) => mine.some((x) => x.bases[0] === b.id)))
+      const view = siteView(site.id, site.name, doc.bases.filter((b) => mine.some((x) => x.bases[0] === b.id)), officer)
       markers.push({ id: `site:${site.id}`, name: site.name, at, bases: mine.map((x) => x.bases[0]), counts, n: mine.reduce((s, x) => s + x.n, 0), text: '', open: false, view })
     }
   }

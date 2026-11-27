@@ -12,6 +12,9 @@ import { RationaleText } from './Rationale'
 import { reviewEntries } from './reviewEntries'
 import { ApprovalCard } from './ApprovalCard'
 import { OfficerDesk, OfficerLog, OfficerNote } from './OfficerNote'
+import { IncidentCard, PlayInForce } from './IncidentCard'
+import { cardKey } from './playWords'
+import type { FleetBase } from './fleetModel'
 import { askFleet, nameOf } from './approvalFleet'
 import { Proposer } from './Proposer'
 import { askSentence } from './approvalText'
@@ -55,6 +58,8 @@ interface Props {
   trackName?: (trackId: string) => string | null
   /** a traffic picture alert's link: the traffic bar's feeds, opened */
   onPicture?: () => void
+  /** the fleet's bases (their names, their wind): an incident's card reads its hub's */
+  bases?: FleetBase[]
 }
 
 // ---- top bar button -------------------------------------------------------------------------
@@ -307,7 +312,7 @@ interface Item {
   node: ReactNode
 }
 
-export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, selection, onFocus, onClose, notice, focus, mem, hidden, cause, taskings, onTrack, hasTrack, trackName, onPicture }: Props & { mem: ReturnType<typeof useAlertMemory>; hidden: Set<string> }) {
+export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, selection, onFocus, onClose, notice, focus, mem, hidden, cause, taskings, onTrack, hasTrack, trackName, onPicture, bases }: Props & { mem: ReturnType<typeof useAlertMemory>; hidden: Set<string> }) {
   // a card chosen from outside this drawer (a line at the head of another, the task panel's link)
   // is brought into view; one clicked here already is (`nearest` leaves it be)
   const selId = selection?.kind === 'intent' ? selection.id : null
@@ -400,7 +405,53 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
       ),
     })
   }
-  const { needs, info } = inboxOrder(items)
+  // incidents (docs/design/incidents.md): an incident's items fold into one card, which opens
+  // them again; an item of another cause at its hub stays on its own
+  const incidents = decisions?.inbox.incidents ?? []
+  const playsAll = decisions?.inbox.plays ?? []
+  const recs = decisions?.inbox.recommended_plays ?? []
+  const hubName = (id: string) => bases?.find((b) => b.id === id)?.name || id
+  const itemWords = (key: string) => {
+    const i = pending.find((x) => `intent:${x.id}` === key)
+    if (i) {
+      const codes = (i.checks ?? []).filter((c) => c.outcome !== 'pass').flatMap((c) => c.codes ?? [])
+      return `${name(String(i.uids[0] ?? ''))}'s ${i.kind.replaceAll('_', ' ')}${codes.length ? ` (${codes.join(', ')})` : ''}`
+    }
+    const a = alerts.find((x) => `alert:${x.id}` === key)
+    return a ? `${a.kind.replaceAll('_', ' ')}, ${name(String(a.uid))}` : key
+  }
+  const byKey = new Map(items.map((x) => [x.key, x]))
+  const folded = new Set<string>()
+  const incidentCards: Item[] = []
+  for (const inc of incidents) {
+    // its cards fold in (the person's items of it); one with none of the person's yet (the
+    // officer's, or settled) still says the pattern and offers its play
+    const members = inc.items.map(cardKey).flatMap((k) => byKey.get(k) ?? [])
+    for (const m of members) folded.add(m.key)
+    const base = bases?.find((b) => b.id === inc.hub)
+    incidentCards.push({
+      key: `inc:${inc.id}`,
+      rank: members.length ? Math.min(...members.map((m) => m.rank)) : RANK.alert,
+      sort: members.reduce<number | null>((s, m) => (m.sort == null ? s : s == null ? m.sort : Math.min(s, m.sort)), null),
+      node: (
+        <IncidentCard
+          key={`inc:${inc.id}`}
+          incident={inc}
+          hubName={hubName(inc.hub)}
+          weather={base?.weather ?? null}
+          plays={playsAll.filter((p) => p.hub === inc.hub)}
+          rec={recs.find((r) => r.incident === inc.id) ?? null}
+          members={members.map((m) => m.node)}
+          others={inc.others.map(itemWords)}
+          onDone={done}
+        />
+      ),
+    })
+  }
+  const shownItems = [...items.filter((x) => !folded.has(x.key)), ...incidentCards]
+  // a play in force whose incident has gone (its items withdrawn): said at the head, to be lifted
+  const loosePlays = playsAll.filter((p) => !incidents.some((i) => i.hub === p.hub))
+  const { needs, info } = inboxOrder(shownItems)
   // the officer's record names vehicles by uid, as text or a number
   const callsignOf = (uid: number | string) => nameOf(vehicles, String(uid))
   // rules 7: an AI watch officer is on this run (on watch now, or it settled something): its log
@@ -452,6 +503,9 @@ export function InboxPanel({ banners, decisions, vehicles, now, tab, setTab, sel
                 that moves keeps what it has open or typed) */}
             {routes.length > 0 && <p className="ix-route-note">{routes.join('; ')}</p>}
             {officerRun && <OfficerDesk now={now} nameOf={callsignOf} full={needs.length === 0} onLog={() => setTab('officer')} />}
+            {loosePlays.map((p) => (
+              <PlayInForce key={`play${p.id}`} play={p} hubName={hubName(p.hub)} onDone={done} />
+            ))}
             <h3 className="ix-h">
               Needs you <span>{needs.length}</span>
             </h3>

@@ -10,6 +10,7 @@
 // fleetModel.check.ts runs it under node.
 import type { Hub } from './delivery'
 import type { HubWind } from './hubSummary'
+import type { Play } from './playWords'
 import type { OrderRef } from './orderWords'
 import type { LngLat, Vehicle } from './types'
 import { isStale } from './types.ts'
@@ -97,6 +98,8 @@ export interface FleetBase {
   /** the wind there against the strictest limits of the platforms based there (null: no
    *  scenario weather in this run) */
   weather?: HubWind | null
+  /** rules 8: the plays a person adopted for it, in force (docs/design/incidents.md) */
+  plays?: Play[]
   /** its own vehicles (based here) */
   vehicles: number
   counts: Counts

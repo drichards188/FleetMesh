@@ -77,20 +77,34 @@ export interface HubView {
   line: string
   /** its own vehicles a person should look at: needing attention, or silent */
   needYou: number
+  /** its own vehicles whose order or alert the watch officer is deciding now */
+  withOfficer: number
+  /** rules 8: the play in force there, in a word ("Ground stop", "Within limits") */
+  play: string | null
   wind: WindJudgement | null
 }
 
-type Base = Pick<FleetBase, 'id' | 'name' | 'counts'> & Partial<Pick<FleetBase, 'open' | 'weather' | 'packs' | 'pads' | 'vehicles' | 'here' | 'visitors'>>
+type Base = Pick<FleetBase, 'id' | 'name' | 'counts'> & Partial<Pick<FleetBase, 'open' | 'weather' | 'packs' | 'pads' | 'vehicles' | 'here' | 'visitors' | 'plays'>>
 
-/** A hub as its mark on the map says it. */
-export function hubView(b: Base): HubView {
+/** A play in a word or two. */
+const playWord = (b: Base) => {
+  const p = b.plays?.[0]
+  return p ? (p.kind === 'ground_stop' ? 'Ground stop' : 'Within limits') : null
+}
+
+/** A hub as its mark on the map says it. `withOfficer`: its own vehicles whose order or alert the
+ *  watch officer is deciding now (the fleet view's why says so). */
+export function hubView(b: Base, withOfficer = 0): HubView {
   const c = b.counts
   const needYou = n(c, 'attention', 'offline')
   const wind = judgeWind(b.weather)
   const closed = b.open === false
-  const holding = n(c, 'holding')
+  const holding = Math.max(0, n(c, 'holding') - withOfficer)
+  const play = playWord(b)
   const parts: string[] = []
   if (needYou) parts.push(`${needYou} need${needYou === 1 ? 's' : ''} you`)
+  if (withOfficer) parts.push(`officer on ${withOfficer}`)
+  if (play) parts.push(play)
   if (closed) parts.push('Closed')
   else if (wind?.band === 'over') parts.push(`${stopWord(wind)}: ${wind.by === 'gust' ? 'gusts' : 'wind'} ${m1(wind.value)} m/s`)
   else if (wind?.band === 'marginal') parts.push(`Marginal: ${wind.by === 'gust' ? 'gusts' : 'wind'} ${m1(wind.value)} m/s`)
@@ -100,15 +114,16 @@ export function hubView(b: Base): HubView {
   const ready = n(c, 'ready')
   if (ready) parts.push(`${ready} ready`)
   if (!parts.length) parts.push(n(c, 'charging') ? `${n(c, 'charging')} charging` : 'no vehicles')
-  const tone: HubTone = needYou || wind?.band === 'over' ? 'bad' : closed ? 'closed' : wind?.band === 'marginal' || holding ? 'warn' : 'quiet'
-  return { id: b.id, name: b.name || b.id, tone, line: parts.slice(0, 3).join(' · '), needYou, wind }
+  const tone: HubTone = needYou || wind?.band === 'over' ? 'bad' : closed ? 'closed' : wind?.band === 'marginal' || holding || play ? 'warn' : 'quiet'
+  return { id: b.id, name: b.name || b.id, tone, line: parts.slice(0, 3).join(' · '), needYou, withOfficer, play, wind }
 }
 
 /** A hub's state in two or three words, for its details' header, and their colour: whether it can
  *  fly first, then whether it waits on the person. */
-export function stateWords(v: Pick<HubView, 'tone' | 'wind' | 'needYou'>, closed = false): { words: string; tone: 'ok' | 'warn' | 'bad' | 'closed' } {
+export function stateWords(v: Pick<HubView, 'tone' | 'wind' | 'needYou'> & Partial<Pick<HubView, 'play'>>, closed = false): { words: string; tone: 'ok' | 'warn' | 'bad' | 'closed' } {
   if (closed) return { words: 'Closed', tone: 'closed' }
   if (v.wind?.band === 'over') return { words: stopWord(v.wind), tone: 'bad' }
+  if (v.play === 'Ground stop') return { words: 'Ground stop', tone: 'warn' }
   if (v.wind?.band === 'marginal') return { words: 'Marginal wind', tone: 'warn' }
   if (v.needYou) return { words: 'Needs you', tone: 'bad' }
   if (v.tone === 'warn') return { words: 'Holding', tone: 'warn' }
@@ -116,14 +131,16 @@ export function stateWords(v: Pick<HubView, 'tone' | 'wind' | 'needYou'>, closed
 }
 
 /** A site's mark, zoomed out: its hubs together, the worst of them deciding the tone. */
-export function siteView(id: string, name: string, hubs: readonly Base[]): HubView {
+export function siteView(id: string, name: string, hubs: readonly Base[], withOfficer: (hub: string) => number = () => 0): HubView {
   const counts: Counts = {}
   for (const h of hubs) for (const [k, v] of Object.entries(h.counts)) counts[k as FleetStateId] = (counts[k as FleetStateId] ?? 0) + (v ?? 0)
-  const views = hubs.map(hubView)
+  const views = hubs.map((h) => hubView(h, withOfficer(h.id)))
   const worst = views.reduce<WindJudgement | null>((w, v) => (v.wind && (!w || RANK[v.wind.band] > RANK[w.band]) ? v.wind : w), null)
-  const v = hubView({ id, name, counts, open: hubs.some((h) => h.open !== false), weather: null })
+  const officer = views.reduce((s, x) => s + x.withOfficer, 0)
+  const v = hubView({ id, name, counts, open: hubs.some((h) => h.open !== false), weather: null, plays: hubs.flatMap((h) => h.plays ?? []) }, officer)
   const parts = v.line.split(' · ')
-  if (worst && worst.band !== 'ok') parts.splice(v.needYou ? 1 : 0, 0, `${worst.band === 'over' ? stopWord(worst) : 'Marginal'}: ${worst.by === 'gust' ? 'gusts' : 'wind'} ${m1(worst.value)} m/s`)
+  const at = (v.needYou ? 1 : 0) + (v.withOfficer ? 1 : 0) + (v.play ? 1 : 0)
+  if (worst && worst.band !== 'ok') parts.splice(at, 0, `${worst.band === 'over' ? stopWord(worst) : 'Marginal'}: ${worst.by === 'gust' ? 'gusts' : 'wind'} ${m1(worst.value)} m/s`)
   const order: HubTone[] = ['quiet', 'closed', 'warn', 'bad']
   const tone = views.reduce<HubTone>((t, x) => (order.indexOf(x.tone) > order.indexOf(t) ? x.tone : t), v.tone)
   return { ...v, tone, line: parts.slice(0, 3).join(' · '), wind: worst }
@@ -186,8 +203,8 @@ function list(parts: string[]): string {
 }
 
 /** A hub in full, for its details. */
-export function hubDetails(b: Base, parcels: readonly Parcel[], elapsedS: number): HubDetails {
-  const v = hubView(b)
+export function hubDetails(b: Base, parcels: readonly Parcel[], elapsedS: number, withOfficer = 0): HubDetails {
+  const v = hubView(b, withOfficer)
   const c = b.counts
   const w = v.wind
   const summary: string[] = []
@@ -201,6 +218,8 @@ export function hubDetails(b: Base, parcels: readonly Parcel[], elapsedS: number
   else summary.push('Operating normally.')
   // what needs the person
   summary.push(v.needYou ? `${v.needYou} of its vehicles need${v.needYou === 1 ? 's' : ''} you.` : 'Nothing here needs you.')
+  if (v.withOfficer) summary.push(`The watch officer is deciding ${v.withOfficer} of its vehicles' orders or alerts; what it cannot settle comes to you.`)
+  if (v.play) summary.push(`${v.play} in force (play ${b.plays?.[0]?.id} by ${b.plays?.[0]?.by}).`)
   // its vehicles
   const doing = [
     [n(c, 'loading', 'outbound', 'delivering'), 'out on deliveries'],

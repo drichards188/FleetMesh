@@ -77,7 +77,7 @@ import { useFleet } from './useFleet'
 import { HubDetails } from './HubDetails'
 import { hubDetails } from './hubSummary'
 import { fallbackFleet, type FleetDoc } from './fleetModel'
-import { baseLabelCandidates, type BaseMarker, collapseAtBases, EXPAND_ZOOM, SITE_ZOOM, toggleExpanded } from './fleetMap'
+import { baseLabelCandidates, type BaseMarker, collapseAtBases, EXPAND_ZOOM, SITE_ZOOM, toggleExpanded, WITH_OFFICER } from './fleetMap'
 import { BASE_PICK_LAYERS, buildBaseLayers } from './fleetMapLayers'
 import { latestOrders } from './orderWords'
 
@@ -366,8 +366,8 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
   // the hub whose details are open, and what they say (hubSummary.ts)
   const hubSelBase = hubSel ? (fleetDoc.bases.find((b) => b.id === hubSel) ?? null) : null
   const hubSelDetails = useMemo(
-    () => (hubSelBase ? hubDetails(hubSelBase, delivery.parcels.parcels, delivery.parcels.elapsed_s) : null),
-    [hubSelBase, delivery.parcels],
+    () => (hubSelBase ? hubDetails(hubSelBase, delivery.parcels.parcels, delivery.parcels.elapsed_s, fleetDoc.vehicles.filter((v) => v.base === hubSelBase.id && WITH_OFFICER.test(v.why)).length) : null),
+    [hubSelBase, delivery.parcels, fleetDoc.vehicles],
   )
   const selIntent = inboxSel?.kind === 'intent' ? inboxSel.id : null
   const preview = useMemo(
@@ -812,6 +812,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
     <ErrorBoundary key="inbox" name="Inbox" className="floating">
       <InboxPanel
         decisions={decisions}
+        bases={fleetDoc.bases}
         vehicles={allVehicles}
         now={now}
         tab={inboxTab}
@@ -976,6 +977,7 @@ export default function App({ onMenu }: { onMenu?: () => void }) {
               <ErrorBoundary name="Hub details" className="floating">
                 <HubDetails
                   d={hubSelDetails}
+                  plays={hubSelBase.plays ?? []}
                   weather={hubSelBase.weather ?? null}
                   closed={hubSelBase.open === false}
                   needing={fleetDoc.vehicles.filter((v) => v.base === hubSelBase.id && (v.state === 'attention' || v.state === 'offline'))}

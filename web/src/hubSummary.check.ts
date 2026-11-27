@@ -29,6 +29,8 @@ assert.deepEqual(hubView({ ...base, counts: { ready: 32, outbound: 4, delivering
   tone: 'quiet',
   line: '6 out · 32 ready',
   needYou: 0,
+  withOfficer: 0,
+  play: null,
   wind: { band: 'ok', by: 'gust', value: 7, soft: 11, hard: 14, who: 'drones' },
 })
 const marginal = hubView({ ...base, counts: { attention: 2, holding: 18, outbound: 6, ready: 12 }, weather: drone(12.5) })
@@ -73,4 +75,10 @@ assert.equal(stateWords(hubView({ ...base, counts: {}, open: false }), true).wor
 // boats are stopped, not grounded
 const boat: HubWind = { ...drone(17), platform: 'delivery_boat', gust_soft_mps: 13, gust_hard_mps: 16 }
 assert.equal(hubView({ ...base, counts: { ready: 4 }, weather: boat }).line, 'Stopped: gusts 17.0 m/s · 4 ready')
+// the officer's share and a play in force, after what needs the person
+const busy = hubView({ ...base, counts: { holding: 5, ready: 30 }, weather: drone(12.5), plays: [{ id: 1, kind: 'ground_stop', hub: 'hub-crissy', until_t: 0, by: 'op-1' }] }, 3)
+assert.equal(busy.line, 'officer on 3 · Ground stop · Marginal: gusts 12.5 m/s', 'who has it, then the play, then the wind')
+assert.equal(busy.tone, 'warn')
+assert.deepEqual(stateWords({ ...busy, wind: null }), { words: 'Ground stop', tone: 'warn' })
+assert.ok(hubDetails({ ...base, counts: { holding: 5 }, plays: busy.play ? [{ id: 1, kind: 'ground_stop', hub: 'hub-crissy', until_t: 0, by: 'op-1' }] : [] }, [], 0, 3).summary.some((x) => x.startsWith('The watch officer is deciding 3')))
 console.log('hubSummary: ok')

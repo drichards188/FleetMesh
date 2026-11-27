@@ -1,4 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { PlayInForce } from './IncidentCard'
+import type { Play } from './playWords'
 import { FloatGrip } from './FloatingPanel'
 import { useFloatBar } from './floating'
 import type { FleetVehicle } from './fleetModel'
@@ -25,6 +27,8 @@ interface Props {
   /** what the person can do now for a vehicle that needs them: its card in the Inbox (an order
    *  to decide, an alert), or nothing yet (its details are a click on its name) */
   actFor: (uid: number) => { label: string; run: () => void } | null
+  /** rules 8: the plays in force at it */
+  plays: Play[]
   onClose: () => void
 }
 
@@ -67,7 +71,8 @@ function WindGauge({ w }: { w: HubWind }) {
 /** A hub, one click from its mark on the map: a few plain sentences first (whether it can fly, what
  *  needs you, what its vehicles and parcels are doing), then the figures behind them. Read-only:
  *  its links show vehicles, the parcels list or its vehicles on the map, and send nothing. */
-export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen, onToggleOpen, onVehicle, onParcels, actFor, onClose }: Props) {
+export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen, onToggleOpen, onVehicle, onParcels, actFor, plays, onClose }: Props) {
+  const [said, setSaid] = useState<{ text: string; tone: 'ok' | 'bad' } | null>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -100,6 +105,16 @@ export function HubDetails({ d, weather, closed, needing, nameOf, open, canOpen,
             </p>
           ))}
         </div>
+
+        {plays.length > 0 && (
+          <section>
+            <h4>Play in force</h4>
+            {plays.map((p) => (
+              <PlayInForce key={p.id} play={p} onDone={(text, tone) => setSaid({ text, tone })} />
+            ))}
+            {said && <p className={said.tone === 'bad' ? 'bad' : 'muted'}>{said.text}</p>}
+          </section>
+        )}
 
         {needing.length > 0 && (
           <section>

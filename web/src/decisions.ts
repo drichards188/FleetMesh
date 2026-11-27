@@ -3,6 +3,7 @@ import { getAuth, operatorFetch, operatorHeaders, useAuth } from './auth'
 import type { LngLat } from './types'
 import type { GroupSpec, Share } from './groupOrders'
 import type { ReviewNodeLoss, ReviewNodeLost } from './nodeLoss'
+import type { Incident, Play, PlayRec } from './playWords'
 
 /** The decision layer as the bridge serves it: GET /api/inbox, GET /api/intents and the
  *  WebSocket `{"type":"decisions"}` message. Intent times are wall-clock milliseconds on the
@@ -230,6 +231,11 @@ export interface Inbox {
   queued?: Intent[]
   /** rules 30: the review's loss items (presumed or flagged, and confirmed); absent before rules 30 */
   review?: { node_losses?: ReviewNodeLoss[]; nodes_lost?: ReviewNodeLost[] }
+  /** rules 8 (docs/design/incidents.md): the items of one cause at one hub, the plays in force and
+   *  the watch officer's recommendations; absent from an older bridge */
+  incidents?: Incident[]
+  plays?: Play[]
+  recommended_plays?: PlayRec[]
   counts: {
     pending: number
     alerts: number
